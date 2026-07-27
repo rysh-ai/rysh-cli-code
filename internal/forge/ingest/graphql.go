@@ -19,11 +19,12 @@ import (
 // composes a document and the executor POSTs {query, variables} to the
 // endpoint.
 //
-// Subscription fields are NOT exposed as operations: subscriptions are push
-// streams delivered over graphql-ws (or SSE), which a single request/response
-// POST tool cannot honestly serve — a "subscription tool" would return nothing
-// or hang. They are recorded in API.Skipped so the CLI reports the exclusion
-// specifically instead of dropping subscriptionType on the floor.
+// Subscription fields are push streams delivered over graphql-ws, which a
+// single request/response POST tool cannot honestly serve — so they are
+// recorded in API.Streams and exposed at runtime as background streaming
+// sessions (graphql_subscribe starts a graphql-transport-ws subscription whose
+// "next" frames land in a bounded ring buffer; the model polls and stops the
+// session). Keeping them out of Operations keeps unary generators honest.
 func GraphQL(data []byte) (*ir.API, error) {
 	var env struct {
 		Data struct {
@@ -55,16 +56,17 @@ func GraphQL(data []byte) (*ir.API, error) {
 		Schemas:    map[string]*ir.Schema{},
 	}
 
-	addRoot := func(ref *gqlTypeRef, mutating bool) {
+	buildOps := func(ref *gqlTypeRef, mutating bool) []ir.Operation {
 		if ref == nil {
-			return
+			return nil
 		}
 		t := byName[ref.Name]
 		if t == nil {
-			return
+			return nil
 		}
 		fields := append([]gqlField(nil), t.Fields...)
 		sort.Slice(fields, func(i, j int) bool { return fields[i].Name < fields[j].Name })
+		var ops []ir.Operation
 		for _, f := range fields {
 			op := ir.Operation{
 				ID:       sanitizeID(f.Name),
@@ -84,32 +86,19 @@ func GraphQL(data []byte) (*ir.API, error) {
 				}
 				op.RequestBody = body
 			}
-			api.Operations = append(api.Operations, op)
+			ops = append(ops, op)
 		}
+		return ops
 	}
-	addRoot(schema.QueryType, false)
-	addRoot(schema.MutationType, true)
+	api.Operations = append(api.Operations, buildOps(schema.QueryType, false)...)
+	api.Operations = append(api.Operations, buildOps(schema.MutationType, true)...)
 
-	// Subscription fields: counted and reported, never exposed (see the doc
-	// comment above).
-	if schema.SubscriptionType != nil {
-		if t := byName[schema.SubscriptionType.Name]; t != nil {
-			fields := append([]gqlField(nil), t.Fields...)
-			sort.Slice(fields, func(i, j int) bool { return fields[i].Name < fields[j].Name })
-			for _, f := range fields {
-				api.Skipped = append(api.Skipped, ir.SkippedOperation{
-					ID:   sanitizeID(f.Name),
-					Kind: ir.SkipSubscription,
-				})
-			}
-		}
-	}
+	// Subscription fields: exposed as streaming sessions over graphql-ws (see
+	// the doc comment above), never as unary operations.
+	api.Streams = append(api.Streams, buildOps(schema.SubscriptionType, false)...)
 
-	if len(api.Operations) == 0 {
-		if n := len(api.Skipped); n > 0 {
-			return nil, fmt.Errorf("introspection contained no query/mutation fields — only %d subscription field(s), which forge does not expose as tools yet", n)
-		}
-		return nil, fmt.Errorf("introspection contained no query/mutation fields")
+	if len(api.Operations) == 0 && len(api.Streams) == 0 {
+		return nil, fmt.Errorf("introspection contained no query/mutation/subscription fields")
 	}
 	return api, nil
 }

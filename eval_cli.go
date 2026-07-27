@@ -14,23 +14,34 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/eval"
 )
 
+// recordedDirName is the per-case directory holding a recorded provider
+// transcript (design 009 deterministic mode): evals/<case>/recorded/.
+// Produce one with `rysh run --record evals/<case>/recorded ...` running the
+// case's task; `rysh eval --replay` then re-runs every case against it.
+const recordedDirName = "recorded"
+
 // runEval implements `rysh eval` (design 009 §3.2), grading fixture cases
-// (task.md + expect.yaml) in one of two modes:
+// (task.md + expect.yaml + optional judge.md) in one of three modes:
 //
 //	rysh eval <dir> --result <result.json>   structural mode: grade a
-//	    produced/recorded Result artifact (no token spend)
+//	    produced/recorded Result artifact (no run, no token spend)
 //	rysh eval <dir> --live                   live mode: run each case's
 //	    task.md through the SAME headless engine as `rysh run` (in-process,
 //	    executeHeadlessRun — never shelling out to rysh itself), then grade
-//	    the Result the run actually produced; burns tokens
+//	    the Result the run actually produced; burns tokens. Cases with a
+//	    judge.md additionally get an LLM-judge pass — the case passes only
+//	    when assertions AND judge pass.
+//	rysh eval <dir> --replay                 deterministic mode: like --live
+//	    but each case's provider turns are served from its recorded/
+//	    transcript (rysh run --record) — reproducible, key-free, zero token
+//	    spend. No live seat exists, so the judge is skipped with an explicit
+//	    TAP note; structural assertions are the gate (design 009 §3.2/§5).
 //
 // Output is TAP per case; exit is 0 when every case passed, 1 otherwise.
-// Deterministic record/replay (the design's default mode) and
-// --update-baseline are future work — they depend on the design-001 proxy
-// request log as recorder.
+// `rysh eval --update-baseline` (golden-transcript refresh) is future work.
 func runEval(cfg config.Config, configPath string, args []string) error {
 	var dir, resultPath string
-	var live, wt bool
+	var live, replay, wt bool
 	var providerName string
 	timeout := runDefaultTimeout
 	for i := 0; i < len(args); i++ {
@@ -42,6 +53,8 @@ func runEval(cfg config.Config, configPath string, args []string) error {
 			}
 		case "--live":
 			live = true
+		case "--replay":
+			replay = true
 		case "--worktree":
 			wt = true
 		case "--provider":
@@ -64,8 +77,9 @@ func runEval(cfg config.Config, configPath string, args []string) error {
 			}
 		}
 	}
-	if dir == "" || (resultPath == "" && !live) || (resultPath != "" && live) {
-		return errors.New("usage: rysh eval <evals-dir> --result <result.json> | --live [--timeout <dur>] [--worktree] [--provider <name>]")
+	engine := live || replay
+	if dir == "" || (resultPath == "" && !engine) || (resultPath != "" && engine) {
+		return errors.New("usage: rysh eval <evals-dir> --result <result.json> | --live | --replay [--timeout <dur>] [--worktree] [--provider <name>]")
 	}
 
 	cases, err := discoverCases(dir)
@@ -76,7 +90,7 @@ func runEval(cfg config.Config, configPath string, args []string) error {
 		return fmt.Errorf("no eval cases found in %s (need task.md + expect.yaml)", dir)
 	}
 
-	if live {
+	if engine {
 		// Reuse `rysh run`'s flag validation for the per-case run options
 		// (provider name checking, budget/worktree semantics stay identical).
 		runArgs := []string{"--timeout", timeout.String()}
@@ -98,13 +112,20 @@ func runEval(cfg config.Config, configPath string, args []string) error {
 			}
 			cfg = config.LoadFrom(configPath)
 		}
-		run := func(prompt string) (runOutcome, eval.Result, error) {
+		run := func(prompt, replayDir string) (runOutcome, eval.Result, error) {
 			opts := baseOpts
 			opts.Prompt = prompt
-			outcome, res, _, err := executeHeadlessRun(cfg, configPath, opts)
+			opts.ReplayDir = replayDir
+			outcome, res, _, _, err := executeHeadlessRun(cfg, configPath, opts)
 			return outcome, res, err
 		}
-		passed, total := runEvalLive(cases, run, os.Stdout)
+		// The judge seat needs a live provider; deterministic replay has
+		// none, so no judge is constructed (runEvalLive notes the skip).
+		var judge evalJudgeFunc
+		if !replay {
+			judge = makeEvalJudge(cfg)
+		}
+		passed, total := runEvalLive(cases, run, judge, replay, os.Stdout)
 		if passed != total {
 			return fmt.Errorf("eval: %d/%d cases failed", total-passed, total)
 		}
@@ -153,16 +174,25 @@ func runEval(cfg config.Config, configPath string, args []string) error {
 }
 
 // liveRunFunc runs one case's prompt headlessly and returns the outcome plus
-// the honestly-derived Result. It is a seam: production wires
-// executeHeadlessRun; tests substitute a hermetic runner (no daemon, no key).
-type liveRunFunc func(prompt string) (runOutcome, eval.Result, error)
+// the honestly-derived Result. replayDir is empty in live mode; in replay
+// mode it names the case's recorded transcript directory. It is a seam:
+// production wires executeHeadlessRun; tests substitute a hermetic runner
+// (no daemon, no key).
+type liveRunFunc func(prompt, replayDir string) (runOutcome, eval.Result, error)
 
-// runEvalLive runs each case through the live runner and grades what it
-// produced, emitting TAP to w. A run that ends on a non-done outcome
-// (gate-blocked, budget-exhausted, timeout, error) fails its case — its
-// partial Result is still graded so the diagnostics name BOTH the outcome and
-// any assertion misses.
-func runEvalLive(cases []string, run liveRunFunc, w io.Writer) (passed, total int) {
+// runEvalLive runs each case through the runner and grades what it produced,
+// emitting TAP to w. A run that ends on a non-done outcome (gate-blocked,
+// budget-exhausted, timeout, error) fails its case — its partial Result is
+// still graded so the diagnostics name BOTH the outcome and any assertion
+// misses.
+//
+// Judge composition (design 009): when the case has a judge.md and a judge
+// seat exists, the judge runs after the assertions and the case passes only
+// when BOTH pass; the judge's reasoning always lands in the TAP output as a
+// comment. In replay mode (replay=true) the judge is skipped with an explicit
+// note — a recorded transcript has no live seat to judge with, and structural
+// assertions are the design's hard gate.
+func runEvalLive(cases []string, run liveRunFunc, judge evalJudgeFunc, replay bool, w io.Writer) (passed, total int) {
 	fmt.Fprintf(w, "TAP version 13\n")
 	for _, cdir := range cases {
 		total++
@@ -171,19 +201,42 @@ func runEvalLive(cases []string, run liveRunFunc, w io.Writer) (passed, total in
 			fmt.Fprintf(w, "not ok - %s (%v)\n", filepath.Base(cdir), err)
 			continue
 		}
-		outcome, result, err := run(c.Prompt)
+		replayDir := ""
+		if replay {
+			replayDir = filepath.Join(cdir, recordedDirName)
+		}
+		outcome, result, err := run(c.Prompt, replayDir)
 		if err != nil {
 			fmt.Fprintf(w, "not ok - %s (run failed: %v)\n", c.Name, err)
 			continue
 		}
 		assertions := eval.Evaluate(c.Expect, result)
-		ok := eval.Passed(assertions) && outcome.ExitCode == runExitDone
+		structuralOK := eval.Passed(assertions) && outcome.ExitCode == runExitDone
+
+		// Judge pass (only when the case asks for one).
+		judgeRan, judgePass := false, true
+		judgeReason := ""
+		var judgeErr error
+		judgeSkipNote := ""
+		if c.Judge != "" {
+			switch {
+			case replay:
+				judgeSkipNote = "judge: skipped in replay mode (no live judge seat; structural assertions gate)"
+			case judge == nil:
+				judgeErr = errors.New("case has judge.md but no judge seat is configured")
+			default:
+				judgeRan = true
+				judgePass, judgeReason, judgeErr = judge(c, outcome, result)
+			}
+		}
+
+		ok := structuralOK && judgeErr == nil && judgePass
 		if ok {
 			passed++
 			fmt.Fprintf(w, "ok - %s\n", c.Name)
-			continue
+		} else {
+			fmt.Fprintf(w, "not ok - %s\n", c.Name)
 		}
-		fmt.Fprintf(w, "not ok - %s\n", c.Name)
 		if outcome.ExitCode != runExitDone {
 			detail := outcome.Detail
 			if detail != "" {
@@ -195,6 +248,16 @@ func runEvalLive(cases []string, run liveRunFunc, w io.Writer) (passed, total in
 			if !a.Pass {
 				fmt.Fprintf(w, "  # %s: %s\n", a.Name, a.Detail)
 			}
+		}
+		switch {
+		case judgeErr != nil:
+			fmt.Fprintf(w, "  # judge error: %v\n", judgeErr)
+		case judgeRan && judgePass:
+			fmt.Fprintf(w, "  # judge: PASS — %s\n", judgeReason)
+		case judgeRan && !judgePass:
+			fmt.Fprintf(w, "  # judge: FAIL — %s\n", judgeReason)
+		case judgeSkipNote != "":
+			fmt.Fprintf(w, "  # %s\n", judgeSkipNote)
 		}
 	}
 	fmt.Fprintf(w, "1..%d\n", total)

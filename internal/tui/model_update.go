@@ -274,6 +274,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handlePaste(msg)
 		}
 
+		// Dedicated replay pane (design 006 v2): while focused, its keys are
+		// playback controls — space pause/resume, ←/→ seek ∓10s, +/- speed,
+		// q close. Claimed BEFORE the global key switch so ←/→ reach the
+		// player instead of the input line; only the control keys are claimed,
+		// so multiplexer chords and esc still work (never trap the user).
+		if handled, cmd := m.updateReplayPaneInput(msg); handled {
+			return m, cmd
+		}
+
 		// Voice prompting: the configured hotkey toggles recording. While
 		// recording, Esc cancels (handled in the "esc" case below). Disabled
 		// in raw mode (handled earlier — raw keys go to the PTY) and, for the

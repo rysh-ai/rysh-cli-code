@@ -31,7 +31,7 @@ func TestRegisterGraphQL(t *testing.T) {
 	api := graphqlAPI()
 	reg := sharedtools.NewToolRegistry()
 	exec := runtime.NewGraphQLExecutor("https://x/graphql", nil, runtime.Credential{}, runtime.Options{})
-	names := RegisterGraphQL(reg, api, exec, Policy{Prefix: "gql_"})
+	names := RegisterGraphQL(reg, api, exec, nil, Policy{Prefix: "gql_"})
 
 	if len(names) != 2 {
 		t.Fatalf("want 2 graphql tools, got %d: %v", len(names), names)
@@ -53,7 +53,7 @@ func TestGraphQLQueryApprovalHeuristic(t *testing.T) {
 	api := graphqlAPI()
 	reg := sharedtools.NewToolRegistry()
 	exec := runtime.NewGraphQLExecutor("https://x/graphql", nil, runtime.Credential{}, runtime.Options{})
-	RegisterGraphQL(reg, api, exec, Policy{Prefix: "gql_"})
+	RegisterGraphQL(reg, api, exec, nil, Policy{Prefix: "gql_"})
 
 	q, _ := reg.Get("gql_graphql_query")
 	if !q.RequiresApproval(json.RawMessage(`{"query":"mutation { createUser(name:\"x\"){ id } }"}`)) {
@@ -74,7 +74,7 @@ func TestGraphQLQueryExecutes(t *testing.T) {
 	api := graphqlAPI()
 	reg := sharedtools.NewToolRegistry()
 	exec := runtime.NewGraphQLExecutor(srv.URL, nil, runtime.Credential{}, runtime.Options{})
-	RegisterGraphQL(reg, api, exec, Policy{Prefix: "gql_"})
+	RegisterGraphQL(reg, api, exec, nil, Policy{Prefix: "gql_"})
 
 	q, _ := reg.Get("gql_graphql_query")
 	out, err := q.Execute(context.Background(), json.RawMessage(`{"query":"query { user(id:\"u1\"){ id } }","jq_filter":".data.user.id"}`))

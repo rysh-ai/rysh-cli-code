@@ -20,10 +20,14 @@ import (
 // never stored here; CredentialEnv names an environment variable that holds the
 // credential at runtime.
 type Integration struct {
-	Name          string `json:"name"`
-	Source        string `json:"source"`             // "openapi" | "graphql"
-	SpecFile      string `json:"spec_file"`          // path under .rysh/forge/<name>/, relative to workDir
-	BaseURL       string `json:"base_url,omitempty"` // override the spec's server URL
+	Name     string `json:"name"`
+	Source   string `json:"source"`             // "openapi" | "graphql" | "grpc"
+	SpecFile string `json:"spec_file"`          // path under .rysh/forge/<name>/, relative to workDir
+	BaseURL  string `json:"base_url,omitempty"` // override the spec's server URL
+	// WSURL overrides the websocket URL used for GraphQL subscriptions. When
+	// empty, it is derived from the endpoint by scheme convention (http→ws,
+	// https→wss). Set with `forge add --ws-url`.
+	WSURL         string `json:"ws_url,omitempty"`
 	CredentialEnv string `json:"credential_env,omitempty"`
 	BasicUserEnv  string `json:"basic_user_env,omitempty"`
 	BasicPassEnv  string `json:"basic_pass_env,omitempty"`

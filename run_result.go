@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	sharedmsg "github.com/rysh-ai/rysh-cli-shared/msg"
 
@@ -43,6 +44,21 @@ type runCollector struct {
 	commands []string
 	tokens   int64
 	costMuSD int64
+
+	// Audit-plane observations (design 009 --json-audit): every step event
+	// (tool calls are paired from these), every approval request, every
+	// governance-proxy audit record (the only bus surface carrying SNAT
+	// redaction counts), and the usage split. All copied verbatim from what
+	// the session actually published.
+	steps        []msg.MsgAgenticStep
+	approvals    []msg.MsgApprovalRequest
+	approvalTS   []int64 // observation time (ms) per approvals entry — the message carries none
+	proxyAudits  []msg.MsgProxyRequestAudit
+	inTokens     int64
+	outTokens    int64
+	cacheRead    int64
+	cacheWrite   int64
+	usageRecords int
 }
 
 func newRunCollector(budget runBudget) *runCollector {
@@ -66,7 +82,15 @@ func (c *runCollector) OnOutput(m *msg.MsgAgenticOutput) {
 // rysh-shared/agentic stepTitle); the prefix is stripped so the Result carries
 // the command text itself.
 func (c *runCollector) OnStep(m *msg.MsgAgenticStep) {
-	if m == nil || m.Kind != sharedmsg.StepToolStart || m.Origin != "bash" {
+	if m == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Every step event is kept verbatim for the audit artifact (tool-call
+	// pairing happens at assembly time).
+	c.steps = append(c.steps, *m)
+	if m.Kind != sharedmsg.StepToolStart || m.Origin != "bash" {
 		return
 	}
 	cmd := strings.TrimPrefix(m.Title, m.Origin+": ")
@@ -76,9 +100,33 @@ func (c *runCollector) OnStep(m *msg.MsgAgenticStep) {
 		// record the raw title as if it were a command.
 		return
 	}
+	c.commands = append(c.commands, cmd)
+}
+
+// OnApproval records an approval request for the audit artifact. In a
+// headless run every observed request is terminal (fail closed) — the
+// decision is recorded as such at assembly time.
+func (c *runCollector) OnApproval(m *msg.MsgApprovalRequest) {
+	if m == nil {
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.commands = append(c.commands, cmd)
+	c.approvals = append(c.approvals, *m)
+	c.approvalTS = append(c.approvalTS, time.Now().UnixMilli())
+}
+
+// OnProxyAudit records one governance-proxy audit record (design 001 §4.5).
+// This is the only bus surface that carries SNAT redaction counts; it only
+// fires for traffic routed through the governance proxy (wrapped third-party
+// CLIs), never for rysh's own direct provider calls.
+func (c *runCollector) OnProxyAudit(m *msg.MsgProxyRequestAudit) {
+	if m == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.proxyAudits = append(c.proxyAudits, *m)
 }
 
 // OnUsage folds one usage-ledger record into the totals and reports whether
@@ -92,6 +140,11 @@ func (c *runCollector) OnUsage(r *msg.MsgUsageRecord) (detail string, breachedNo
 	defer c.mu.Unlock()
 	c.tokens += int64(r.InTokens) + int64(r.OutTokens) + int64(r.CacheRead) + int64(r.CacheWrite)
 	c.costMuSD += r.CostMicroUSD
+	c.inTokens += int64(r.InTokens)
+	c.outTokens += int64(r.OutTokens)
+	c.cacheRead += int64(r.CacheRead)
+	c.cacheWrite += int64(r.CacheWrite)
+	c.usageRecords++
 	if c.breached || !c.budget.set() {
 		return "", false
 	}

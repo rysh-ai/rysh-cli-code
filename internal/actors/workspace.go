@@ -192,6 +192,13 @@ type WorkspaceActor struct {
 	// when no playback is running.
 	replayPlayer *replay.Player
 
+	// replayPaneID is the dedicated read-only replay pane the active playback
+	// renders into (design 006 v2). "" for an in-pane (--here) playback.
+	// Closing this pane stops the playback (MsgPaneStopped), and TUI playback
+	// controls (MsgReplayControl) are honoured only for this pane. One replay
+	// pane at a time — matching the single replayPlayer field.
+	replayPaneID string
+
 	// Local share tracking: paneID/entityID → shareID.
 	// Maintained by the workspace so subscribe can resolve without querying the registry.
 	localShares map[string]string
@@ -733,6 +740,16 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 			w.removeMirrorTab(mt.shareID)
 		}
 		w.persistToKV()
+
+	case *msg.MsgReplayControl:
+		// Pane-focused playback controls from the TUI (design 006 v2): space
+		// pause, ←/→ seek, +/- speed. Only honoured for the active replay pane.
+		w.handleReplayControl(m)
+
+	case *msg.MsgPaneStopped:
+		// Every close path lands here (keyboard close, group/lane/tab cascade,
+		// CLI delete): closing the dedicated replay pane stops its playback.
+		w.stopReplayIfPaneClosed(m.PaneID)
 
 	case *MsgMirrorTabUpdate:
 		w.applyMirrorTabUpdate(m)

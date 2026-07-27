@@ -17,8 +17,8 @@ import (
 //	message Item { string text = 1; }
 //	service Feed {
 //	  rpc GetItem(Item) returns (Item);           // unary → exposed
-//	  rpc Watch(Item) returns (stream Item);      // server-streaming → skipped
-//	  rpc Tail(Item) returns (stream Item);       // server-streaming → skipped
+//	  rpc Watch(Item) returns (stream Item);      // server-streaming → streaming session
+//	  rpc Tail(Item) returns (stream Item);       // server-streaming → streaming session
 //	  rpc Chat(stream Item) returns (stream Item);// bidi → skipped
 //	}
 func streamingDescriptorSet(t *testing.T) []byte {
@@ -70,12 +70,12 @@ func streamingDescriptorSet(t *testing.T) []byte {
 	return b
 }
 
-// TestForgeAdd_ReportsSkippedStreamingMethods pins the add-time summary for a
-// gRPC source with streaming methods: the message must be specific (count +
-// method names per kind) so "streaming is not exposed" always matches what the
-// ingester actually did — the old static text claimed streaming methods were
-// not exposed while the ingester emitted every one of them as a unary tool.
-func TestForgeAdd_ReportsSkippedStreamingMethods(t *testing.T) {
+// TestForgeAdd_ReportsStreamingRouting pins the add-time summary for a gRPC
+// source with streaming methods (design 015 §2.2): server-streaming methods
+// are reported as EXPOSED via streaming sessions (specific names), while
+// client-streaming/bidi methods are reported as skipped with the reason — so
+// every claim matches what the ingester actually did.
+func TestForgeAdd_ReportsStreamingRouting(t *testing.T) {
 	workDir := t.TempDir()
 	specPath := filepath.Join(workDir, "feed.pb")
 	if err := os.WriteFile(specPath, streamingDescriptorSet(t), 0o644); err != nil {
@@ -93,9 +93,13 @@ func TestForgeAdd_ReportsSkippedStreamingMethods(t *testing.T) {
 	}
 	got := out.String()
 
-	want := "3 streaming methods skipped (server-streaming: Feed_Tail, Feed_Watch; bidi: Feed_Chat)"
-	if !strings.Contains(got, want) {
-		t.Errorf("add output missing specific streaming summary %q, got:\n%s", want, got)
+	wantExposed := "2 server-streaming methods exposed as streaming sessions (stream_start / stream_session): Feed_Tail, Feed_Watch"
+	if !strings.Contains(got, wantExposed) {
+		t.Errorf("add output missing streaming-session summary %q, got:\n%s", wantExposed, got)
+	}
+	wantSkipped := "1 streaming method skipped (bidi: Feed_Chat) — client/bidi streams cannot ride a JSON-over-HTTP bridge"
+	if !strings.Contains(got, wantSkipped) {
+		t.Errorf("add output missing client/bidi skip summary %q, got:\n%s", wantSkipped, got)
 	}
 	// Only the unary method may be counted as an operation.
 	if !strings.Contains(got, "1 operations") {
@@ -126,10 +130,11 @@ func TestForgeAdd_NoStreamingNoClaim(t *testing.T) {
 	}
 }
 
-// TestForgeAdd_ReportsSkippedSubscriptions pins the add-time summary for a
-// GraphQL schema with a subscription root: subscriptionType used to be fetched
-// by the introspection document and then silently dropped by the ingester.
-func TestForgeAdd_ReportsSkippedSubscriptions(t *testing.T) {
+// TestForgeAdd_ReportsSubscriptionsExposed pins the add-time summary for a
+// GraphQL schema with a subscription root: subscription fields are reported as
+// exposed via streaming sessions over graphql-ws (they used to be silently
+// dropped, then skipped; now they are real streams).
+func TestForgeAdd_ReportsSubscriptionsExposed(t *testing.T) {
 	const schema = `{"data":{"__schema":{
 	  "queryType":{"name":"Query"},
 	  "subscriptionType":{"name":"Subscription"},
@@ -159,8 +164,11 @@ func TestForgeAdd_ReportsSkippedSubscriptions(t *testing.T) {
 	}
 	got := out.String()
 
-	want := "2 subscription fields skipped (subscriptions are not exposed as tools yet): onEvent, onUserCreated"
+	want := "2 subscription fields exposed as streaming sessions over graphql-ws (graphql_subscribe / stream_session): onEvent, onUserCreated"
 	if !strings.Contains(got, want) {
 		t.Errorf("add output missing subscription summary %q, got:\n%s", want, got)
+	}
+	if strings.Contains(got, "skipped") {
+		t.Errorf("subscriptions must not be reported as skipped anymore, got:\n%s", got)
 	}
 }

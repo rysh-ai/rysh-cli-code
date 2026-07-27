@@ -18,6 +18,7 @@ type ToolCallRequest = sharedprovider.ToolCallRequest
 type TextBlock = sharedprovider.TextBlock
 type AgenticResponse = sharedprovider.AgenticResponse
 type StopReason = sharedprovider.StopReason
+type Usage = sharedprovider.Usage
 
 // StopReason constants re-declared (Go constants cannot be type-aliased).
 const (

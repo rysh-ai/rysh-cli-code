@@ -142,12 +142,12 @@ const sampleGraphQLWithSubs = `{"data":{"__schema":{
   ]
 }}}`
 
-// TestGraphQLSubscriptionsSkipped guards the subscriptionType handling: the
-// introspection document fetches it, and the ingester must consume it — never
-// exposing subscription fields as POST tools (they are graphql-ws push
-// streams), but recording each one in api.Skipped so the CLI can report the
-// exclusion specifically. Before the fix subscriptionType was silently dropped.
-func TestGraphQLSubscriptionsSkipped(t *testing.T) {
+// TestGraphQLSubscriptionsAreStreams guards the subscriptionType handling
+// (design 015 §2.1): subscription fields are never exposed as POST operations
+// (they are graphql-ws push streams) — they land in api.Streams, fully modeled
+// (args included), so the runtime can expose them as streaming sessions and
+// the CLI can report them specifically.
+func TestGraphQLSubscriptionsAreStreams(t *testing.T) {
 	api, err := GraphQL([]byte(sampleGraphQLWithSubs))
 	if err != nil {
 		t.Fatalf("GraphQL: %v", err)
@@ -160,23 +160,28 @@ func TestGraphQLSubscriptionsSkipped(t *testing.T) {
 			t.Errorf("subscription field %s was exposed as an operation", id)
 		}
 	}
-	if len(api.Skipped) != 2 {
-		t.Fatalf("Skipped = %+v, want the 2 subscription fields", api.Skipped)
+	if len(api.Skipped) != 0 {
+		t.Fatalf("Skipped = %+v, want none (subscriptions are streams now)", api.Skipped)
+	}
+	if len(api.Streams) != 2 {
+		t.Fatalf("Streams = %+v, want the 2 subscription fields", api.Streams)
 	}
 	// Sorted by field name for deterministic output.
-	if api.Skipped[0].ID != "onEvent" || api.Skipped[1].ID != "onUserCreated" {
-		t.Errorf("Skipped IDs = [%s %s], want [onEvent onUserCreated]", api.Skipped[0].ID, api.Skipped[1].ID)
+	if api.Streams[0].ID != "onEvent" || api.Streams[1].ID != "onUserCreated" {
+		t.Errorf("Stream IDs = [%s %s], want [onEvent onUserCreated]", api.Streams[0].ID, api.Streams[1].ID)
 	}
-	for _, s := range api.Skipped {
-		if s.Kind != "subscription" {
-			t.Errorf("skipped %s kind = %q, want subscription", s.ID, s.Kind)
-		}
+	onEvent := api.StreamByID("onEvent")
+	if onEvent.RequestBody == nil || onEvent.RequestBody.Properties["topic"] == nil {
+		t.Errorf("subscription args not modeled: %+v", onEvent.RequestBody)
+	}
+	if onEvent.Mutating {
+		t.Errorf("subscriptions are reads; onEvent must be non-mutating")
 	}
 }
 
-// TestGraphQLOnlySubscriptionsRejected pins the error when a schema has ONLY
-// subscription fields: nothing is callable, and the error must say why.
-func TestGraphQLOnlySubscriptionsRejected(t *testing.T) {
+// TestGraphQLOnlySubscriptionsAccepted: a schema with ONLY subscription fields
+// is addable now — the fields are exposed as streaming sessions.
+func TestGraphQLOnlySubscriptionsAccepted(t *testing.T) {
 	const onlySubs = `{"data":{"__schema":{
 	  "subscriptionType":{"name":"Subscription"},
 	  "types":[
@@ -185,12 +190,22 @@ func TestGraphQLOnlySubscriptionsRejected(t *testing.T) {
 	    ]}
 	  ]
 	}}}`
-	_, err := GraphQL([]byte(onlySubs))
-	if err == nil {
-		t.Fatal("GraphQL() with only subscriptions returned nil error, want an error")
+	api, err := GraphQL([]byte(onlySubs))
+	if err != nil {
+		t.Fatalf("GraphQL() with only subscriptions should be accepted, got: %v", err)
 	}
-	if !contains(err.Error(), "subscription") {
-		t.Errorf("error %q should mention subscriptions", err)
+	if len(api.Operations) != 0 || len(api.Streams) != 1 {
+		t.Fatalf("ops=%d streams=%d, want 0 ops and 1 stream", len(api.Operations), len(api.Streams))
+	}
+}
+
+// TestGraphQLNoFieldsRejected pins the error when a schema has no callable or
+// streamable fields at all.
+func TestGraphQLNoFieldsRejected(t *testing.T) {
+	const empty = `{"data":{"__schema":{"types":[]}}}`
+	_, err := GraphQL([]byte(empty))
+	if err == nil {
+		t.Fatal("GraphQL() with no fields returned nil error, want an error")
 	}
 }
 

@@ -21,9 +21,12 @@ import (
 type GraphQLExecutor struct {
 	client   *http.Client
 	endpoint string
-	auth     []ir.AuthScheme
-	cred     Credential
-	opts     Options
+	// wsEndpoint overrides the websocket URL used for subscriptions; when empty
+	// it is derived from endpoint by scheme convention (see WSEndpoint).
+	wsEndpoint string
+	auth       []ir.AuthScheme
+	cred       Credential
+	opts       Options
 }
 
 // NewGraphQLExecutor builds a GraphQL executor for one endpoint.

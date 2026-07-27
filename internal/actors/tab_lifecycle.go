@@ -270,17 +270,22 @@ func (t *TabActor) deleteLaneByID(ctx actor.Context, laneID string) {
 }
 
 // createPaneGroupInLane creates a new pane group in a specific lane by ID.
-func (t *TabActor) createPaneGroupInLane(ctx actor.Context, laneID, title, groupID, workingDir string) {
+// paneID, when non-empty, pre-assigns the initial pane's ID (see
+// MsgTabCreatePaneGroupInLane); paneType marks a special pane variant
+// ("replay" panes never start a shell).
+func (t *TabActor) createPaneGroupInLane(ctx actor.Context, laneID, title, groupID, workingDir, paneID, paneType string) {
 	subject, ok := t.laneSubjects[laneID]
 	if !ok {
 		return
 	}
-	paneID := uuid.NewString()
+	if paneID == "" {
+		paneID = uuid.NewString()
+	}
 	if title == "" {
 		title = petname.Generate(2, "-")
 	}
 	_ = t.pub.Send(subject, &msg.MsgLaneCreatePaneGroup{
-		PaneID: paneID, Title: title, GroupID: groupID, WorkingDir: workingDir,
+		PaneID: paneID, Title: title, GroupID: groupID, WorkingDir: workingDir, PaneType: paneType,
 	})
 	t.paneToLane[paneID] = laneID
 

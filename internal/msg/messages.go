@@ -303,6 +303,10 @@ type MsgLaneCreatePaneGroup struct {
 	Title      string `json:"title"`
 	GroupID    string `json:"group_id,omitempty"`
 	WorkingDir string `json:"working_dir,omitempty"`
+	// PaneType marks the initial pane as a special variant ("replay" panes
+	// never start a shell/PTY). Empty = normal pane. See
+	// MsgTabCreatePaneGroupInLane.
+	PaneType string `json:"pane_type,omitempty"`
 }
 
 // MsgLaneClosePaneGroup closes the active pane group in the lane.
@@ -1075,11 +1079,19 @@ type MsgTabDeleteLane struct {
 // MsgTabCreatePaneGroupInLane creates a new pane group in a specific lane.
 // GroupID / WorkingDir semantics are those of MsgLaneCreatePaneGroup, which
 // this message forwards to (worktree lifecycle, design 008).
+//
+// PaneID, when set, pre-assigns the initial pane's ID (normally minted by the
+// tab) so the sender can address the pane it asked for — the replay pane
+// (design 006 v2) publishes recorded output to that ID at creation time.
+// PaneType, when set, marks the initial pane as a special variant: "replay"
+// panes never start a shell/PTY (read-only by construction).
 type MsgTabCreatePaneGroupInLane struct {
 	LaneID     string `json:"lane_id"`
 	Title      string `json:"title,omitempty"`
 	GroupID    string `json:"group_id,omitempty"`
 	WorkingDir string `json:"working_dir,omitempty"`
+	PaneID     string `json:"pane_id,omitempty"`
+	PaneType   string `json:"pane_type,omitempty"`
 }
 
 // MsgTabCreateGrid seeds a grid of lanes into an existing tab. Each entry in
@@ -2179,4 +2191,28 @@ type MsgMCPStatus struct {
 	Attempt int    `json:"attempt,omitempty"` // 1-based reconnect attempt when reconnecting/given_up
 	Max     int    `json:"max,omitempty"`     // MaxRestartAttemptsPerSession at emit time
 	Detail  string `json:"detail,omitempty"`  // tool count / last error / retry delay
+}
+
+// ---------------------------------------------------------------------------
+// Session replay v2 (design 006) — dedicated replay pane
+// ---------------------------------------------------------------------------
+
+// MsgReplayControl is a playback control for the active replay pane, published
+// to ws.inbox by the TUI while the replay pane is focused (space pause, ←/→
+// seek, +/- speed). PaneID names the replay pane the key was pressed in; the
+// workspace ignores controls that do not match its active replay pane.
+type MsgReplayControl struct {
+	PaneID string `json:"pane_id"`
+	// Action: "pause" (toggle), "seek" (by DeltaMs), "faster", "slower", "stop".
+	Action  string `json:"action"`
+	DeltaMs int64  `json:"delta_ms,omitempty"` // seek delta, negative = backward
+}
+
+// MsgPaneStopped announces that a pane actor has fully stopped (any close
+// path: keyboard close, group/lane/tab cascade, CLI delete). Published to
+// ws.inbox from the PaneActor's Stopping hook so the workspace can release
+// per-pane resources it holds — today: stopping an in-flight replay playback
+// when its dedicated replay pane closes (design 006 v2).
+type MsgPaneStopped struct {
+	PaneID string `json:"pane_id"`
 }

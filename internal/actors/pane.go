@@ -71,6 +71,11 @@ type PaneActor struct {
 	title     string
 	givenName string
 	mode      string
+	// paneType marks a special pane variant: "" / "normal" for regular panes,
+	// "replay" for the dedicated read-only replay pane (design 006 v2), which
+	// never starts a shell/PTY — its content is exclusively the recorded
+	// output published to its subjects. Set by the pane group at spawn.
+	paneType string
 	// enabledModes is the ordered set of input modes available for this pane's
 	// double-Esc cycle — the source of truth exposed to every frontend via the
 	// snapshot. "shell" is always present and never removable.
@@ -400,7 +405,13 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 			}
 		}
 
-		p.startShell()
+		// Replay panes (design 006 v2) never start a shell: no PTY, no
+		// rawinput subscription — raw keys are inert and executeShell fails
+		// closed ("shell is not available"), so the pane is read-only by
+		// construction.
+		if p.paneType != "replay" {
+			p.startShell()
+		}
 
 		// Auto-share if upstream is configured and auto_share is enabled.
 		if p.cfg.Upstream.Enabled && p.cfg.Upstream.AutoShare {
@@ -457,6 +468,13 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 		}
 		p.stopShell()
 		p.flushKV()
+		// Announce the close so the workspace can release per-pane resources
+		// it holds — a dedicated replay pane's playback stops when its pane
+		// closes (design 006 v2). Published for every pane; the workspace
+		// ignores IDs it doesn't track.
+		if p.pub != nil {
+			_ = p.pub.Send(msg.T("ws", "inbox"), &msg.MsgPaneStopped{PaneID: p.id})
+		}
 
 	case *msg.MsgPaneSubmitInput:
 		p.handleSubmitInput(m)

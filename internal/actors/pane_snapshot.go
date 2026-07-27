@@ -28,6 +28,7 @@ func (p *PaneActor) buildSnapshot(includeContent, includeConversations bool) dom
 	snap := domain.PaneSnapshot{
 		ID:                    p.id,
 		Title:                 p.title,
+		PaneType:              p.paneType,
 		Mode:                  p.mode,
 		EnabledModes:          p.enabledModes,
 		WebURL:                p.webURL,
@@ -367,6 +368,12 @@ func (p *PaneActor) DeleteKV() {
 func (p *PaneActor) RestoreState(snap domain.PaneSnapshot) {
 	p.output.Set(snap.Output)
 	p.mode = snap.Mode
+	// Pane variant survives a restart: a restored replay pane must stay
+	// shell-less. Only set when the snapshot carries one — normal panes keep
+	// whatever the group assigned.
+	if snap.PaneType != "" {
+		p.paneType = snap.PaneType
+	}
 	// Backward-compat: pre-field snapshots have no EnabledModes — keep the
 	// constructor default rather than disabling every mode.
 	if len(snap.EnabledModes) > 0 {

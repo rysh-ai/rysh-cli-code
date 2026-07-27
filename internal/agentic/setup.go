@@ -167,6 +167,11 @@ func (s *Setup) BuildLiveEnvBlock(workDir string) string {
 // `RYSH_PROVIDER=ollama rysh` return a canned string instead of running the
 // local model.
 func providerUsable(cfg config.Config) bool {
+	// Replay mode (design 009 record/replay): recorded turns need no key at
+	// all — the transcript IS the provider.
+	if provider.ReplayDirFromEnv() != "" {
+		return true
+	}
 	return cfg.APIKey != "" || !provider.RequiresAPIKey(cfg.ProviderName)
 }
 
@@ -176,6 +181,41 @@ func providerUsable(cfg config.Config) bool {
 // refuse to start when this is false.
 func ProviderUsable(cfg config.Config) bool {
 	return providerUsable(cfg)
+}
+
+// buildAgenticProvider selects the Setup's provider, folding in the design-009
+// record/replay seam. Precedence:
+//
+//  1. RYSH_REPLAY_DIR set → the replay provider serving the recorded
+//     transcript (deterministic, key-free; session-default model switching is
+//     meaningless with no live model, so the wrapper is skipped).
+//  2. No usable live provider → the mock fallback (interactive sessions only;
+//     `rysh run` refuses it via ProviderUsable).
+//  3. The live provider, wrapped for ##llm session defaults; with
+//     RYSH_RECORD_DIR set the OUTERMOST wrapper records every interaction, so
+//     the transcript holds exactly what was served (post model-override).
+//
+// A recording directory that cannot be prepared fails the provider closed
+// (every call errors) rather than silently running unrecorded: the caller
+// asked for a transcript to replay later, and a green-but-unrecorded run
+// would only move the failure to replay time.
+func buildAgenticProvider(cfg config.Config, sessionLLM *provider.SessionDefaults) provider.AgenticProvider {
+	if dir := provider.ReplayDirFromEnv(); dir != "" {
+		return provider.NewReplay(dir)
+	}
+	if !providerUsable(cfg) {
+		return &staticAgenticProvider{name: "mock-agentic"}
+	}
+	prov := provider.WithSessionDefaults(provider.NewAgenticProvider(cfg), sessionLLM)
+	if dir := provider.RecordDirFromEnv(); dir != "" {
+		rec, err := provider.NewRecording(prov, dir)
+		if err != nil {
+			slog.Error("record: cannot prepare transcript dir; failing the provider closed", "dir", dir, "err", err)
+			return &failingAgenticProvider{err: err}
+		}
+		prov = rec
+	}
+	return prov
 }
 
 // NewSetup creates the agentic infrastructure from configuration.
@@ -189,15 +229,7 @@ func NewSetup(cfg config.Config, plKV nats.KeyValue) *Setup {
 	// Create the agentic provider, wrapped so the ##llm session default
 	// (SessionLLM) is consulted on every call.
 	sessionLLM := provider.NewSessionDefaults()
-	var prov provider.AgenticProvider
-	if providerUsable(cfg) {
-		prov = provider.WithSessionDefaults(provider.NewAgenticProvider(cfg), sessionLLM)
-	} else {
-		// Fallback: wrap the existing provider in a static agentic adapter
-		prov = &staticAgenticProvider{
-			name: "mock-agentic",
-		}
-	}
+	prov := buildAgenticProvider(cfg, sessionLLM)
 
 	// Determine working directory
 	workDir, err := os.Getwd()
@@ -278,12 +310,7 @@ func NewSetupAlwaysOn(cfg config.Config, plKV nats.KeyValue) *Setup {
 
 	// Session-default seam: see NewSetup.
 	sessionLLM := provider.NewSessionDefaults()
-	var prov provider.AgenticProvider
-	if providerUsable(cfg) {
-		prov = provider.WithSessionDefaults(provider.NewAgenticProvider(cfg), sessionLLM)
-	} else {
-		prov = &staticAgenticProvider{name: "mock-agentic"}
-	}
+	prov := buildAgenticProvider(cfg, sessionLLM)
 
 	workDir, err := os.Getwd()
 	if err != nil {
@@ -952,4 +979,26 @@ func (s *staticAgenticProvider) CompleteWithTools(
 		TextBlocks: []provider.TextBlock{{Text: "Agentic mode requires an API key. Set RYSH_API_KEY or configure api_key in rysh.config.yaml."}},
 		StopReason: provider.StopReasonEndTurn,
 	}, nil
+}
+
+// failingAgenticProvider errors every call with a fixed cause. Used when a
+// requested recording transcript cannot be prepared: the run must fail loudly
+// rather than run green-but-unrecorded (design 009 record/replay).
+type failingAgenticProvider struct {
+	err error
+}
+
+func (f *failingAgenticProvider) Name() string { return "record-failed" }
+
+func (f *failingAgenticProvider) Complete(_ context.Context, _ string) (string, error) {
+	return "", f.err
+}
+
+func (f *failingAgenticProvider) CompleteWithTools(
+	_ context.Context,
+	_ []provider.ConversationTurn,
+	_ []provider.ToolSpec,
+	_ string,
+) (*provider.AgenticResponse, error) {
+	return nil, f.err
 }

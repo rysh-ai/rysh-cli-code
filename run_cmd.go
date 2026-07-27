@@ -30,10 +30,19 @@ package main
 // working-tree diff before/after), commands executed (bash tool step events),
 // final output text, and token spend (usage ledger records). See
 // run_result.go for the derivations and their documented limits.
+// --json-audit additionally writes the full audit artifact (tool calls,
+// approvals + policy citations, diffs, SNAT observability, budget, usage) —
+// see run_audit.go for what is derivable from the bus and what is documented
+// absent.
+//
+// Record/replay (design 009 §3.2 deterministic mode): --record <dir> saves
+// the provider interaction transcript; --replay <dir> re-runs against the
+// recorded turns via the replay provider (no key, no token spend). The
+// directory reaches the daemon child through RYSH_RECORD_DIR/RYSH_REPLAY_DIR
+// (same road as the --provider override).
 //
 // Future (design 009, deliberately not built here): the GitHub Action/App
-// (§3.3), the LLM-judge rubric (judge.md), record/replay determinism via the
-// proxy request log, and `rysh eval --update-baseline`.
+// (§3.3) and `rysh eval --update-baseline`.
 
 import (
 	"encoding/json"
@@ -41,6 +50,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -90,6 +100,9 @@ type runOptions struct {
 	Worktree  bool      // --worktree: run inside a fresh git worktree
 	Budget    runBudget // --budget: token or USD ceiling (zero value ⇒ none)
 	ResultOut string    // --result-out: write the eval.Result JSON here
+	JSONAudit string    // --json-audit: write the full audit artifact here
+	RecordDir string    // --record: save the provider transcript to this dir
+	ReplayDir string    // --replay: serve provider turns from this recorded dir
 }
 
 // runBudget is a spend ceiling: exactly one of Tokens / MicroUSD is set.
@@ -162,6 +175,11 @@ const runUsage = `usage: rysh run [flags] "<prompt>" | <skill.md>
   --budget <b>       spend ceiling: $2 / 2usd (cost) or 150000 / 150k (tokens)
   --worktree         run inside a fresh git worktree (removed unless --keep)
   --result-out <f>   write the eval.Result JSON artifact to <f>
+  --json-audit <f>   write the full audit artifact (tool calls, approvals,
+                     diffs, SNAT, budget, usage) to <f>
+  --record <dir>     save the provider interaction transcript to <dir>
+  --replay <dir>     re-run against the transcript recorded in <dir>
+                     (deterministic; no API key or token spend)
   --json             print a machine-readable result line to stdout
   --keep             keep the throwaway session (and worktree) after the run`
 
@@ -223,6 +241,24 @@ func parseRunArgs(args []string) (runOptions, error) {
 				return opts, err
 			}
 			opts.ResultOut = v
+		case "--json-audit":
+			v, err := strFlag(a, &i)
+			if err != nil {
+				return opts, err
+			}
+			opts.JSONAudit = v
+		case "--record":
+			v, err := strFlag(a, &i)
+			if err != nil {
+				return opts, err
+			}
+			opts.RecordDir = v
+		case "--replay":
+			v, err := strFlag(a, &i)
+			if err != nil {
+				return opts, err
+			}
+			opts.ReplayDir = v
 		case "--worktree":
 			opts.Worktree = true
 		case "--json":
@@ -238,6 +274,9 @@ func parseRunArgs(args []string) (runOptions, error) {
 	}
 	if len(positional) == 0 && opts.TaskArg == "" {
 		return opts, errors.New(runUsage)
+	}
+	if opts.RecordDir != "" && opts.ReplayDir != "" {
+		return opts, errors.New("--record and --replay are mutually exclusive (a replay serves recorded turns; there is nothing new to record)")
 	}
 	opts.Prompt = strings.Join(positional, " ")
 	return opts, nil
@@ -413,7 +452,7 @@ func runRunCmd(cfg config.Config, configPath string, args []string) (int, error)
 	}
 
 	start := time.Now()
-	outcome, res, sessionName, err := executeHeadlessRun(cfg, configPath, opts)
+	outcome, res, audit, sessionName, err := executeHeadlessRun(cfg, configPath, opts)
 	if err != nil {
 		return runExitError, err
 	}
@@ -425,6 +464,13 @@ func runRunCmd(cfg config.Config, configPath string, args []string) (int, error)
 	if opts.ResultOut != "" {
 		if werr := writeRunResult(opts.ResultOut, res); werr != nil {
 			fmt.Fprintf(os.Stderr, "[run] WARNING: write --result-out: %v\n", werr)
+		}
+	}
+	// Same policy for the audit artifact: a blocked or exhausted run is
+	// exactly when the audit trail matters most.
+	if opts.JSONAudit != "" && audit != nil {
+		if werr := writeRunAudit(opts.JSONAudit, audit); werr != nil {
+			fmt.Fprintf(os.Stderr, "[run] WARNING: write --json-audit: %v\n", werr)
 		}
 	}
 
@@ -452,21 +498,60 @@ func writeRunResult(path string, res eval.Result) error {
 
 // executeHeadlessRun performs one full headless run: provider gate, optional
 // worktree isolation, throwaway daemon boot, prompt execution, and honest
-// Result derivation. It is the shared engine behind `rysh run` and
+// Result + audit derivation. It is the shared engine behind `rysh run` and
 // `rysh eval --live` (called in-process — eval never shells out to rysh).
 //
 // The returned error means the run could not be attempted (bad provider, no
 // worktree possible, daemon boot failure); once the prompt is submitted all
-// failures are expressed through the outcome instead.
-func executeHeadlessRun(cfg config.Config, configPath string, opts runOptions) (runOutcome, eval.Result, string, error) {
+// failures are expressed through the outcome instead. The returned audit is
+// non-nil whenever the run was attempted.
+func executeHeadlessRun(cfg config.Config, configPath string, opts runOptions) (runOutcome, eval.Result, *runAudit, string, error) {
 	var res eval.Result
+
+	// --record / --replay: the transcript directory travels to the daemon
+	// child through the environment (the same road as the --provider
+	// override — spawnDaemon's child inherits it). Absolute paths: --worktree
+	// chdirs before boot, and the daemon resolves its own cwd.
+	providerName := cfg.ProviderName
+	if opts.ReplayDir != "" {
+		abs, err := filepath.Abs(opts.ReplayDir)
+		if err != nil {
+			return runOutcome{}, res, nil, "", fmt.Errorf("run: resolve --replay dir: %w", err)
+		}
+		if _, err := os.Stat(filepath.Join(abs, provider.TranscriptFileName)); err != nil {
+			return runOutcome{}, res, nil, "", fmt.Errorf(
+				"run: --replay %s holds no %s (record one with `rysh run --record %s`): %w",
+				opts.ReplayDir, provider.TranscriptFileName, opts.ReplayDir, err)
+		}
+		if err := os.Setenv(provider.ReplayDirEnv, abs); err != nil {
+			return runOutcome{}, res, nil, "", fmt.Errorf("run: set %s: %w", provider.ReplayDirEnv, err)
+		}
+		defer func() { _ = os.Unsetenv(provider.ReplayDirEnv) }()
+		providerName = "replay"
+		fmt.Fprintf(os.Stderr, "[run] replaying recorded transcript from %s (no live provider)\n", abs)
+	}
+	if opts.RecordDir != "" {
+		abs, err := filepath.Abs(opts.RecordDir)
+		if err != nil {
+			return runOutcome{}, res, nil, "", fmt.Errorf("run: resolve --record dir: %w", err)
+		}
+		if err := os.MkdirAll(abs, 0o755); err != nil {
+			return runOutcome{}, res, nil, "", fmt.Errorf("run: create --record dir: %w", err)
+		}
+		if err := os.Setenv(provider.RecordDirEnv, abs); err != nil {
+			return runOutcome{}, res, nil, "", fmt.Errorf("run: set %s: %w", provider.RecordDirEnv, err)
+		}
+		defer func() { _ = os.Unsetenv(provider.RecordDirEnv) }()
+		fmt.Fprintf(os.Stderr, "[run] recording provider transcript to %s\n", abs)
+	}
 
 	// Fail closed BEFORE booting anything: with no usable provider the daemon
 	// silently falls back to a mock whose canned end_turn reply reads as a
 	// successful "done" run — a no-op green in CI. Refusing here turns a
-	// misconfigured pipeline into a loud exit 1 instead.
+	// misconfigured pipeline into a loud exit 1 instead. (Replay counts as
+	// usable: the transcript is the provider, no key needed.)
 	if !agentic.ProviderUsable(cfg) {
-		return runOutcome{}, res, "", fmt.Errorf("run: no usable agentic provider (provider %q requires an API key; "+
+		return runOutcome{}, res, nil, "", fmt.Errorf("run: no usable agentic provider (provider %q requires an API key; "+
 			"set RYSH_API_KEY or api_key in rysh.config.yaml) — refusing a headless run against the mock provider",
 			cfg.ProviderName)
 	}
@@ -482,24 +567,24 @@ func executeHeadlessRun(cfg config.Config, configPath string, opts runOptions) (
 	// process cwd (spawnDaemon), so chdir before boot and restore after.
 	runDir, err := os.Getwd()
 	if err != nil {
-		return runOutcome{}, res, "", fmt.Errorf("run: getwd: %w", err)
+		return runOutcome{}, res, nil, "", fmt.Errorf("run: getwd: %w", err)
 	}
 	if opts.Worktree {
 		if !worktree.IsGitRepo(runDir) {
-			return runOutcome{}, res, "", errors.New("run: --worktree requires running inside a git repository")
+			return runOutcome{}, res, nil, "", errors.New("run: --worktree requires running inside a git repository")
 		}
 		root, rerr := worktree.RepoRoot(runDir)
 		if rerr != nil {
-			return runOutcome{}, res, "", fmt.Errorf("run: resolve repo root: %w", rerr)
+			return runOutcome{}, res, nil, "", fmt.Errorf("run: resolve repo root: %w", rerr)
 		}
 		wtPath := worktree.Dir(root, sessionName)
 		if werr := worktree.Add(root, wtPath, sessionName); werr != nil {
-			return runOutcome{}, res, "", fmt.Errorf("run: create worktree: %w", werr)
+			return runOutcome{}, res, nil, "", fmt.Errorf("run: create worktree: %w", werr)
 		}
 		if cerr := os.Chdir(wtPath); cerr != nil {
 			_ = worktree.Remove(root, wtPath, true)
 			_ = worktree.DeleteBranch(root, sessionName)
-			return runOutcome{}, res, "", fmt.Errorf("run: enter worktree: %w", cerr)
+			return runOutcome{}, res, nil, "", fmt.Errorf("run: enter worktree: %w", cerr)
 		}
 		fmt.Fprintf(os.Stderr, "[run] worktree %s (branch %s)\n", wtPath, sessionName)
 		prevDir := runDir
@@ -528,32 +613,38 @@ func executeHeadlessRun(cfg config.Config, configPath string, opts runOptions) (
 
 	store, err := session.NewStore(cfg)
 	if err != nil {
-		return runOutcome{}, res, sessionName, err
+		return runOutcome{}, res, nil, sessionName, err
 	}
 
 	h, err := spawnDaemon(sessionName, cfg.LogLevel, configPath, false)
 	if err != nil {
-		return runOutcome{}, res, sessionName, err
+		return runOutcome{}, res, nil, sessionName, err
 	}
 	defer h.cleanup()
 	rec, err := waitForSession(store, sessionName, runBootTimeout, h)
 	if err != nil {
 		// The daemon may have half-registered; remove whatever exists.
 		cleanupRunSession(store, sessionName)
-		return runOutcome{}, res, sessionName, daemonStartError(sessionName, err)
+		return runOutcome{}, res, nil, sessionName, daemonStartError(sessionName, err)
 	}
 	fmt.Fprintf(os.Stderr, "[run] session %s up (PID %d, NATS %d)\n", sessionName, rec.PID, rec.NATSPort)
 
 	outcome := runHeadlessPrompt(rec, opts, collector)
+	finished := time.Now()
 
-	// Assemble the Result BEFORE teardown, from what the run actually did.
+	// Assemble the Result and the audit evidence BEFORE teardown (the
+	// worktree — diffs included — is removed on return), from what the run
+	// actually did.
+	var after map[string]string
 	if inRepo {
-		after, _ := gitStatusSnapshot(runDir)
+		after, _ = gitStatusSnapshot(runDir)
 		res.FilesChanged = changedPaths(before, after)
 	}
 	res.Commands = collector.CommandLines()
 	res.Output = collector.OutputText()
 	res.TokensUsed = int(collector.TokensUsed())
+	diff := captureAuditDiff(runDir, res.FilesChanged, after, inRepo)
+	audit := assembleRunAudit(collector, opts, providerName, sessionName, outcome, res, diff, start, finished)
 
 	if opts.Keep {
 		fmt.Fprintf(os.Stderr, "[run] --keep: session %s left running; attach with \"rysh attach %s\"\n",
@@ -562,7 +653,7 @@ func executeHeadlessRun(cfg config.Config, configPath string, opts runOptions) (
 		cleanupRunSession(store, sessionName)
 		fmt.Fprintf(os.Stderr, "[run] session %s stopped and deleted\n", sessionName)
 	}
-	return outcome, res, sessionName, nil
+	return outcome, res, audit, sessionName, nil
 }
 
 // cleanupRunSession stops the throwaway daemon gracefully (so it flushes KV
@@ -684,9 +775,12 @@ func runHeadlessPrompt(rec session.Record, opts runOptions, collector *runCollec
 	}
 	defer func() { _ = subUsage.Unsubscribe() }()
 
-	// Approval gates fail the run closed (gate-blocked): headless CI has no approver.
+	// Approval gates fail the run closed (gate-blocked): headless CI has no
+	// approver. The request is also recorded verbatim for the audit artifact
+	// (decision fail_closed; policy rule parsed from the description).
 	subApproval, err := nc.Subscribe(msg.T("pane", "*", "approval", "request"), func(m *nats.Msg) {
 		if req, ok := decode(m).(*msg.MsgApprovalRequest); ok {
+			collector.OnApproval(req)
 			detail := fmt.Sprintf("approval requested (%s): %s", req.Type, req.Description)
 			fmt.Fprintf(os.Stderr, "[run] %s\n", detail)
 			pushEvent(runEvent{Kind: runEvApproval, Detail: detail})
@@ -696,6 +790,20 @@ func runHeadlessPrompt(rec session.Record, opts runOptions, collector *runCollec
 		return runOutcome{Status: "error", ExitCode: runExitError, Detail: fmt.Sprintf("subscribe approvals: %v", err)}
 	}
 	defer func() { _ = subApproval.Unsubscribe() }()
+
+	// Governance-proxy audit records (design 001 §4.5) carry the only
+	// bus-observable SNAT redaction counts. They fire only when traffic
+	// routes through the proxy (wrapped third-party CLIs); a run whose agent
+	// calls the provider directly legitimately sees none.
+	subProxy, err := nc.Subscribe(msg.T("pane", "*", "proxy", "audit"), func(m *nats.Msg) {
+		if rec, ok := decode(m).(*msg.MsgProxyRequestAudit); ok {
+			collector.OnProxyAudit(rec)
+		}
+	})
+	if err != nil {
+		return runOutcome{Status: "error", ExitCode: runExitError, Detail: fmt.Sprintf("subscribe proxy audit: %v", err)}
+	}
+	defer func() { _ = subProxy.Unsubscribe() }()
 
 	// Ctrl+C / SIGTERM reads as a cancellation event so cleanup still runs.
 	sigCh := make(chan os.Signal, 1)

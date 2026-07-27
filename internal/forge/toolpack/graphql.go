@@ -13,12 +13,15 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/forge/runtime"
 )
 
-// RegisterGraphQL exposes a GraphQL API to agents through two constant-footprint
-// tools — <prefix>graphql_schema (discover query/mutation fields from the IR) and
-// <prefix>graphql_query (execute a GraphQL document). This mirrors the dynamic
-// REST exposure: the agent discovers, then invokes, without flooding the context.
-// Returns the registered tool names.
-func RegisterGraphQL(reg *sharedtools.ToolRegistry, api *ir.API, exec *runtime.GraphQLExecutor, pol Policy) []string {
+// RegisterGraphQL exposes a GraphQL API to agents through constant-footprint
+// tools — <prefix>graphql_schema (discover query/mutation/subscription fields
+// from the IR) and <prefix>graphql_query (execute a GraphQL document); when the
+// schema has subscription fields AND sm is non-nil, it also registers
+// <prefix>graphql_subscribe + <prefix>stream_session (streaming sessions over
+// graphql-ws, design 015 §2.1). This mirrors the dynamic REST exposure: the
+// agent discovers, then invokes, without flooding the context. Returns the
+// registered tool names.
+func RegisterGraphQL(reg *sharedtools.ToolRegistry, api *ir.API, exec *runtime.GraphQLExecutor, sm *runtime.StreamManager, pol Policy) []string {
 	prefix := pol.Prefix
 	schemaName := uniqueName(reg, SanitizeName(prefix+"graphql_schema"))
 	queryName := uniqueName(reg, SanitizeName(prefix+"graphql_query"))
@@ -41,7 +44,11 @@ func RegisterGraphQL(reg *sharedtools.ToolRegistry, api *ir.API, exec *runtime.G
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"the GraphQL document, e.g. 'query($id:ID!){ user(id:$id){ id name } }'"},"variables":{"type":"object","description":"GraphQL variables object"},"jq_filter":{"type":"string","description":"optional jq-style filter to trim the JSON response, e.g. .data.user.id"}},"required":["query"]}`),
 		},
 	})
-	return []string{schemaName, queryName}
+	names := []string{schemaName, queryName}
+	if sm != nil {
+		names = append(names, registerGraphQLStreams(reg, api, exec, sm, pol)...)
+	}
+	return names
 }
 
 // gqlSchemaExecutor returns the GraphQL field catalog from the IR.
@@ -75,6 +82,19 @@ func (e *gqlSchemaExecutor) Execute(_ context.Context, params json.RawMessage) (
 			continue
 		}
 		fmt.Fprintf(&sb, "  %-9s %s(%s)\n", kind, op.ID, args)
+		if op.Summary != "" {
+			fmt.Fprintf(&sb, "            %s\n", op.Summary)
+		}
+	}
+	// Subscription fields are streams: point at graphql_subscribe, not graphql_query.
+	for i := range e.api.Streams {
+		op := &e.api.Streams[i]
+		args := gqlArgs(e.api, op)
+		hay := strings.ToLower(op.ID + " subscription " + args)
+		if q != "" && !strings.Contains(hay, q) {
+			continue
+		}
+		fmt.Fprintf(&sb, "  %-9s %s(%s) — streaming; start with graphql_subscribe\n", "subscription", op.ID, args)
 		if op.Summary != "" {
 			fmt.Fprintf(&sb, "            %s\n", op.Summary)
 		}

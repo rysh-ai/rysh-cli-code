@@ -50,8 +50,11 @@ type PaneGroupActor struct {
 	approvalPaneActors map[string]*ApprovalPaneActor
 
 	// Initial pane info -- set at creation, consumed on *actor.Started.
-	initialPaneID string
-	initialTitle  string
+	// initialPaneType marks the initial pane as a special variant ("replay"
+	// panes never start a shell); "" = normal pane.
+	initialPaneID   string
+	initialTitle    string
+	initialPaneType string
 
 	// restoreData is set when the actor should restore from KV on *actor.Started.
 	// It is consumed once and set to nil.
@@ -127,9 +130,10 @@ func (g *PaneGroupActor) Receive(ctx actor.Context) {
 			g.doRestoreFromKV(ctx, *g.restoreData)
 			g.restoreData = nil
 		} else if g.initialPaneID != "" {
-			g.createPane(ctx, g.initialPaneID, g.initialTitle)
+			g.createPaneTyped(ctx, g.initialPaneID, g.initialTitle, g.initialPaneType)
 			g.initialPaneID = ""
 			g.initialTitle = ""
+			g.initialPaneType = ""
 		}
 		replayScope(g.agSetup, agentic.ScopeGroup, agentic.ScopeIDs{TabID: g.tabID, LaneID: g.laneID, GroupID: g.id})
 
@@ -216,7 +220,16 @@ func (g *PaneGroupActor) Receive(ctx actor.Context) {
 // ---------------------------------------------------------------------------
 
 func (g *PaneGroupActor) createPane(ctx actor.Context, paneID, title string) {
+	g.createPaneTyped(ctx, paneID, title, "")
+}
+
+// createPaneTyped creates a pane with an explicit pane type. A "replay" pane
+// is a real PaneActor that never starts a shell/PTY (design 006 v2): its
+// content is exclusively the output published to its subjects, making it
+// read-only by construction.
+func (g *PaneGroupActor) createPaneTyped(ctx actor.Context, paneID, title, paneType string) {
 	pa := NewPaneActor(paneID, title, g.tabID, g.laneID, g.id, g.cfg, g.pub, g.nc, g.agSetup, g.kvStore)
+	pa.paneType = paneType
 	paneProps := actor.PropsFromProducer(func() actor.Actor { return pa })
 	pid := ctx.Spawn(paneProps)
 
@@ -225,16 +238,20 @@ func (g *PaneGroupActor) createPane(ctx actor.Context, paneID, title string) {
 	g.paneSubjects[paneID] = msg.T("pane", paneID, "inbox")
 
 	ref := &paneRefInGroup{
-		id:    paneID,
-		title: title,
+		id:       paneID,
+		title:    title,
+		paneType: paneType,
 	}
 	g.paneRefs = append(g.paneRefs, ref)
 	g.activePane = len(g.paneRefs) - 1
 }
 
 // spawnRestoredPane spawns a PaneActor for a restored pane (KV restore path).
-func (g *PaneGroupActor) spawnRestoredPane(ctx actor.Context, paneID, paneTitle string, snap *domain.PaneSnapshot) {
+// paneType keeps the pane variant across restarts — a restored "replay" pane
+// must stay shell-less rather than silently growing a PTY.
+func (g *PaneGroupActor) spawnRestoredPane(ctx actor.Context, paneID, paneTitle, paneType string, snap *domain.PaneSnapshot) {
 	pa := NewPaneActor(paneID, paneTitle, g.tabID, g.laneID, g.id, g.cfg, g.pub, g.nc, g.agSetup, g.kvStore)
+	pa.paneType = paneType
 	if snap != nil {
 		pa.RestoreState(*snap)
 	}
@@ -644,8 +661,9 @@ type paneGroupKV struct {
 
 // paneKV is the persistence format for a pane reference within a group.
 type paneKV struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	PaneType string `json:"pane_type,omitempty"`
 }
 
 // ToKV serialises the group state for JetStream KV persistence.
@@ -657,8 +675,9 @@ func (g *PaneGroupActor) ToKV() paneGroupKV {
 	}
 	for i, ref := range g.paneRefs {
 		kv.PaneRefs[i] = paneKV{
-			ID:    ref.id,
-			Title: ref.title,
+			ID:       ref.id,
+			Title:    ref.title,
+			PaneType: ref.paneType,
 		}
 	}
 	return kv
@@ -672,8 +691,9 @@ func (g *PaneGroupActor) doRestoreFromKV(ctx actor.Context, kv paneGroupKV) {
 
 	for _, pk := range kv.PaneRefs {
 		ref := &paneRefInGroup{
-			id:    pk.ID,
-			title: pk.Title,
+			id:       pk.ID,
+			title:    pk.Title,
+			paneType: pk.PaneType,
 		}
 		g.paneRefs = append(g.paneRefs, ref)
 
@@ -686,6 +706,6 @@ func (g *PaneGroupActor) doRestoreFromKV(ctx actor.Context, kv paneGroupKV) {
 				}
 			}
 		}
-		g.spawnRestoredPane(ctx, pk.ID, pk.Title, snap)
+		g.spawnRestoredPane(ctx, pk.ID, pk.Title, pk.PaneType, snap)
 	}
 }

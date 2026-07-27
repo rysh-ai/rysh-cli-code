@@ -124,12 +124,12 @@ func (l *LaneActor) Receive(ctx actor.Context) {
 			l.doRestoreFromKV(ctx, *l.restoreData)
 			l.restoreData = nil
 		} else if l.initialPaneID != "" {
-			l.createPaneGroup(ctx, l.initialPaneID, l.initialTitle, "", "")
+			l.createPaneGroup(ctx, l.initialPaneID, l.initialTitle, "", "", "")
 			l.initialPaneID = ""
 			l.initialTitle = ""
 			// Grid seed: build the remaining pane groups inline.
 			for _, p := range l.initialExtraPanes {
-				l.createPaneGroup(ctx, p.id, p.title, "", "")
+				l.createPaneGroup(ctx, p.id, p.title, "", "", "")
 			}
 			l.initialExtraPanes = nil
 			if len(l.groupRefs) > 1 {
@@ -155,7 +155,7 @@ func (l *LaneActor) Receive(ctx actor.Context) {
 		}
 
 	case *msg.MsgLaneCreatePaneGroup:
-		l.createPaneGroup(ctx, m.PaneID, m.Title, m.GroupID, m.WorkingDir)
+		l.createPaneGroup(ctx, m.PaneID, m.Title, m.GroupID, m.WorkingDir, m.PaneType)
 
 	case *msg.MsgLaneClosePaneGroup:
 		l.closeActiveGroup(ctx)
@@ -261,8 +261,10 @@ func paneGroupCfg(base config.Config, workingDir string) config.Config {
 // createPaneGroup spawns a new pane group. groupID pre-assigns the group's ID
 // ("" generates one) and workingDir overrides the lane config's working
 // directory for the group's panes — both are the worktree-lifecycle birth
-// parameters (design 008; see MsgLaneCreatePaneGroup).
-func (l *LaneActor) createPaneGroup(ctx actor.Context, paneID, title, groupID, workingDir string) {
+// parameters (design 008; see MsgLaneCreatePaneGroup). paneType marks the
+// initial pane as a special variant ("replay" panes never start a shell);
+// empty = normal pane.
+func (l *LaneActor) createPaneGroup(ctx actor.Context, paneID, title, groupID, workingDir, paneType string) {
 	if groupID == "" {
 		groupID = uuid.NewString()
 	}
@@ -274,6 +276,7 @@ func (l *LaneActor) createPaneGroup(ctx actor.Context, paneID, title, groupID, w
 	}
 
 	ga := NewPaneGroupActor(groupID, l.tabID, l.id, paneID, title, paneGroupCfg(l.cfg, workingDir), l.pub, l.nc, l.agSetup, l.kvStore)
+	ga.initialPaneType = paneType
 	groupProps := actor.PropsFromProducer(func() actor.Actor { return ga })
 	pid := ctx.Spawn(groupProps)
 

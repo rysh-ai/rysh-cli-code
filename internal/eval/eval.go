@@ -48,6 +48,11 @@ type Case struct {
 	Prompt string
 	Until  string
 	Expect Expect
+	// Judge is the optional LLM-judge rubric (evals/<case>/judge.md, design
+	// 009 §3.2). Empty when the case has no judge.md: assertions alone grade
+	// the case. When present, the judge runs AFTER assertions and both must
+	// pass — the judge is a signal, structural assertions stay the hard gate.
+	Judge string
 }
 
 // Assertion is one checked rule.
@@ -82,6 +87,21 @@ func LoadCase(dir string) (*Case, error) {
 	}
 	if err := yaml.Unmarshal(expData, &c.Expect); err != nil {
 		return nil, fmt.Errorf("parse expect.yaml: %w", err)
+	}
+	// judge.md is optional; its absence is the documented "no judge" state.
+	// Any other read error (permissions, a directory named judge.md) fails
+	// the load loudly rather than silently skipping the judge.
+	judgeData, err := os.ReadFile(filepath.Join(dir, "judge.md"))
+	switch {
+	case err == nil:
+		c.Judge = strings.TrimSpace(string(judgeData))
+		if c.Judge == "" {
+			return nil, fmt.Errorf("judge.md exists but is empty — delete it or write a rubric")
+		}
+	case os.IsNotExist(err):
+		// no judge — assertions alone grade the case
+	default:
+		return nil, fmt.Errorf("read judge.md: %w", err)
 	}
 	return c, nil
 }

@@ -350,6 +350,10 @@ const (
 	TagRemoteScrollbackAppend      = "MsgRemoteScrollbackAppend"
 	TagMirrorDirty                 = "MsgMirrorDirty"
 	TagLayoutDirty                 = "MsgLayoutDirty"
+
+	// Session replay v2 (design 006) — dedicated replay pane
+	TagReplayControl = "MsgReplayControl"
+	TagPaneStopped   = "MsgPaneStopped"
 )
 
 // jsonDecoder builds a typed JSON decoder for use in DefaultCodecRegistry.
@@ -449,6 +453,8 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagPaneResized, "*msg.MsgPaneResized", jsonDecoder[MsgPaneResized]())
 	r.Register(TagRawKeyInput, "*msg.MsgRawKeyInput", jsonDecoder[MsgRawKeyInput]())
 	r.Register(TagPaneClearOutput, "*msg.MsgPaneClearOutput", jsonDecoder[MsgPaneClearOutput]())
+	r.Register(TagReplayControl, "*msg.MsgReplayControl", jsonDecoder[MsgReplayControl]())
+	r.Register(TagPaneStopped, "*msg.MsgPaneStopped", jsonDecoder[MsgPaneStopped]())
 	r.Register(TagPaneNativeMode, "*msg.MsgPaneNativeMode", jsonDecoder[MsgPaneNativeMode]())
 	r.Register(TagRelayActivate, "*msg.MsgRelayActivate", jsonDecoder[MsgRelayActivate]())
 	r.Register(TagRelayDeactivate, "*msg.MsgRelayDeactivate", jsonDecoder[MsgRelayDeactivate]())

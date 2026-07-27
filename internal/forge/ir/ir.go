@@ -22,10 +22,20 @@ type API struct {
 	Auth        []AuthScheme       `json:"auth,omitempty"`
 	Operations  []Operation        `json:"operations"`
 	Schemas     map[string]*Schema `json:"schemas,omitempty"` // named component schemas
+	// Streams lists source operations that are PUSH STREAMS — gRPC
+	// server-streaming methods and GraphQL subscription fields — exposed at
+	// runtime as background streaming sessions (start / poll / stop over a
+	// bounded ring buffer, mirroring the bash_background pattern) instead of
+	// unary tools. They are kept out of Operations on purpose: every unary
+	// generator (SDKs, docs, static tool registration) would otherwise emit a
+	// one-shot request/response wrapper that hangs or truncates at call time.
+	// Only the live tool layer (toolpack stream tools) reads this list.
+	Streams []Operation `json:"streams,omitempty"`
 	// Skipped lists operations the ingester found in the source spec but
-	// deliberately did NOT expose as callable operations (gRPC streaming
-	// methods, GraphQL subscription fields). Generators ignore it; the CLI
-	// reports it at add time so exclusions are specific instead of silent.
+	// deliberately did NOT expose at all (gRPC client-streaming and
+	// bidi-streaming methods, which cannot ride a JSON-over-HTTP bridge).
+	// Generators ignore it; the CLI reports it at add time so exclusions are
+	// specific instead of silent.
 	Skipped []SkippedOperation `json:"skipped,omitempty"`
 }
 
@@ -35,7 +45,10 @@ type SkippedOperation struct {
 	Kind string `json:"kind"` // one of the Skip* constants below
 }
 
-// SkippedOperation.Kind values.
+// SkippedOperation.Kind values. SkipServerStreaming and SkipSubscription are
+// retained for backward compatibility with stored IR JSON, but current
+// ingesters place server-streaming methods and subscription fields in
+// API.Streams (exposed as streaming sessions) rather than in Skipped.
 const (
 	SkipClientStreaming = "client-streaming" // gRPC client-streaming method
 	SkipServerStreaming = "server-streaming" // gRPC server-streaming method
@@ -111,6 +124,16 @@ func (a *API) OperationByID(id string) *Operation {
 	for i := range a.Operations {
 		if a.Operations[i].ID == id {
 			return &a.Operations[i]
+		}
+	}
+	return nil
+}
+
+// StreamByID returns the stream operation with the given ID, or nil.
+func (a *API) StreamByID(id string) *Operation {
+	for i := range a.Streams {
+		if a.Streams[i].ID == id {
+			return &a.Streams[i]
 		}
 	}
 	return nil

@@ -563,6 +563,13 @@ func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error 
 	if agSetup == nil {
 		agSetup = agentic.NewSetupAlwaysOn(cfg, b.PipelineKV())
 	}
+	// Session teardown: cancel every live forge streaming session (gRPC
+	// server-streaming / GraphQL subscriptions) so no stream outlives the
+	// daemon session that started it. Scoped instances are already torn down
+	// by teardownScope; this covers globally-enabled integrations.
+	if agSetup.Forge != nil {
+		defer agSetup.Forge.Close()
+	}
 
 	// Layer in the externalised prompts from rysh-cli-agent-prompts/. This
 	// supersedes the in-package fallback consts, assembles the full system

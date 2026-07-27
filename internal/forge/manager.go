@@ -50,6 +50,25 @@ type active struct {
 	err        string
 	target     *sharedtools.ToolRegistry // the registry the tools were registered into
 	scope      string                    // the ScopeTarget.Key they were enabled at
+	// streams owns this instance's live streaming sessions (gRPC
+	// server-streaming / GraphQL subscriptions). Nil when the API has none.
+	// Every retraction path (re-enable, Disable, UnregisterScope, Close) must
+	// close it so no session outlives its tools.
+	streams *runtime.StreamManager
+}
+
+// retract unregisters an instance's tools and cancels its streaming sessions.
+func (a *active) retract(fallback *sharedtools.ToolRegistry) {
+	reg := a.target
+	if reg == nil {
+		reg = fallback
+	}
+	for _, n := range a.registered {
+		reg.Unregister(n)
+	}
+	if a.streams != nil {
+		a.streams.CloseAll()
+	}
 }
 
 // activeKey is the m.active map key: integration name + scope. Keying by both
@@ -186,9 +205,18 @@ func (m *Manager) enable(_ context.Context, def Integration, persist bool, targe
 		return m.enableGraphQL(def, spec, persist, target)
 	}
 
-	api, err := ingest.OpenAPI(spec)
-	if err != nil {
-		return 0, "", err
+	var api *ir.API
+	var err2 error
+	if def.source() == SourceGRPC {
+		// gRPC: unary methods flow through the same HTTP executor (the base URL
+		// must be a JSON-over-HTTP bridge, stated at add time); server-streaming
+		// methods (api.Streams) get the stream_start/stream_session pair below.
+		api, err2 = ingest.GRPC(spec)
+	} else {
+		api, err2 = ingest.OpenAPI(spec)
+	}
+	if err2 != nil {
+		return 0, "", err2
 	}
 
 	baseURL := def.BaseURL
@@ -224,16 +252,21 @@ func (m *Manager) enable(_ context.Context, def Integration, persist bool, targe
 	key := activeKey(def.Name, target.Key)
 	m.mu.Lock()
 	if prior := m.active[key]; prior != nil {
-		for _, n := range prior.registered {
-			prior.target.Unregister(n)
-		}
+		prior.retract(m.registry)
 	}
 	m.mu.Unlock()
 
 	names, mode := tp.Register(target.Registry, api, exec, pol)
 
+	// Server-streaming gRPC methods → streaming sessions (design 015 §2.2).
+	var sm *runtime.StreamManager
+	if def.source() == SourceGRPC && len(api.Streams) > 0 {
+		sm = runtime.NewStreamManager(runtime.StreamOptions{})
+		names = append(names, toolpack.RegisterGRPCStreams(target.Registry, api, exec, sm, pol)...)
+	}
+
 	m.mu.Lock()
-	m.active[key] = &active{def: def, registered: names, mode: mode, opCount: len(api.Operations), target: target.Registry, scope: target.Key}
+	m.active[key] = &active{def: def, registered: names, mode: mode, opCount: len(api.Operations), target: target.Registry, scope: target.Key, streams: sm}
 	m.mu.Unlock()
 
 	if persist {
@@ -278,6 +311,9 @@ func (m *Manager) enableGraphQL(def Integration, spec []byte, persist bool, targ
 		return 0, "", err
 	}
 	exec := runtime.NewGraphQLExecutor(endpoint, api.Auth, cred, opts)
+	if def.WSURL != "" {
+		exec.SetWSEndpoint(def.WSURL)
+	}
 
 	pol := def.Policy
 	if pol.Prefix == "" {
@@ -287,16 +323,19 @@ func (m *Manager) enableGraphQL(def Integration, spec []byte, persist bool, targ
 	key := activeKey(def.Name, target.Key)
 	m.mu.Lock()
 	if prior := m.active[key]; prior != nil {
-		for _, n := range prior.registered {
-			prior.target.Unregister(n)
-		}
+		prior.retract(m.registry)
 	}
 	m.mu.Unlock()
 
-	names := toolpack.RegisterGraphQL(target.Registry, api, exec, pol)
+	// Subscription fields → streaming sessions over graphql-ws (design 015 §2.1).
+	var sm *runtime.StreamManager
+	if len(api.Streams) > 0 {
+		sm = runtime.NewStreamManager(runtime.StreamOptions{})
+	}
+	names := toolpack.RegisterGraphQL(target.Registry, api, exec, sm, pol)
 
 	m.mu.Lock()
-	m.active[key] = &active{def: def, registered: names, mode: "graphql", opCount: len(api.Operations), target: target.Registry, scope: target.Key}
+	m.active[key] = &active{def: def, registered: names, mode: "graphql", opCount: len(api.Operations), target: target.Registry, scope: target.Key, streams: sm}
 	m.mu.Unlock()
 
 	if persist {
@@ -322,13 +361,7 @@ func (m *Manager) Disable(name string) error {
 	}
 	m.mu.Unlock()
 	for _, act := range acts {
-		reg := act.target
-		if reg == nil {
-			reg = m.registry
-		}
-		for _, n := range act.registered {
-			reg.Unregister(n)
-		}
+		act.retract(m.registry)
 	}
 	// Persist Enabled=false (keep the definition so it can be re-enabled).
 	defs, err := LoadStore(m.workDir)
@@ -541,13 +574,7 @@ func (m *Manager) UnregisterScope(scopeKey string) {
 	var drop []string
 	for k, a := range m.active {
 		if a.scope == scopeKey {
-			reg := a.target
-			if reg == nil {
-				reg = m.registry
-			}
-			for _, n := range a.registered {
-				reg.Unregister(n)
-			}
+			a.retract(m.registry)
 			drop = append(drop, k)
 		}
 	}
@@ -557,7 +584,9 @@ func (m *Manager) UnregisterScope(scopeKey string) {
 	m.mu.Unlock()
 }
 
-// Close unregisters all active integration tools.
+// Close unregisters all active integration tools and cancels every live
+// streaming session. Called at workspace/daemon shutdown so no stream outlives
+// the session that started it.
 func (m *Manager) Close() {
 	m.mu.Lock()
 	acts := make([]*active, 0, len(m.active))
@@ -567,13 +596,7 @@ func (m *Manager) Close() {
 	m.active = map[string]*active{}
 	m.mu.Unlock()
 	for _, a := range acts {
-		reg := a.target
-		if reg == nil {
-			reg = m.registry
-		}
-		for _, n := range a.registered {
-			reg.Unregister(n)
-		}
+		a.retract(m.registry)
 	}
 }
 

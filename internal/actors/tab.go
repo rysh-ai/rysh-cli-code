@@ -335,7 +335,7 @@ func (t *TabActor) Receive(ctx actor.Context) {
 		t.deleteLaneByID(ctx, m.LaneID)
 
 	case *msg.MsgTabCreatePaneGroupInLane:
-		t.createPaneGroupInLane(ctx, m.LaneID, m.Title, m.GroupID, m.WorkingDir)
+		t.createPaneGroupInLane(ctx, m.LaneID, m.Title, m.GroupID, m.WorkingDir, m.PaneID, m.PaneType)
 
 	case *msg.MsgTabCreateGrid:
 		t.createGridHere(ctx, m.LaneTitles)

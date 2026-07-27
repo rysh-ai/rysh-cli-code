@@ -23,15 +23,20 @@ import (
 // with REST sources. gRPC has no REST base URL, so the single server URL is
 // empty.
 //
-// Streaming methods (client-streaming, server-streaming, bidi) are NOT emitted
-// as operations: the forge live-call runtime is a single JSON request → single
-// JSON response executor (one-shot body read, MaxBody cap, per-call timeout).
-// grpc-gateway transcodes server-streaming as an unbounded newline-delimited
-// JSON response and Connect uses a different enveloped framing, so a unary tool
-// for a streaming method would hang, truncate, or fail at call time. Design 015
-// maps streaming to background ring-buffer sessions; until that session
-// lifecycle exists in the forge tool layer, streaming methods are recorded in
-// API.Skipped (by kind) so the exclusion is reported, never silent.
+// SERVER-STREAMING methods are emitted into api.Streams (not Operations):
+// design 015 maps them to background streaming sessions with ring-buffer
+// capture. At runtime a session opens the HTTP request against a
+// grpc-gateway-style JSON bridge and consumes its newline-delimited
+// {"result":…}/{"error":…} frames; the model polls the session for new frames
+// and stops it when done. Keeping them out of Operations keeps every unary
+// generator (SDKs, docs, static tools) honest — a one-shot wrapper for a
+// streaming method would hang or truncate at call time. Connect's enveloped
+// streaming framing is NOT supported — only NDJSON (grpc-gateway style).
+//
+// CLIENT-STREAMING and BIDI methods remain excluded (API.Skipped, by kind):
+// they need the model to produce a request stream over a full-duplex
+// connection, which cannot ride a JSON-over-HTTP bridge sanely. The exclusion
+// is reported at add time, never silent.
 //
 // Field-type mapping (proto → JSON-schema): see protoFieldSchema. The
 // read-vs-write (mutating) heuristic and recursion handling are documented on
@@ -77,10 +82,10 @@ func GRPC(data []byte) (*ir.API, error) {
 			}
 			for _, method := range svc.GetMethod() {
 				methodName := method.GetName()
-				// Non-unary methods are skipped, not exposed — see the doc
-				// comment above for why a unary tool for a streaming method
-				// would be broken at call time.
-				if method.GetClientStreaming() || method.GetServerStreaming() {
+				// Client-streaming and bidi methods are skipped, not exposed —
+				// see the doc comment above. Server-streaming methods fall
+				// through and land in api.Streams below.
+				if method.GetClientStreaming() {
 					api.Skipped = append(api.Skipped, ir.SkippedOperation{
 						ID:   sanitizeID(svcName + "_" + methodName),
 						Kind: streamKind(method),
@@ -101,14 +106,18 @@ func GRPC(data []byte) (*ir.API, error) {
 				if msg := idx.message(method.GetOutputType()); msg != nil {
 					op.Responses["200"] = idx.buildMessageSchema(msg, api.Schemas, map[string]bool{})
 				}
-				api.Operations = append(api.Operations, op)
+				if method.GetServerStreaming() {
+					api.Streams = append(api.Streams, op)
+				} else {
+					api.Operations = append(api.Operations, op)
+				}
 			}
 		}
 	}
 
-	if len(api.Operations) == 0 {
+	if len(api.Operations) == 0 && len(api.Streams) == 0 {
 		if n := len(api.Skipped); n > 0 {
-			return nil, fmt.Errorf("FileDescriptorSet contains no unary methods: all %d method(s) are streaming, which forge does not expose as tools yet", n)
+			return nil, fmt.Errorf("FileDescriptorSet contains no callable methods: all %d method(s) are client-streaming or bidi, which forge cannot expose over a JSON-over-HTTP bridge", n)
 		}
 		return nil, fmt.Errorf("FileDescriptorSet contains no services")
 	}

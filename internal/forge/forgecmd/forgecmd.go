@@ -97,6 +97,7 @@ Add/generate flags:
   --targets t1,t2            comma-separated targets (default: rysh-toolpack,docs)
   --out DIR                  output directory (default: .rysh/forge/<name>/gen)
   --base-url URL             override the spec's server URL (for live execution)
+  --ws-url URL               websocket URL for GraphQL subscriptions (default: base URL, http→ws)
   --cred-env VAR             env var holding the API key/token (live execution)
   --mode auto|static|dynamic exposure mode (default: auto — dynamic above ~50 ops)
   --tags a,b                 expose only operations with these tags
@@ -122,6 +123,7 @@ type forgeFlags struct {
 	targets  string
 	out      string
 	baseURL  string
+	wsURL    string
 	credEnv  string
 	mode     string
 	tags     string
@@ -161,6 +163,7 @@ func bindForgeFlags(fs *flag.FlagSet) *forgeFlags {
 	fs.StringVar(&f.targets, "targets", "rysh-toolpack,docs", "comma-separated generator targets")
 	fs.StringVar(&f.out, "out", "", "output directory")
 	fs.StringVar(&f.baseURL, "base-url", "", "override server base URL")
+	fs.StringVar(&f.wsURL, "ws-url", "", "override the websocket URL for GraphQL subscriptions (default: base URL with http→ws / https→wss)")
 	fs.StringVar(&f.credEnv, "cred-env", "", "env var holding the credential")
 	fs.StringVar(&f.mode, "mode", "auto", "exposure mode: auto|static|dynamic")
 	fs.StringVar(&f.tags, "tags", "", "comma-separated tag filter")
@@ -397,18 +400,25 @@ func forgeAdd(workDir string, args []string, w io.Writer) error {
 	// not a REST one. Unary methods are modeled as unary POSTs to the gRPC wire
 	// path, which the forge runtime speaks over HTTP/JSON — so live calls work
 	// only against a server that accepts JSON on that path (grpc-gateway
-	// transcoding, Connect, or an Envoy/grpc-web bridge). Generation, docs and
-	// SDK output are unaffected. Say so at add time rather than letting the
+	// transcoding or an Envoy/grpc-web bridge). Server-streaming sessions
+	// additionally require grpc-gateway's newline-delimited JSON framing;
+	// Connect's enveloped streaming framing is not supported. Generation, docs
+	// and SDK output are unaffected. Say so at add time rather than letting the
 	// user discover it when every call 404s.
 	if source == forge.SourceGRPC {
 		fmt.Fprintf(w, "ℹ gRPC source: unary methods are exposed as POST %s\n"+
-			"  Live calls require a JSON-over-HTTP endpoint (grpc-gateway/Connect);\n"+
-			"  a plain gRPC/HTTP2 server will reject them.\n",
+			"  Live calls require a JSON-over-HTTP endpoint (grpc-gateway);\n"+
+			"  a plain gRPC/HTTP2 server will reject them. Server-streaming\n"+
+			"  sessions consume grpc-gateway NDJSON frames (Connect framing is not supported).\n",
 			"/<package>.<Service>/<Method>")
 	}
-	// Report anything the ingester deliberately did not expose (gRPC streaming
-	// methods, GraphQL subscriptions) — specific names and kinds, so the
-	// "not exposed" claim always matches what actually happened.
+	// Report what the ingester routed to streaming sessions (gRPC
+	// server-streaming, GraphQL subscriptions) and what it deliberately did not
+	// expose (client/bidi streaming) — specific names and kinds, so every
+	// claim matches what actually happened.
+	for _, line := range streamsSummary(api) {
+		fmt.Fprintf(w, "ℹ %s\n", line)
+	}
 	for _, line := range skippedSummary(api) {
 		fmt.Fprintf(w, "ℹ %s\n", line)
 	}
@@ -423,6 +433,7 @@ func forgeAdd(workDir string, args []string, w io.Writer) error {
 		Source:        source,
 		SpecFile:      rel,
 		BaseURL:       baseURL,
+		WSURL:         f.wsURL,
 		CredentialEnv: f.credEnv,
 		Auth:          f.authConfig(),
 		Policy:        f.policy(name),
@@ -594,12 +605,36 @@ func generateTargets(workDir, name string, api *ir.API, f *forgeFlags, w io.Writ
 	return nil
 }
 
+// streamsSummary reports what landed in api.Streams — server-streaming methods
+// / subscription fields exposed as background streaming sessions, e.g.
+//
+//	2 server-streaming methods exposed as streaming sessions (stream_start / stream_session): Pub_Tail, Pub_Watch
+//	2 subscription fields exposed as streaming sessions over graphql-ws (graphql_subscribe / stream_session): onEvent, onUserCreated
+//
+// Empty when the API has no streams, so no claims are printed for plain specs.
+func streamsSummary(api *ir.API) []string {
+	if api == nil || len(api.Streams) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(api.Streams))
+	for i := range api.Streams {
+		names = append(names, api.Streams[i].ID)
+	}
+	sort.Strings(names)
+	n := len(names)
+	if api.SourceType == "graphql" {
+		return []string{fmt.Sprintf("%d subscription %s exposed as streaming sessions over graphql-ws (graphql_subscribe / stream_session): %s",
+			n, plural(n, "field", "fields"), joinCapped(names, 10))}
+	}
+	return []string{fmt.Sprintf("%d server-streaming %s exposed as streaming sessions (stream_start / stream_session): %s",
+		n, plural(n, "method", "methods"), joinCapped(names, 10))}
+}
+
 // skippedSummary renders api.Skipped as specific, honest report lines, e.g.
 //
-//	3 streaming methods skipped (server-streaming: Pub_Watch, Pub_Tail; bidi: Pub_Chat) — streaming is not exposed as tools yet
-//	2 subscription fields skipped (subscriptions are not exposed as tools yet): onMessage, onUser
+//	2 streaming methods skipped (client-streaming: Pub_Upload; bidi: Pub_Chat) — client/bidi streams cannot ride a JSON-over-HTTP bridge
 //
-// Empty when nothing was skipped, so sources without streaming/subscriptions
+// Empty when nothing was skipped, so sources without client/bidi streaming
 // print no exclusion claims at all.
 func skippedSummary(api *ir.API) []string {
 	if api == nil || len(api.Skipped) == 0 {
@@ -630,12 +665,13 @@ func skippedSummary(api *ir.API) []string {
 		streamParts = append(streamParts, label+": "+joinCapped(names, 10))
 	}
 	if streamTotal > 0 {
-		lines = append(lines, fmt.Sprintf("%d streaming %s skipped (%s) — streaming is not exposed as tools yet",
+		lines = append(lines, fmt.Sprintf("%d streaming %s skipped (%s) — client/bidi streams cannot ride a JSON-over-HTTP bridge",
 			streamTotal, plural(streamTotal, "method", "methods"), strings.Join(streamParts, "; ")))
 	}
 
+	// Legacy IR only: current ingesters route subscriptions to api.Streams.
 	if subs := byKind[ir.SkipSubscription]; len(subs) > 0 {
-		lines = append(lines, fmt.Sprintf("%d subscription %s skipped (subscriptions are not exposed as tools yet): %s",
+		lines = append(lines, fmt.Sprintf("%d subscription %s skipped: %s",
 			len(subs), plural(len(subs), "field", "fields"), joinCapped(subs, 10)))
 	}
 	return lines
