@@ -441,7 +441,7 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 		return runDaemon(cfg, logger, configPath)
 
 	case "version", "--version", "-V":
-		fmt.Printf("rysh %s (commit: %s, built: %s)\n", version, commit, date)
+		fmt.Printf(progname.Rewrite("rysh %s (commit: %s, built: %s)\n"), version, commit, date)
 		return nil
 	case "help", "-h", "--help":
 		printUsage()
