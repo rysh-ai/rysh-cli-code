@@ -3,6 +3,7 @@ package actors
 import (
 	"fmt"
 	"log/slog"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"strings"
 	"time"
 
@@ -994,7 +995,7 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 		// human-facing status text; log a one-liner instead.
 		var sb strings.Builder
 		w.handleAgentReloadPrompts(&sb, "")
-		slog.Info("rysh: prompts auto-reloaded", "reason", m.Reason, "status", strings.TrimSpace(sb.String()))
+		slog.Info(progname.Rewrite("rysh: prompts auto-reloaded"), "reason", m.Reason, "status", strings.TrimSpace(sb.String()))
 
 	case *activateWorkspaceMsg:
 		w.handleActivate(m)

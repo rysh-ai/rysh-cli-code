@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"strings"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/platform"
@@ -50,7 +51,7 @@ func requirePTY(args []string) error {
 	if len(args) > 0 && ptylessCommands[strings.ToLower(args[0])] {
 		return nil
 	}
-	return fmt.Errorf(`cannot start a rysh session: %s
+	return fmt.Errorf(progname.Rewrite(`cannot start a rysh session: %s
 
 Every rysh pane is a PTY-backed shell, so sessions cannot run here.
 
@@ -64,5 +65,5 @@ This build can still run the commands that need no pane, for example:
     rysh send <session> <input>     talk to a session running in WSL
     rysh list-sessions
     rysh install <package>
-    rysh eval`, platform.PTYUnsupportedReason)
+    rysh eval`), platform.PTYUnsupportedReason)
 }

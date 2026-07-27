@@ -3,6 +3,7 @@ package actors
 import (
 	"context"
 	"fmt"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"strings"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/agentic"
@@ -104,7 +105,7 @@ func (w *WorkspaceActor) handleIntegrationSubcommand(out *strings.Builder, paneI
 func (w *WorkspaceActor) integrationList(out *strings.Builder, mgr *forge.Manager) {
 	items := mgr.List()
 	if len(items) == 0 {
-		fmt.Fprintf(out, "\n[integration] none configured. Add one with the CLI: rysh forge add <name> <spec-file>\n")
+		fmt.Fprint(out, progname.Rewrite("\n[integration] none configured. Add one with the CLI: rysh forge add <name> <spec-file>\n"))
 		return
 	}
 	fmt.Fprintf(out, "\n[integration] integrations (%d):\n", len(items))
@@ -129,7 +130,7 @@ func (w *WorkspaceActor) integrationHelp(out *strings.Builder) {
 	fmt.Fprintf(out, "  ##integration disable <name>      unregister an integration's tools\n")
 	fmt.Fprintf(out, "  ##integration tools <name>        list an enabled integration's tools\n")
 	fmt.Fprintf(out, "  ##integration remove <name>       disable + delete an integration\n")
-	fmt.Fprintf(out, "  Add/generate integrations with the CLI:  rysh forge add <name> <spec-file>\n")
+	fmt.Fprint(out, progname.Rewrite("  Add/generate integrations with the CLI:  rysh forge add <name> <spec-file>\n"))
 	fmt.Fprintf(out, "  Large APIs expose 3 dynamic meta-tools (list/get-schema/invoke) to stay in budget.\n")
 }
 

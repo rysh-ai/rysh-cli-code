@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"strings"
 	"time"
 
@@ -180,7 +181,7 @@ func (w *WorkspaceActor) cmdSessionSwitch(out *strings.Builder, name string) {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			fmt.Fprintf(out, "\n[rysh] session %q not found (see ##session list)\n", name)
-			fmt.Fprintf(out, "  create it with:  rysh %s    (or: rysh create %s)\n", name, name)
+			fmt.Fprintf(out, progname.Rewrite("  create it with:  rysh %s    (or: rysh create %s)\n"), name, name)
 		} else {
 			fmt.Fprintf(out, "\n[rysh] could not read session %q: %v\n", name, err)
 		}
@@ -216,9 +217,9 @@ func (w *WorkspaceActor) cmdSessionSwitch(out *strings.Builder, name string) {
 // (now-running) target session, plus a reminder that the current session stays
 // up in the background.
 func (w *WorkspaceActor) sessionAttachHelp(out *strings.Builder, target, current string) {
-	fmt.Fprintf(out, "  attach from CLI:  rysh attach %s\n", target)
+	fmt.Fprintf(out, progname.Rewrite("  attach from CLI:  rysh attach %s\n"), target)
 	fmt.Fprintf(out, "  in the app:       use the session picker\n")
-	fmt.Fprintf(out, "  (session %q keeps running in the background; detach with ctrl+o d or: rysh detach %s)\n",
+	fmt.Fprintf(out, progname.Rewrite("  (session %q keeps running in the background; detach with ctrl+o d or: rysh detach %s)\n"),
 		current, current)
 }
 

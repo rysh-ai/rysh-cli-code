@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"strings"
 
 	"github.com/nats-io/nats.go"
@@ -46,7 +47,7 @@ func (t *RyshBuildPipelineTool) Spec() ToolSpec {
 }`)
 	return ToolSpec{
 		Name:             "rysh_build_pipeline",
-		Description:      "Parse a rysh pipeline YAML file and register the phases as softdev prompts. Each phase gets a continuation instruction so the agent automatically advances through the pipeline.",
+		Description:      progname.Rewrite("Parse a rysh pipeline YAML file and register the phases as softdev prompts. Each phase gets a continuation instruction so the agent automatically advances through the pipeline."),
 		Parameters:       schema,
 		RequiresApproval: false,
 	}

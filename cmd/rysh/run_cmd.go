@@ -51,6 +51,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"strconv"
 	"strings"
 	"syscall"
@@ -267,13 +268,13 @@ func parseRunArgs(args []string) (runOptions, error) {
 			opts.Keep = true
 		default:
 			if strings.HasPrefix(a, "-") {
-				return opts, fmt.Errorf("unknown rysh run flag %q", a)
+				return opts, fmt.Errorf(progname.Rewrite("unknown rysh run flag %q"), a)
 			}
 			positional = append(positional, a)
 		}
 	}
 	if len(positional) == 0 && opts.TaskArg == "" {
-		return opts, errors.New(runUsage)
+		return opts, errors.New(progname.Rewrite(runUsage))
 	}
 	if opts.RecordDir != "" && opts.ReplayDir != "" {
 		return opts, errors.New("--record and --replay are mutually exclusive (a replay serves recorded turns; there is nothing new to record)")
@@ -316,7 +317,7 @@ func loadRunPrompt(opts *runOptions) error {
 		}
 	}
 	if strings.TrimSpace(opts.Prompt) == "" {
-		return errors.New(runUsage)
+		return errors.New(progname.Rewrite(runUsage))
 	}
 	return nil
 }
@@ -520,7 +521,7 @@ func executeHeadlessRun(cfg config.Config, configPath string, opts runOptions) (
 		}
 		if _, err := os.Stat(filepath.Join(abs, provider.TranscriptFileName)); err != nil {
 			return runOutcome{}, res, nil, "", fmt.Errorf(
-				"run: --replay %s holds no %s (record one with `rysh run --record %s`): %w",
+				progname.Rewrite("run: --replay %s holds no %s (record one with `rysh run --record %s`): %w"),
 				opts.ReplayDir, provider.TranscriptFileName, opts.ReplayDir, err)
 		}
 		if err := os.Setenv(provider.ReplayDirEnv, abs); err != nil {
@@ -647,7 +648,7 @@ func executeHeadlessRun(cfg config.Config, configPath string, opts runOptions) (
 	audit := assembleRunAudit(collector, opts, providerName, sessionName, outcome, res, diff, start, finished)
 
 	if opts.Keep {
-		fmt.Fprintf(os.Stderr, "[run] --keep: session %s left running; attach with \"rysh attach %s\"\n",
+		fmt.Fprintf(os.Stderr, progname.Rewrite("[run] --keep: session %s left running; attach with \"rysh attach %s\"\n"),
 			sessionName, sessionName)
 	} else {
 		cleanupRunSession(store, sessionName)

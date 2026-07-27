@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"time"
 
 	"github.com/lmittmann/tint"
@@ -55,7 +56,7 @@ func setupDebugLogger(sessionName string) *slog.Logger {
 	logDir := "/tmp/rysh/logs"
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		// Fallback to stderr-only if we can't create the log directory.
-		fmt.Fprintf(os.Stderr, "rysh: warning: cannot create log dir %s: %v\n", logDir, err)
+		fmt.Fprintf(os.Stderr, progname.Rewrite("rysh: warning: cannot create log dir %s: %v\n"), logDir, err)
 		logger := slog.New(tint.NewHandler(os.Stderr, &tint.Options{Level: slog.LevelDebug}))
 		slog.SetDefault(logger)
 		return logger
@@ -69,7 +70,7 @@ func setupDebugLogger(sessionName string) *slog.Logger {
 
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "rysh: warning: cannot open log file %s: %v\n", logFile, err)
+		fmt.Fprintf(os.Stderr, progname.Rewrite("rysh: warning: cannot open log file %s: %v\n"), logFile, err)
 		logger := slog.New(tint.NewHandler(os.Stderr, &tint.Options{Level: slog.LevelDebug}))
 		slog.SetDefault(logger)
 		return logger

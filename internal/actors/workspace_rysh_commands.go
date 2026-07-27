@@ -2,6 +2,7 @@ package actors
 
 import (
 	"fmt"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"strings"
 
 	"github.com/atotto/clipboard"
@@ -592,7 +593,7 @@ func (w *WorkspaceActor) ryshHelp(out *strings.Builder) {
 	fmt.Fprintf(out, "  ##integration list            list Forge API integrations (alias: ##int)\n")
 	fmt.Fprintf(out, "  ##integration enable <name>   register a generated integration's tools\n")
 	fmt.Fprintf(out, "  ##integration tools <name>    list an integration's tools\n")
-	fmt.Fprintf(out, "  (forge artifacts also build from the shell: rysh forge add <name> <spec-file>)\n")
+	fmt.Fprint(out, progname.Rewrite("  (forge artifacts also build from the shell: rysh forge add <name> <spec-file>)\n"))
 	fmt.Fprintf(out, "\n")
 }
 

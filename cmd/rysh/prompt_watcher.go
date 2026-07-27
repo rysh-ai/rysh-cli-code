@@ -3,6 +3,7 @@ package main
 import (
 	"log/slog"
 	"path/filepath"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -73,10 +74,10 @@ func startPromptWatcher(dir string, onReload func()) (stop func(), err error) {
 				if !ok {
 					return
 				}
-				slog.Warn("rysh: prompt watcher error", "err", watchErr)
+				slog.Warn(progname.Rewrite("rysh: prompt watcher error"), "err", watchErr)
 			case <-timerC:
 				timerC = nil // disarm until the next event re-arms via timer.Reset
-				slog.Info("rysh: prompt override dir changed; reload triggered", "dir", dir)
+				slog.Info(progname.Rewrite("rysh: prompt override dir changed; reload triggered"), "dir", dir)
 				onReload()
 			}
 		}

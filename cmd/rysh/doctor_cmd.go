@@ -16,6 +16,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"sort"
 	"strings"
 	"time"
@@ -93,7 +94,7 @@ func defaultDoctorDeps(cfg config.Config) doctorDeps {
 // error (→ non-zero exit) iff any check FAILed.
 func runDoctor(cfg config.Config, configPath string, args []string) error {
 	if hasFlag(args, "--help", "-h") {
-		fmt.Println("usage: rysh doctor [--copy-test]")
+		fmt.Println(progname.Rewrite("usage: rysh doctor [--copy-test]"))
 		fmt.Println("checks provider reachability, channel credentials, daemon/NATS health, and")
 		fmt.Println("config sanity, printing PASS/WARN/FAIL per check with a one-line fix.")
 		fmt.Println("--copy-test  emit an OSC 52 clipboard copy of a known string so you can")
@@ -107,9 +108,9 @@ func runDoctor(cfg config.Config, configPath string, args []string) error {
 	// Users coming from tools with a global config expect ~/.rysh; rysh config
 	// is project-local, so say exactly which file (or default) applies here.
 	if cfg.ConfigFile != "" {
-		fmt.Printf("rysh doctor — config: %s\n", cfg.ConfigFile)
+		fmt.Printf(progname.Rewrite("rysh doctor — config: %s\n"), cfg.ConfigFile)
 	} else {
-		fmt.Printf("rysh doctor — config: (none found — defaults; project-local state in %s)\n", cfg.RyshDir)
+		fmt.Printf(progname.Rewrite("rysh doctor — config: (none found — defaults; project-local state in %s)\n"), cfg.RyshDir)
 	}
 
 	checks := doctorChecks(cfg, defaultDoctorDeps(cfg))
@@ -169,20 +170,20 @@ func checkClipboard(deps doctorDeps) []doctorCheck {
 			Group:  "clipboard",
 			Status: doctorWarn,
 			Detail: transport + "; tmux in the chain — OSC 52 emitted raw + passthrough-wrapped",
-			Fix:    "tmux needs `set-clipboard external|on` (default) or `allow-passthrough on`; verify: rysh doctor --copy-test",
+			Fix:    progname.Rewrite("tmux needs `set-clipboard external|on` (default) or `allow-passthrough on`; verify: rysh doctor --copy-test"),
 		}}
 	case strings.HasPrefix(term, "screen"):
 		return []doctorCheck{{
 			Group:  "clipboard",
 			Status: doctorWarn,
 			Detail: transport + "; GNU screen in the chain — OSC 52 emitted DCS-wrapped",
-			Fix:    "verify end-to-end: rysh doctor --copy-test",
+			Fix:    progname.Rewrite("verify end-to-end: rysh doctor --copy-test"),
 		}}
 	}
 	return []doctorCheck{{
 		Group:  "clipboard",
 		Status: doctorPass,
-		Detail: transport + " (terminal must support OSC 52 — verify: rysh doctor --copy-test)",
+		Detail: transport + progname.Rewrite(" (terminal must support OSC 52 — verify: rysh doctor --copy-test)"),
 	}}
 }
 
@@ -218,7 +219,7 @@ func checkProvider(cfg config.Config, deps doctorDeps) doctorCheck {
 		return doctorCheck{
 			Group: "provider", Status: doctorFail,
 			Detail: fmt.Sprintf("no API key configured for provider %q", p.Name),
-			Fix:    fmt.Sprintf("set provider.api_key (as a ${ENV} reference) or export %s; run `rysh onboard`", p.KeyEnv),
+			Fix:    fmt.Sprintf(progname.Rewrite("set provider.api_key (as a ${ENV} reference) or export %s; run `rysh onboard`"), p.KeyEnv),
 		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), validateProviderTimeout)
@@ -228,7 +229,7 @@ func checkProvider(cfg config.Config, deps doctorDeps) doctorCheck {
 		return doctorCheck{
 			Group: "provider", Status: doctorFail,
 			Detail: err.Error(),
-			Fix:    fmt.Sprintf("check the key/network (export %s or fix provider.api_key); run `rysh onboard` to reconfigure", p.KeyEnv),
+			Fix:    fmt.Sprintf(progname.Rewrite("check the key/network (export %s or fix provider.api_key); run `rysh onboard` to reconfigure"), p.KeyEnv),
 		}
 	}
 	return doctorCheck{Group: "provider", Status: doctorPass, Detail: detail}
@@ -406,7 +407,7 @@ func checkChannels(cfg config.Config, deps doctorDeps) []doctorCheck {
 			case !validated:
 				out = append(out, doctorCheck{Group: "channels", Status: doctorWarn,
 					Detail: fmt.Sprintf("%s: no non-binding validation for %s", label, chType),
-					Fix:    fmt.Sprintf("start the channel to fully verify: rysh attach, then ##humanoid channel start %s %s", fm.Name, chType)})
+					Fix:    fmt.Sprintf(progname.Rewrite("start the channel to fully verify: rysh attach, then ##humanoid channel start %s %s"), fm.Name, chType)})
 			case verr != nil:
 				fix := fmt.Sprintf("fix the %s credentials referenced in %s", chType, path)
 				if len(missing) > 0 {
@@ -447,22 +448,22 @@ func checkDaemon(cfg config.Config, deps doctorDeps) []doctorCheck {
 	if err != nil {
 		return []doctorCheck{{Group: "daemon", Status: doctorWarn,
 			Detail: fmt.Sprintf("no live session — no record for session %q", name),
-			Fix:    fmt.Sprintf("run \"rysh attach %s\" (or just \"rysh\") to start one", name)}}
+			Fix:    fmt.Sprintf(progname.Rewrite("run \"rysh attach %s\" (or just \"rysh\") to start one"), name)}}
 	}
 	if rec.PID <= 0 || !session.ProcessAlive(rec.PID) {
 		return []doctorCheck{{Group: "daemon", Status: doctorWarn,
 			Detail: fmt.Sprintf("session %q is stopped (state: %s)", name, rec.State),
-			Fix:    fmt.Sprintf("run \"rysh attach %s\" to restart it", name)}}
+			Fix:    fmt.Sprintf(progname.Rewrite("run \"rysh attach %s\" to restart it"), name)}}
 	}
 	if rec.NATSPort <= 0 {
 		return []doctorCheck{{Group: "daemon", Status: doctorFail,
 			Detail: fmt.Sprintf("session %q daemon (PID %d) has no NATS port recorded", name, rec.PID),
-			Fix:    fmt.Sprintf("run \"rysh stop %s\" then \"rysh attach %s\"", name, name)}}
+			Fix:    fmt.Sprintf(progname.Rewrite("run \"rysh stop %s\" then \"rysh attach %s\""), name, name)}}
 	}
 	if err := deps.dialNATS(rec.NATSPort, 2*time.Second); err != nil {
 		return []doctorCheck{{Group: "daemon", Status: doctorFail,
 			Detail: fmt.Sprintf("session %q daemon alive (PID %d) but NATS port %d unreachable: %v", name, rec.PID, rec.NATSPort, err),
-			Fix:    fmt.Sprintf("the daemon is wedged — run \"rysh stop %s\" then \"rysh attach %s\"", name, name)}}
+			Fix:    fmt.Sprintf(progname.Rewrite("the daemon is wedged — run \"rysh stop %s\" then \"rysh attach %s\""), name, name)}}
 	}
 	return []doctorCheck{{Group: "daemon", Status: doctorPass,
 		Detail: fmt.Sprintf("session %q alive (PID %d, NATS port %d reachable)", name, rec.PID, rec.NATSPort)}}
@@ -482,7 +483,7 @@ func checkConfig(cfg config.Config, deps doctorDeps) []doctorCheck {
 	if cfg.ConfigFile == "" {
 		out = append(out, doctorCheck{Group: "config", Status: doctorWarn,
 			Detail: "no rysh.config.yaml found (defaults apply; config is project-local)",
-			Fix:    "run `rysh onboard` in this directory to create one"})
+			Fix:    progname.Rewrite("run `rysh onboard` in this directory to create one")})
 	} else if raw, err := os.ReadFile(cfg.ConfigFile); err != nil {
 		out = append(out, doctorCheck{Group: "config", Status: doctorFail,
 			Detail: fmt.Sprintf("cannot read %s: %v", cfg.ConfigFile, err),

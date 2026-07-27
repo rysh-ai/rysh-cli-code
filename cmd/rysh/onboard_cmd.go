@@ -34,6 +34,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"strconv"
 	"strings"
 	"time"
@@ -228,7 +229,7 @@ func keyEnvHint(p onboardProvider) string {
 	if p.KeyEnv == "" {
 		return ""
 	}
-	return "; export " + p.KeyEnv + " or re-run `rysh onboard`"
+	return "; export " + p.KeyEnv + progname.Rewrite(" or re-run `rysh onboard`")
 }
 
 // firstModelID extracts data[0].id from a models-list response (both the
@@ -315,18 +316,18 @@ func runOnboard(cfg config.Config, configPath string, args []string, logger *slo
 	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return errors.New("onboard needs a terminal for the wizard; use the flag form instead:\n" +
-			"  rysh onboard --provider anthropic --key-env ANTHROPIC_API_KEY [--model <m>] [--base-url <u>] [--no-validate]")
+			progname.Rewrite("  rysh onboard --provider anthropic --key-env ANTHROPIC_API_KEY [--model <m>] [--base-url <u>] [--no-validate]"))
 	}
 	return runOnboardWizard(cfg, configPath, logger, !hasFlag(args, "--no-launch"))
 }
 
 func printOnboardUsage() {
-	fmt.Println("usage: rysh onboard                                   interactive wizard (TTY)")
-	fmt.Println("       rysh onboard --provider <name> [flags]         scriptable, no TTY needed")
+	fmt.Println(progname.Rewrite("usage: rysh onboard                                   interactive wizard (TTY)"))
+	fmt.Println(progname.Rewrite("       rysh onboard --provider <name> [flags]         scriptable, no TTY needed"))
 	fmt.Println()
 	fmt.Println("Sets up rysh for use AT the keyboard: provider + key (validated), terminal")
 	fmt.Println("preferences, then opens your session. To drive a session remotely from")
-	fmt.Println("Slack/Telegram/WhatsApp instead, run \"rysh assistant\".")
+	fmt.Println(progname.Rewrite("Slack/Telegram/WhatsApp instead, run \"rysh assistant\"."))
 	fmt.Println()
 	fmt.Println("wizard flags:")
 	fmt.Println("  --no-launch           write the config but do not open a session")
@@ -397,8 +398,8 @@ func runOnboardHeadless(cfg config.Config, configPath string, args []string) err
 		fmt.Println(n)
 	}
 	fmt.Println("note: rysh config is project-local — this setup applies to the current directory only.")
-	fmt.Println("next: \"rysh doctor\" to verify, \"rysh onboard\" in a terminal to finish setup and")
-	fmt.Println("open a session, or \"rysh assistant\" to drive a session from Slack/Telegram/WhatsApp.")
+	fmt.Println(progname.Rewrite("next: \"rysh doctor\" to verify, \"rysh onboard\" in a terminal to finish setup and"))
+	fmt.Println(progname.Rewrite("open a session, or \"rysh assistant\" to drive a session from Slack/Telegram/WhatsApp."))
 	return nil
 }
 
@@ -768,7 +769,7 @@ func shellFallback() string {
 
 func (m onboardModel) View() string {
 	var b strings.Builder
-	b.WriteString("rysh onboard — project-local setup (rysh.config.yaml + .rysh/ in this directory)\n\n")
+	b.WriteString(progname.Rewrite("rysh onboard — project-local setup (rysh.config.yaml + .rysh/ in this directory)\n\n"))
 	switch m.step {
 	case stepProvider:
 		b.WriteString("Step 1/3 — pick a provider (↑/↓, enter):\n")
@@ -906,8 +907,8 @@ func absConfigPath(p string) string {
 // (design 004 §8: prompt before starting a background process).
 func launchOnboardSession(cfg config.Config, logger *slog.Logger, store *session.Store, storeErr error, out onboardOutcome) error {
 	if !out.LaunchNow {
-		fmt.Printf("\nwhen you are ready:\n  rysh attach %s\n", out.SessionName)
-		fmt.Println("verify anytime with: rysh doctor")
+		fmt.Printf(progname.Rewrite("\nwhen you are ready:\n  rysh attach %s\n"), out.SessionName)
+		fmt.Println(progname.Rewrite("verify anytime with: rysh doctor"))
 		return nil
 	}
 	if storeErr != nil {

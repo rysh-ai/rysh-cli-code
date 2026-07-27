@@ -15,6 +15,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"strings"
 	"time"
 
@@ -79,7 +80,7 @@ func verifyAssistantRoundTrip(store *session.Store, sessionName, channel string,
 	}
 
 	return fmt.Sprintf("round trip NOT verified — no message arrived within %s.\n"+
-		"        the setup is saved; check `rysh doctor`, then `##humanoid channels %s`\n"+
+		progname.Rewrite("        the setup is saved; check `rysh doctor`, then `##humanoid channels %s`\n")+
 		"        (common causes: wrong token, the bot was never messaged, or your id is\n"+
 		"        not the allowlisted owner)", timeout, assistantName)
 }

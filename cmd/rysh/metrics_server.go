@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"time"
 )
 
@@ -21,9 +22,9 @@ func startMetricsServer(addr string, handler http.Handler) func(context.Context)
 	}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Warn("rysh: metrics server stopped", "addr", addr, "err", err)
+			slog.Warn(progname.Rewrite("rysh: metrics server stopped"), "addr", addr, "err", err)
 		}
 	}()
-	slog.Info("rysh: prometheus metrics exporter listening", "addr", addr, "path", "/metrics")
+	slog.Info(progname.Rewrite("rysh: prometheus metrics exporter listening"), "addr", addr, "path", "/metrics")
 	return srv.Shutdown
 }

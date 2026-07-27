@@ -1,4 +1,4 @@
-package main
+package progname
 
 import (
 	"os"
@@ -8,7 +8,7 @@ import (
 // The substitution must catch the command word and nothing else: a filename or
 // path that merely starts with "rysh" has to survive verbatim, or the `ry`
 // build would tell users about a "ry.config.yaml" that does not exist.
-func TestRewriteProgName(t *testing.T) {
+func TestRewrite(t *testing.T) {
 	orig := os.Args[0]
 	os.Args[0] = "/usr/local/bin/ry"
 	t.Cleanup(func() { os.Args[0] = orig })
@@ -32,10 +32,13 @@ func TestRewriteProgName(t *testing.T) {
 		{"longer word", "ryshification is not a word", "ryshification is not a word"},
 		{"twice on a line", "rysh attach; then rysh detach", "ry attach; then ry detach"},
 		{"empty", "", ""},
+		{"message prefix", "[rysh] no matching tab", "[rysh] no matching tab"},
+		{"system command", "  ##rysh web stop            stop the web server", "  ##rysh web stop            stop the web server"},
+		{"prefix then command", "[rysh] run rysh doctor", "[rysh] run ry doctor"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := rewriteProgName(tc.in); got != tc.want {
-				t.Errorf("rewriteProgName(%q)\n got %q\nwant %q", tc.in, got, tc.want)
+			if got := Rewrite(tc.in); got != tc.want {
+				t.Errorf("Rewrite(%q)\n got %q\nwant %q", tc.in, got, tc.want)
 			}
 		})
 	}
@@ -43,18 +46,18 @@ func TestRewriteProgName(t *testing.T) {
 
 // Under the open-source name the text is already correct and must be returned
 // untouched — including the filenames, which the fast path must not mangle.
-func TestRewriteProgNameIsIdentityForRysh(t *testing.T) {
+func TestRewriteIsIdentityForRysh(t *testing.T) {
 	orig := os.Args[0]
 	os.Args[0] = "/usr/local/bin/rysh"
 	t.Cleanup(func() { os.Args[0] = orig })
 
 	in := "       rysh doctor writes rysh.config.yaml"
-	if got := rewriteProgName(in); got != in {
-		t.Errorf("rewriteProgName(%q) = %q, want it unchanged", in, got)
+	if got := Rewrite(in); got != in {
+		t.Errorf("Rewrite(%q) = %q, want it unchanged", in, got)
 	}
 }
 
-func TestProgNameFallbacks(t *testing.T) {
+func TestNameFallbacks(t *testing.T) {
 	orig := os.Args[0]
 	t.Cleanup(func() { os.Args[0] = orig })
 
@@ -71,8 +74,8 @@ func TestProgNameFallbacks(t *testing.T) {
 		{"/tmp/go-build123/rysh.test", "rysh"},
 	} {
 		os.Args[0] = tc.argv0
-		if got := progName(); got != tc.want {
-			t.Errorf("progName() with argv[0]=%q = %q, want %q", tc.argv0, got, tc.want)
+		if got := Name(); got != tc.want {
+			t.Errorf("Name() with argv[0]=%q = %q, want %q", tc.argv0, got, tc.want)
 		}
 	}
 }

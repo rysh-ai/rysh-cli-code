@@ -35,6 +35,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"sync"
 )
 
@@ -245,7 +246,7 @@ func loadTranscript(dir string) ([]transcriptEntry, error) {
 	path := filepath.Join(dir, TranscriptFileName)
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("replay: read %s: %w (record one with `rysh run --record %s`)", path, err, dir)
+		return nil, fmt.Errorf(progname.Rewrite("replay: read %s: %w (record one with `rysh run --record %s`)"), path, err, dir)
 	}
 	var entries []transcriptEntry
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -309,7 +310,7 @@ func (p *replayProvider) CompleteWithTools(
 	// timestamps/paths — but the loop shape must match).
 	if e.ConvLen != 0 && e.ConvLen != len(conversation) {
 		return nil, fmt.Errorf(
-			"replay: turn %d expected a conversation of %d turn(s), got %d — the run diverged from the recording (or compaction restructured it); re-record with `rysh run --record`",
+			progname.Rewrite("replay: turn %d expected a conversation of %d turn(s), got %d — the run diverged from the recording (or compaction restructured it); re-record with `rysh run --record`"),
 			e.Index, e.ConvLen, len(conversation))
 	}
 	return e.Response.toAgenticResponse(), nil

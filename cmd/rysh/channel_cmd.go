@@ -11,9 +11,11 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"strings"
 
 	"github.com/nats-io/nats.go"
@@ -69,7 +71,7 @@ func defaultPluginNATSProvider() (*nats.Conn, string, error) {
 func runChannelCmd(cfg config.Config, args []string) error {
 	_ = cfg // registry root is project-local (.rysh/channels), like .rysh/channel-state
 	if len(args) == 0 {
-		return fmt.Errorf("usage: rysh channel <install|list|remove|keygen|sign|verify|trust> [args]")
+		return errors.New(progname.Rewrite("usage: rysh channel <install|list|remove|keygen|sign|verify|trust> [args]"))
 	}
 	switch args[0] {
 	case "install":
@@ -87,7 +89,7 @@ func runChannelCmd(cfg config.Config, args []string) error {
 	case "trust":
 		return channelTrust(os.Stdout, args[1:])
 	default:
-		return fmt.Errorf("rysh channel: unknown subcommand %q (want install|list|remove|keygen|sign|verify|trust)", args[0])
+		return fmt.Errorf(progname.Rewrite("rysh channel: unknown subcommand %q (want install|list|remove|keygen|sign|verify|trust)"), args[0])
 	}
 }
 
@@ -137,7 +139,7 @@ func channelInstall(out io.Writer, in io.Reader, args []string) error {
 		return err
 	}
 	if len(pos) != 1 {
-		return fmt.Errorf("usage: rysh channel install <path-to-package.tar.gz|dir> [--yes] [--checksum sha256:<hex>]")
+		return errors.New(progname.Rewrite("usage: rysh channel install <path-to-package.tar.gz|dir> [--yes] [--checksum sha256:<hex>]"))
 	}
 	src := pos[0]
 
@@ -180,7 +182,7 @@ func channelList(out io.Writer) error {
 	plugins := reg.List()
 	fmt.Fprintln(out, "installed channel plugins:")
 	if len(plugins) == 0 {
-		fmt.Fprintln(out, "  (none — `rysh channel install <pkg>`)")
+		fmt.Fprintln(out, progname.Rewrite("  (none — `rysh channel install <pkg>`)"))
 		return nil
 	}
 	for _, p := range plugins {
@@ -214,7 +216,7 @@ func channelKeygen(out io.Writer, args []string) error {
 		case strings.HasPrefix(args[i], "--out="):
 			path = strings.TrimPrefix(args[i], "--out=")
 		default:
-			return fmt.Errorf("usage: rysh channel keygen [--out <file>]")
+			return errors.New(progname.Rewrite("usage: rysh channel keygen [--out <file>]"))
 		}
 	}
 	pub, err := plugin.GenerateSigningKey(path)
@@ -224,7 +226,7 @@ func channelKeygen(out io.Writer, args []string) error {
 	fmt.Fprintf(out, "wrote private signing key to %s (keep it out of git)\n", path)
 	fmt.Fprintf(out, "public key: %x\n", []byte(pub))
 	fmt.Fprintf(out, "key id:     %s\n", plugin.KeyID(pub))
-	fmt.Fprintf(out, "to trust plugins signed with it: rysh channel trust %x [comment]\n", []byte(pub))
+	fmt.Fprintf(out, progname.Rewrite("to trust plugins signed with it: rysh channel trust %x [comment]\n"), []byte(pub))
 	return nil
 }
 
@@ -250,7 +252,7 @@ func channelSign(out io.Writer, args []string) error {
 		}
 	}
 	if len(pos) != 1 {
-		return fmt.Errorf("usage: rysh channel sign <plugin-dir> [--key <file>] (default key: %s — `rysh channel keygen` creates one)", plugin.DefaultSigningKeyFile)
+		return fmt.Errorf(progname.Rewrite("usage: rysh channel sign <plugin-dir> [--key <file>] (default key: %s — `rysh channel keygen` creates one)"), plugin.DefaultSigningKeyFile)
 	}
 	priv, err := plugin.LoadSigningKey(keyPath)
 	if err != nil {
@@ -269,7 +271,7 @@ func channelSign(out io.Writer, args []string) error {
 // load-time verdict; non-zero exit iff the plugin would refuse to load.
 func channelVerify(out io.Writer, args []string) error {
 	if len(args) != 1 {
-		return fmt.Errorf("usage: rysh channel verify <plugin-dir>")
+		return errors.New(progname.Rewrite("usage: rysh channel verify <plugin-dir>"))
 	}
 	m, err := plugin.LoadManifest(args[0])
 	if err != nil {
@@ -287,7 +289,7 @@ func channelVerify(out io.Writer, args []string) error {
 // appends the key to the local trust file.
 func channelTrust(out io.Writer, args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: rysh channel trust <hex-ed25519-pubkey> [comment...]")
+		return errors.New(progname.Rewrite("usage: rysh channel trust <hex-ed25519-pubkey> [comment...]"))
 	}
 	if err := plugin.AppendTrustedKey(plugin.DefaultTrustFile, args[0], strings.Join(args[1:], " ")); err != nil {
 		return err
@@ -303,7 +305,7 @@ func channelRemove(out io.Writer, in io.Reader, args []string) error {
 		return err
 	}
 	if len(pos) != 1 {
-		return fmt.Errorf("usage: rysh channel remove <name> [--yes]")
+		return errors.New(progname.Rewrite("usage: rysh channel remove <name> [--yes]"))
 	}
 	name := pos[0]
 

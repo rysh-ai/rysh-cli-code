@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"net/http"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 
 	"github.com/gin-gonic/gin"
 )
@@ -96,7 +97,7 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		c.String(http.StatusUnauthorized, "unauthorized: a valid ?token= is required to access this rysh web session")
+		c.String(http.StatusUnauthorized, progname.Rewrite("unauthorized: a valid ?token= is required to access this rysh web session"))
 		c.Abort()
 	}
 }

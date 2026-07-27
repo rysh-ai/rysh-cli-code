@@ -12,6 +12,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"strconv"
 	"strings"
 
@@ -63,8 +64,8 @@ func webCmdURL(port int, host, token string, control bool) string {
 
 // runWebCmd implements `rysh web start|stop <session> [flags]`.
 func runWebCmd(cfg config.Config, args []string) error {
-	usage := errors.New("usage: rysh web start <session-name> [--control] [--port <n>] [--host <h>] [--no-token]\n" +
-		"       rysh web stop <session-name>")
+	usage := errors.New(progname.Rewrite("usage: rysh web start <session-name> [--control] [--port <n>] [--host <h>] [--no-token]\n") +
+		progname.Rewrite("       rysh web stop <session-name>"))
 	if len(args) < 3 {
 		return usage
 	}
@@ -102,7 +103,7 @@ func runWebCmd(cfg config.Config, args []string) error {
 		if control {
 			fmt.Printf("  mode:   control (bind forced to 127.0.0.1)\n")
 		}
-		fmt.Printf("  verify: rysh send %s '##rysh web status'\n", sessName)
+		fmt.Printf(progname.Rewrite("  verify: rysh send %s '##rysh web status'\n"), sessName)
 		return nil
 
 	case "stop":

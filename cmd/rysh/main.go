@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"strings"
 	"sync"
 	"syscall"
@@ -61,7 +62,7 @@ func main() {
 			configPath = abs
 		}
 		if _, err := os.Stat(configPath); err != nil {
-			fmt.Fprintf(os.Stderr, "rysh: config file not found: %s\n", configPath)
+			fmt.Fprintf(os.Stderr, progname.Rewrite("rysh: config file not found: %s\n"), configPath)
 			os.Exit(1)
 		}
 	}
@@ -71,7 +72,7 @@ func main() {
 
 	if logLevel != "" {
 		if !logging.ValidLevel(logLevel) {
-			fmt.Fprintf(os.Stderr, "rysh: invalid log level %q (valid: off, debug, info, warn, error)\n", logLevel)
+			fmt.Fprintf(os.Stderr, progname.Rewrite("rysh: invalid log level %q (valid: off, debug, info, warn, error)\n"), logLevel)
 			os.Exit(1)
 		}
 		cfg.LogLevel = logLevel
@@ -80,7 +81,7 @@ func main() {
 	logger := logging.Setup(cfg.LogLevel, cfg.SessionName)
 
 	if err := run(cfg, logger, args, configPath, shared, upgrade); err != nil {
-		fmt.Fprintf(os.Stderr, "rysh: %v\n", err)
+		fmt.Fprintf(os.Stderr, progname.Rewrite("rysh: %v\n"), err)
 		os.Exit(1)
 	}
 }
@@ -261,7 +262,7 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 		// cleanup completes before returning.
 		code, rerr := runRunCmd(cfg, configPath, args[1:])
 		if rerr != nil {
-			fmt.Fprintf(os.Stderr, "rysh: %v\n", rerr)
+			fmt.Fprintf(os.Stderr, progname.Rewrite("rysh: %v\n"), rerr)
 		}
 		os.Exit(code)
 		return nil // unreachable; satisfies the compiler after os.Exit
@@ -303,7 +304,7 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 	case "send":
 		// rysh send <session-name> <input> [--pane <pane-id>] [--mode shell|prompt]
 		if len(args) < 3 {
-			return errors.New("usage: rysh send <session-name> <input> [--pane <pane-id>] [--mode shell|prompt]")
+			return errors.New(progname.Rewrite("usage: rysh send <session-name> <input> [--pane <pane-id>] [--mode shell|prompt]"))
 		}
 		store, err := session.NewStore(cfg)
 		if err != nil {
@@ -388,9 +389,9 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 		// Refuse to create if a session with that name already exists and is alive.
 		if rec, err := store.Get(sessionName); err == nil {
 			if rec.PID > 0 && session.ProcessAlive(rec.PID) {
-				return fmt.Errorf("session %q is still running (PID %d, state: %s); use \"rysh attach %s\" to reattach or \"rysh stop %s\" to stop it", sessionName, rec.PID, rec.State, sessionName, sessionName)
+				return fmt.Errorf(progname.Rewrite("session %q is still running (PID %d, state: %s); use \"rysh attach %s\" to reattach or \"rysh stop %s\" to stop it"), sessionName, rec.PID, rec.State, sessionName, sessionName)
 			}
-			return fmt.Errorf("session %q already exists (state: %s); use \"rysh attach %s\" to reattach or \"rysh delete-session %s\" to remove it", sessionName, rec.State, sessionName, sessionName)
+			return fmt.Errorf(progname.Rewrite("session %q already exists (state: %s); use \"rysh attach %s\" to reattach or \"rysh delete-session %s\" to remove it"), sessionName, rec.State, sessionName, sessionName)
 		}
 		// Spawn daemon process.
 		h, err := spawnDaemon(sessionName, cfg.LogLevel, configPath, shared)
@@ -405,7 +406,7 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 		if detached {
 			// Detached mode: leave the daemon running headlessly and return to
 			// the shell prompt without attaching a TUI.
-			fmt.Printf("[created session %q in detached mode (PID %d); attach with \"rysh attach %s\"]\n", sessionName, rec.PID, sessionName)
+			fmt.Printf(progname.Rewrite("[created session %q in detached mode (PID %d); attach with \"rysh attach %s\"]\n"), sessionName, rec.PID, sessionName)
 			return nil
 		}
 		return runAttachUI(cfg, logger, store, rec)
@@ -446,7 +447,7 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 		printUsage()
 		return nil
 	default:
-		return fmt.Errorf("unknown command: %s\nRun \"rysh help\" for usage", args[0])
+		return fmt.Errorf(progname.Rewrite("unknown command: %s\nRun \"rysh help\" for usage"), args[0])
 	}
 }
 
@@ -473,16 +474,16 @@ func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error 
 	// consumers can rely on it, and surface the decision in the daemon log.
 	if cfg.RyshDir != "" {
 		if err := os.MkdirAll(cfg.RyshDir, 0o755); err != nil {
-			logger.Warn("rysh: could not create rysh dir", "rysh_dir", cfg.RyshDir, "err", err)
+			logger.Warn(progname.Rewrite("rysh: could not create rysh dir"), "rysh_dir", cfg.RyshDir, "err", err)
 		}
 	}
-	logger.Info("rysh: resolved config",
+	logger.Info(progname.Rewrite("rysh: resolved config"),
 		"config_file", cfg.ConfigFile, "rysh_dir", cfg.RyshDir, "session", sessionName)
 
 	// Reap headless Chromiums orphaned by a previous daemon that died without
 	// actor shutdown (force-kill, crash) — mirrors the orphaned-daemon sweep.
 	if killed := cdp.SweepOrphanedHeadless(browserinstance.RootDir(daemonWorkDir(cfg))); len(killed) > 0 {
-		logger.Info("rysh: reaped orphaned headless browsers", "pids", killed)
+		logger.Info(progname.Rewrite("rysh: reaped orphaned headless browsers"), "pids", killed)
 	}
 
 	store, err := session.NewStore(cfg)
@@ -688,7 +689,7 @@ func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error 
 	go func() {
 		for range hupCh {
 			agSetup.Reload() // re-reads disk, applies to Setup; in-flight actors keep their snapshot
-			slog.Info("rysh: prompt store reloaded via SIGHUP", "files", len(PromptInventory()))
+			slog.Info(progname.Rewrite("rysh: prompt store reloaded via SIGHUP"), "files", len(PromptInventory()))
 		}
 	}()
 
@@ -703,10 +704,10 @@ func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error 
 			_ = pub.Send(msg.T("ws", "inbox"), &msg.MsgReloadPromptsRequest{Reason: "fsnotify"})
 		}
 		if stopWatch, werr := startPromptWatcher(dir, onReload); werr != nil {
-			slog.Warn("rysh: prompt auto-reload watcher disabled", "dir", dir, "err", werr)
+			slog.Warn(progname.Rewrite("rysh: prompt auto-reload watcher disabled"), "dir", dir, "err", werr)
 		} else if stopWatch != nil {
 			defer stopWatch()
-			slog.Info("rysh: prompt auto-reload watching", "dir", dir)
+			slog.Info(progname.Rewrite("rysh: prompt auto-reload watching"), "dir", dir)
 		}
 	}
 
@@ -748,7 +749,7 @@ func runAttachUI(cfg config.Config, logger *slog.Logger, store *session.Store, r
 
 	model, err := tui.NewModel(cfg, logger, b)
 	if err != nil {
-		return fmt.Errorf("failed to initialize rysh: %w", err)
+		return fmt.Errorf(progname.Rewrite("failed to initialize rysh: %w"), err)
 	}
 
 	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
@@ -816,9 +817,9 @@ func startSessionRecordGuard(store *session.Store, self session.Record, interval
 					continue
 				}
 				if _, uerr := store.Upsert(healed); uerr != nil {
-					logger.Warn("rysh: session record heal failed", "session", self.Name, "err", uerr)
+					logger.Warn(progname.Rewrite("rysh: session record heal failed"), "session", self.Name, "err", uerr)
 				} else {
-					logger.Info("rysh: healed stale session record",
+					logger.Info(progname.Rewrite("rysh: healed stale session record"),
 						"session", self.Name, "state", healed.State, "pid", healed.PID)
 				}
 			}
@@ -865,7 +866,7 @@ func (h daemonHandle) startupError() string {
 	}
 	var lines []string
 	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "rysh: "))
+		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), progname.Rewrite("rysh: ")))
 		if line != "" {
 			lines = append(lines, line)
 		}
@@ -1207,7 +1208,7 @@ func daemonStartError(sessionName string, err error) error {
 		return err
 	}
 	return fmt.Errorf("%w\n  the daemon failed to start — your session state is preserved in KV; "+
-		"fix the binary and run \"rysh attach %s\" again (use --log-level debug to see daemon logs)", err, sessionName)
+		progname.Rewrite("fix the binary and run \"rysh attach %s\" again (use --log-level debug to see daemon logs)"), err, sessionName)
 }
 
 // ownableSessionName returns a session name the given front-end is allowed to
@@ -1656,7 +1657,7 @@ func parseRyshArgs(args []string, name string) (sess, tabID, paneID, body string
 func runTabCommand(store *session.Store, args []string) error {
 	// args = [<session-name>, <subcommand>, ...]
 	if len(args) < 2 {
-		return errors.New("usage: rysh tab <session-name> <list|create|delete> [<tab-id>]")
+		return errors.New(progname.Rewrite("usage: rysh tab <session-name> <list|create|delete> [<tab-id>]"))
 	}
 	sess := args[0]
 	switch args[1] {
@@ -1666,7 +1667,7 @@ func runTabCommand(store *session.Store, args []string) error {
 		return cli.TabCreate(store, sess)
 	case "delete":
 		if len(args) < 3 {
-			return errors.New("usage: rysh tab <session-name> delete <tab-id>")
+			return errors.New(progname.Rewrite("usage: rysh tab <session-name> delete <tab-id>"))
 		}
 		return cli.TabDelete(store, sess, args[2])
 	default:
@@ -1677,7 +1678,7 @@ func runTabCommand(store *session.Store, args []string) error {
 func runLaneCommand(store *session.Store, args []string) error {
 	// args = [<session-name>, <tab-id>, <subcommand>, ...]
 	if len(args) < 3 {
-		return errors.New("usage: rysh lane <session-name> <tab-id> <list|create|delete> [<lane-id>]")
+		return errors.New(progname.Rewrite("usage: rysh lane <session-name> <tab-id> <list|create|delete> [<lane-id>]"))
 	}
 	sess := args[0]
 	tabID := args[1]
@@ -1688,7 +1689,7 @@ func runLaneCommand(store *session.Store, args []string) error {
 		return cli.LaneCreate(store, sess, tabID)
 	case "delete":
 		if len(args) < 4 {
-			return errors.New("usage: rysh lane <session-name> <tab-id> delete <lane-id>")
+			return errors.New(progname.Rewrite("usage: rysh lane <session-name> <tab-id> delete <lane-id>"))
 		}
 		return cli.LaneDelete(store, sess, tabID, args[3])
 	default:
@@ -1722,7 +1723,7 @@ func runPaneGroupCommand(store *session.Store, args []string) error {
 func runPaneCommand(store *session.Store, args []string) error {
 	// args = [<session-name>, <tab-id>, <lane-id>, <subcommand>, ...]
 	if len(args) < 4 {
-		return errors.New("usage: rysh pane <session-name> <tab-id> <lane-id> <list|create|delete> [...]")
+		return errors.New(progname.Rewrite("usage: rysh pane <session-name> <tab-id> <lane-id> <list|create|delete> [...]"))
 	}
 	sess := args[0]
 	tabID := args[1]
@@ -1736,7 +1737,7 @@ func runPaneCommand(store *session.Store, args []string) error {
 		return cli.PaneCreate(store, sess, tabID, laneID, paneGroupID)
 	case "delete":
 		if len(subArgs) < 2 {
-			return errors.New("usage: rysh pane <session-name> <tab-id> <lane-id> delete <pane-id>")
+			return errors.New(progname.Rewrite("usage: rysh pane <session-name> <tab-id> <lane-id> delete <pane-id>"))
 		}
 		return cli.PaneDelete(store, sess, subArgs[1])
 	default:

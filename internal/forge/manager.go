@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"sort"
 	"strings"
 	"sync"
@@ -185,7 +186,7 @@ func (m *Manager) EnableByName(ctx context.Context, name string, target ScopeTar
 			return m.enable(ctx, d, true, target)
 		}
 	}
-	return 0, "", fmt.Errorf("no integration named %q (add it with: rysh forge add)", name)
+	return 0, "", fmt.Errorf(progname.Rewrite("no integration named %q (add it with: rysh forge add)"), name)
 }
 
 func (m *Manager) enable(_ context.Context, def Integration, persist bool, target ScopeTarget) (int, toolpack.ExposureMode, error) {

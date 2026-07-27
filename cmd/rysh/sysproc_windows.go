@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"os/exec"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -21,5 +22,5 @@ func setupDetachSignal(_ *tea.Program) func() {
 
 // sendDetachSignal returns an error on Windows because SIGUSR1 is unavailable.
 func sendDetachSignal(_ int) error {
-	return errors.New("rysh detach via signal is not supported on Windows")
+	return errors.New(progname.Rewrite("rysh detach via signal is not supported on Windows"))
 }

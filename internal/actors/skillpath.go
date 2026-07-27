@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"strings"
 )
 
@@ -30,7 +31,7 @@ import (
 // succeeding somewhere it was never pointed at.
 func ryshBaseDirs() []string {
 	if !workingDirAlive() {
-		slog.Error("rysh: working directory has been deleted — refusing to resolve .rysh paths against $HOME; " +
+		slog.Error(progname.Rewrite("rysh: working directory has been deleted — refusing to resolve .rysh paths against $HOME; ") +
 			"restart the process from a directory that exists")
 		return []string{".rysh"}
 	}

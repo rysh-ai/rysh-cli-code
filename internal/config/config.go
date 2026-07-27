@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"strconv"
 	"strings"
 	"time"
@@ -986,8 +987,8 @@ func loadFrom(explicitPath string, w io.Writer) (Config, error) {
 		cfg, err = loadFromFile(file, cfg)
 		if err != nil {
 			loadErr = err
-			fmt.Fprintf(w, "rysh: warning: failed to parse config file %s: %v\n", file, err)
-			fmt.Fprintf(w, "rysh: warning: the config file is being ignored; defaults and environment overrides apply instead. "+
+			fmt.Fprintf(w, progname.Rewrite("rysh: warning: failed to parse config file %s: %v\n"), file, err)
+			fmt.Fprint(w, progname.Rewrite("rysh: warning: the config file is being ignored; defaults and environment overrides apply instead. ")+
 				"Note that YAML is indentation-sensitive (use spaces, not tabs) and values must have the expected type, e.g. working_directory: \"~/projects/app\".\n")
 		}
 	}

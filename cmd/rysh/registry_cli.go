@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"strings"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
@@ -42,7 +43,7 @@ func runRegistryInstall(cfg config.Config, args []string) error {
 		}
 	}
 	if spec == "" {
-		return errors.New("usage: rysh install <@ns/name[@version]|dir|tarball|url> [--yes] [--force]")
+		return errors.New(progname.Rewrite("usage: rysh install <@ns/name[@version]|dir|tarball|url> [--yes] [--force]"))
 	}
 
 	ryshDir := resolveRyshDir(cfg)
@@ -97,7 +98,7 @@ func runRegistryList(cfg config.Config) error {
 	}
 	names := lock.InstalledNames()
 	if len(names) == 0 {
-		fmt.Println("no packages installed (see rysh install)")
+		fmt.Println(progname.Rewrite("no packages installed (see rysh install)"))
 		return nil
 	}
 	fmt.Printf("Installed packages (%d):\n", len(names))
@@ -212,7 +213,7 @@ func runRegistryUpdate(cfg config.Config, args []string) error {
 	}
 	if target != "" {
 		if _, ok := lock.Packages[target]; !ok {
-			return fmt.Errorf("update: %s is not installed (see rysh list-packages)", target)
+			return fmt.Errorf(progname.Rewrite("update: %s is not installed (see rysh list-packages)"), target)
 		}
 	}
 

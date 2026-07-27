@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"sort"
 	"time"
 
@@ -79,7 +80,7 @@ func runEval(cfg config.Config, configPath string, args []string) error {
 	}
 	engine := live || replay
 	if dir == "" || (resultPath == "" && !engine) || (resultPath != "" && engine) {
-		return errors.New("usage: rysh eval <evals-dir> --result <result.json> | --live | --replay [--timeout <dur>] [--worktree] [--provider <name>]")
+		return errors.New(progname.Rewrite("usage: rysh eval <evals-dir> --result <result.json> | --live | --replay [--timeout <dur>] [--worktree] [--provider <name>]"))
 	}
 
 	cases, err := discoverCases(dir)

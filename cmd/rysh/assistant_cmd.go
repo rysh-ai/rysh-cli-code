@@ -36,6 +36,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"sort"
 	"strconv"
 	"strings"
@@ -66,7 +67,7 @@ func runAssistant(cfg config.Config, configPath string, args []string) error {
 	in := bufio.NewReader(os.Stdin)
 	tty := term.IsTerminal(int(os.Stdin.Fd()))
 
-	fmt.Println("rysh assistant — personal assistant bring-up (one binary, one skill file; config is project-local)")
+	fmt.Println(progname.Rewrite("rysh assistant — personal assistant bring-up (one binary, one skill file; config is project-local)"))
 
 	// Step 1 — provider (reuse onboarding, design 004 OB1–OB2).
 	provName, model, err := ensureAssistantProvider(cfg, configPath, args, in, tty)
@@ -92,11 +93,11 @@ func runAssistant(cfg config.Config, configPath string, args []string) error {
 }
 
 func printAssistantUsage() {
-	fmt.Println("usage: rysh assistant                      guided bring-up (TTY)")
-	fmt.Println("       rysh assistant [flags]              scriptable, no TTY needed")
-	fmt.Println("       rysh assistant --install-daemon     write the OS auto-start unit (opt-in)")
+	fmt.Println(progname.Rewrite("usage: rysh assistant                      guided bring-up (TTY)"))
+	fmt.Println(progname.Rewrite("       rysh assistant [flags]              scriptable, no TTY needed"))
+	fmt.Println(progname.Rewrite("       rysh assistant --install-daemon     write the OS auto-start unit (opt-in)"))
 	fmt.Println()
-	fmt.Println("provider flags (only needed when no provider is configured; same as rysh onboard):")
+	fmt.Println(progname.Rewrite("provider flags (only needed when no provider is configured; same as rysh onboard):"))
 	fmt.Println("  --provider <name>        anthropic (default) | openai | ollama")
 	fmt.Println("  --key-env <VAR>          env var holding the API key (written as ${VAR})")
 	fmt.Println("  --key <literal>          literal key; stored in .rysh/secrets (0600)")
@@ -151,7 +152,7 @@ func ensureAssistantProvider(cfg config.Config, configPath string, args []string
 		}
 		fmt.Printf("provider: %s (model %s) — already configured (%s)\n", p.Name, model, src)
 		if cfg.APIKey == "" && !p.KeyOptional {
-			fmt.Printf("WARN provider key does not resolve yet — export %s (or add it to .rysh/secrets); `rysh doctor` names the exact missing ${VAR}\n", p.KeyEnv)
+			fmt.Printf(progname.Rewrite("WARN provider key does not resolve yet — export %s (or add it to .rysh/secrets); `rysh doctor` names the exact missing ${VAR}\n"), p.KeyEnv)
 		}
 		return p.Name, model, nil
 	}
@@ -171,7 +172,7 @@ func ensureAssistantProvider(cfg config.Config, configPath string, args []string
 
 	if !tty {
 		return "", "", errors.New("no provider configured and no TTY for the wizard; pass the flag form:\n" +
-			"  rysh assistant --provider anthropic --key-env ANTHROPIC_API_KEY --channel telegram --owner <your-id> --bot-token-env TELEGRAM_BOT_TOKEN")
+			progname.Rewrite("  rysh assistant --provider anthropic --key-env ANTHROPIC_API_KEY --channel telegram --owner <your-id> --bot-token-env TELEGRAM_BOT_TOKEN"))
 	}
 
 	// Inline TTY provider step (the onboarding wizard's step 1, prompt-driven).
@@ -480,10 +481,10 @@ func ensureAssistantDaemon(cfg config.Config, args []string, in *bufio.Reader, t
 	}
 	if !start {
 		fmt.Println("\nto start it later:")
-		fmt.Printf("  rysh attach %s\n", sessionName)
+		fmt.Printf(progname.Rewrite("  rysh attach %s\n"), sessionName)
 		fmt.Printf("  %s\n", spawnCmd)
 		fmt.Printf("  %s\n", startCmd)
-		fmt.Println("then run \"rysh doctor\" to verify the channel connects.")
+		fmt.Println(progname.Rewrite("then run \"rysh doctor\" to verify the channel connects."))
 		if live {
 			return fmt.Sprintf("session %q is live; assistant not yet activated (commands printed)", sessionName), nil
 		}
@@ -520,7 +521,7 @@ func ensureAssistantDaemon(cfg config.Config, args []string, in *bufio.Reader, t
 	time.Sleep(2 * time.Second)
 	_ = cli.RyshCommand(store, sessionName, "", "", "humanoid channels "+assistantName)
 
-	note := fmt.Sprintf("assistant active under session %q (attach with: rysh attach %s)", sessionName, sessionName)
+	note := fmt.Sprintf(progname.Rewrite("assistant active under session %q (attach with: rysh attach %s)"), sessionName, sessionName)
 
 	// RA4: prove a real message reaches the assistant before we claim success.
 	// Only worth doing when a channel was actually started, and only when a
@@ -576,7 +577,7 @@ func printAssistantSummary(provName, model, channel, owner, profilePath string, 
 		fmt.Println("Before it runs a tool, you get an APPROVAL request — in the chat and in the")
 		fmt.Println("pane — and reply \"yes\" to release it or \"no\" to reject.")
 	}
-	fmt.Println("verify anytime: rysh doctor   |   OS auto-start: rysh assistant --install-daemon")
+	fmt.Println(progname.Rewrite("verify anytime: rysh doctor   |   OS auto-start: rysh assistant --install-daemon"))
 }
 
 // ---------------------------------------------------------------------------

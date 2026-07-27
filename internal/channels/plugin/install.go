@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"strings"
 	"time"
 )
@@ -99,7 +100,7 @@ func InstallPackage(root, src, expectedChecksum string) (InstalledPlugin, error)
 
 	dest := filepath.Join(root, m.Name)
 	if _, err := os.Stat(dest); err == nil {
-		return InstalledPlugin{}, fmt.Errorf("plugin install: %q is already installed (rysh channel remove %s first)", m.Name, m.Name)
+		return InstalledPlugin{}, fmt.Errorf(progname.Rewrite("plugin install: %q is already installed (rysh channel remove %s first)"), m.Name, m.Name)
 	}
 
 	if err := os.MkdirAll(root, 0o755); err != nil {
