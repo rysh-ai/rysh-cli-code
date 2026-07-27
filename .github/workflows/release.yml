@@ -44,3 +44,7 @@ jobs:
         env:
           GOWORK: "off"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Always defined, empty when the secret is unset — goreleaser reads it
+          # to decide whether to push the Homebrew formula, and an undefined env
+          # var would fail template evaluation instead of skipping the step.
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

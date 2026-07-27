@@ -8,8 +8,8 @@
 # It deliberately needs NO secrets beyond the workflow's built-in GITHUB_TOKEN:
 #   - no `signs` block      (no GPG key in a public repo)
 #   - no `blobs` block      (no S3 credentials)
-#   - no `brews` block      (pushing a formula needs a cross-repo token; see
-#                            the note at the bottom of this file)
+#   - no `brews` push       (the formula step self-skips unless a
+#                            HOMEBREW_TAP_TOKEN secret is present)
 #
 # Schema version: v2
 version: 2
@@ -153,27 +153,38 @@ changelog:
       - typo
       - Merge pull request
 
-# Publishing a Homebrew formula from here needs a token that can push to
-# rysh-ai/homebrew-rysh; the built-in GITHUB_TOKEN is scoped to this repo alone.
-# Add a HOMEBREW_TAP_TOKEN secret to rysh-ai/rysh-cli-code, pass it through in
-# .github/workflows/release.yml, and append:
-#
-#   brews:
-#     - name: rysh
-#       ids: [rysh-archive]
-#       repository:
-#         owner: rysh-ai
-#         name: homebrew-rysh
-#         branch: main
-#         token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-#       directory: Formula
-#       homepage: https://rysh.ai
-#       description: "Agentic terminal multiplexer for code development"
-#       license: Apache-2.0
-#       test: |
-#         system "#{bin}/rysh", "--version"
-#       install: |
-#         bin.install "rysh"
+brews:
+  - name: rysh
+    ids: [rysh-archive]
+    repository:
+      owner: rysh-ai
+      name: homebrew-rysh
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    # Publish the formula only when the tap token is present. The workflow always
+    # defines HOMEBREW_TAP_TOKEN (empty when the secret is unset), so a release
+    # without it still succeeds — it just leaves the formula alone instead of
+    # failing the whole run on a push it cannot authenticate.
+    skip_upload: '{{ if .Env.HOMEBREW_TAP_TOKEN }}false{{ else }}true{{ end }}'
+    commit_author:
+      name: goreleaser-bot
+      email: releases@rysh.ai
+    commit_msg_template: "rysh {{ .Version }}"
+    directory: Formula
+    homepage: https://github.com/rysh-ai/rysh-cli-parent
+    description: "Agentic terminal multiplexer for code development"
+    license: Apache-2.0
+    test: |
+      system "#{bin}/rysh", "--version"
+    install: |
+      bin.install "rysh"
+      mkdir_p etc/"rysh"
+      etc.install "rysh.config.yaml.example" => "rysh/rysh.config.yaml.example"
+
+# The token must be able to push to rysh-ai/homebrew-rysh; the built-in
+# GITHUB_TOKEN is scoped to this repository alone. Use a fine-grained PAT
+# limited to that one repo with Contents: read and write — not a personal
+# all-repo token, which this being a public repository would over-expose.
 #
 # `brews` is deprecated in favour of homebrew_casks, which changes the install
 # to `brew install --cask` and drops the Linux formula — decide before adopting.
