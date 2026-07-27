@@ -2,10 +2,12 @@
 *.swp
 *.swo
 
-# Built binaries
-rysh
-ry
-rysh_local
+# Built binaries. Anchored with a leading slash: an unanchored "rysh" also
+# matches the cmd/rysh/ directory, which silently drops the entire main package
+# from any tree built by `git add` rather than `git mv`.
+/rysh
+/ry
+/rysh_local
 
 # Config file (contains secrets / personal settings).
 # The committed template is rysh.config.yaml.example.
