@@ -1,6 +1,8 @@
 # Rysh configuration (YAML).
 # Copy this file to rysh.config.yaml and edit. The config is searched in the
-# current directory first, then ~/.config/rysh/rysh.config.yaml.
+# current directory first, then ./.rysh/rysh.config.yaml — and nowhere else.
+# There is no global location; config and state are project-local, so a
+# different directory is a different setup. "--config <path>" overrides both.
 
 rysh:
   # Default session name (the NATS prefix / KV bucket suffix / registry key).
@@ -20,7 +22,7 @@ rysh:
 nats:
   mode: "embedded"                     # "embedded" or "external"
   url: "nats://localhost:4222"         # used only when mode = "external"
-  data_dir: ""                         # JetStream storage dir; empty = auto (~/.local/state/rysh/nats)
+  data_dir: ""                         # JetStream storage dir; empty = <cwd>/.rysh/nats
   port: 24242                          # TCP port for embedded NATS server (0 = auto)
 
 provider:

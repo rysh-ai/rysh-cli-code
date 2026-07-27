@@ -12,5 +12,6 @@ if command -v rysh >/dev/null 2>&1; then
     done
 fi
 
-echo "Rysh removed. Your session data remains at ~/.local/state/rysh"
-echo "To remove session data: rm -rf ~/.local/state/rysh"
+echo "Rysh removed. Session data is project-local and untouched: each project"
+echo "keeps its own .rysh directory next to its rysh.config.yaml."
+echo "To remove it for a project: rm -rf <project>/.rysh"

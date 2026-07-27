@@ -8,17 +8,9 @@ if [ ! -d /etc/rysh ]; then
     mkdir -p /etc/rysh
 fi
 
-# Create user config stub if not present
-CONFIG_DIR="${HOME:-/root}/.config/rysh"
-if [ ! -d "$CONFIG_DIR" ]; then
-    mkdir -p "$CONFIG_DIR"
-fi
-
-# Create state directory
-STATE_DIR="${HOME:-/root}/.local/state/rysh"
-if [ ! -d "$STATE_DIR" ]; then
-    mkdir -p "$STATE_DIR"
-fi
+# No user config or state directory is created: rysh reads neither. Config and
+# state are project-local — ./rysh.config.yaml or ./.rysh/rysh.config.yaml, with
+# state under ./.rysh — so there is nothing to seed in $HOME.
 
 echo ""
 echo "Rysh installed successfully."
@@ -27,9 +19,9 @@ echo "Quick start:"
 echo "  rysh                         # start the default session"
 echo "  rysh my-project              # start a named session"
 echo ""
-echo "Configuration:"
-echo "  ~/.config/rysh/rysh.config   # user config (TOML)"
-echo "  /etc/rysh/rysh.config.example  # example config"
+echo "Configuration (project-local — no global config file):"
+echo "  ./rysh.config.yaml                    # per-project config"
+echo "  /etc/rysh/rysh.config.yaml.example    # copy this to start"
 echo ""
 echo "Documentation:"
 echo "  https://rysh.ai/docs"

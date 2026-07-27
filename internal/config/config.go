@@ -934,7 +934,7 @@ func Load() Config {
 
 // LoadFrom reads configuration from an explicit file path, then applies
 // environment variable overrides. When path is empty it behaves exactly like
-// Load (searching the current directory, then ~/.config/rysh/rysh.config.yaml).
+// Load (searching the current directory, then <cwd>/.rysh/rysh.config.yaml).
 // This backs the global "--config <path>" CLI flag.
 func LoadFrom(path string) Config {
 	cfg, _ := loadFrom(path, os.Stderr)
@@ -2169,9 +2169,9 @@ func normalizeUpgradeMode(v string) string {
 // built via applyDefaults without going through loadFrom (e.g. direct
 // construction). It derives from the default rysh dir; loadFrom recomputes
 // SessionDir from the rysh dir it actually resolved. When no config file is
-// found this is the legacy global location ($XDG_STATE_HOME/rysh/sessions, else
-// ~/.local/state/rysh/sessions); when a config IS found, storage follows that
-// config's rysh dir. Set RYSH_DIR or RYSH_SESSION_DIR to relocate it.
+// found this is "<cwd>/.rysh/sessions" — the legacy global location
+// ($XDG_STATE_HOME/rysh/sessions) is gone; when a config IS found, storage
+// follows that config's rysh dir. Set RYSH_DIR or RYSH_SESSION_DIR to relocate.
 func defaultSessionDir() string {
 	return filepath.Join(defaultRyshDir(), "sessions")
 }
