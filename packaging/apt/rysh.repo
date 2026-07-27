@@ -1,0 +1,8 @@
+# Rysh APT repository source list
+# Add to /etc/apt/sources.list.d/rysh.list
+# Import the GPG key first:
+#   curl -fsSL https://packages.rysh.ai/apt/rysh-gpg.asc \
+#     | sudo gpg --dearmor -o /usr/share/keyrings/rysh-archive-keyring.gpg
+
+# No arch= filter: the repository publishes both amd64 and arm64.
+deb [signed-by=/usr/share/keyrings/rysh-archive-keyring.gpg] https://packages.rysh.ai/apt stable main

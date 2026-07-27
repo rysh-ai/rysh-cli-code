@@ -1,0 +1,12 @@
+name: "@rysh/code-reviewer"
+version: "0.1.0"
+type: agent
+description: "Reviews a diff or branch for defects, ranked by severity"
+entry: SKILL.md
+min_rysh: "0.1.26"
+declares_tools:
+  - bash
+  - file_read
+  - grep
+  - glob
+  - symbol_search

@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Chocolatey NuSpec manifest for Rysh (CLI-only Windows build) -->
+<!-- https://community.chocolatey.org -->
+<!--
+  NOT PUBLISHED. The publish-chocolatey job in .github/workflows/release.yml is
+  commented out, and this manifest must not be pushed until someone decides
+  whether a CLI-only build belongs in a Windows package manager at all.
+
+  The Windows binary cannot open rysh panes (no ConPTY). Publishing a package
+  whose title says "terminal multiplexer" would be false on the one platform
+  where it does not multiplex — so the title, summary and description below
+  describe the CLI-only build instead.
+-->
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>rysh</id>
+    <version>0.1.0</version>
+    <!-- rysh-cli is private and github.com/rysh-ai/rysh does not exist; point
+         at what is actually reachable. -->
+    <packageSourceUrl>https://rysh.ai/docs</packageSourceUrl>
+    <owners>rysh-ai</owners>
+    <title>Rysh (CLI-only build for Windows)</title>
+    <authors>Rysh</authors>
+    <projectUrl>https://rysh.ai</projectUrl>
+    <projectSourceUrl>https://rysh.ai</projectSourceUrl>
+    <docsUrl>https://rysh.ai/docs</docsUrl>
+    <bugTrackerUrl>https://rysh.ai/docs</bugTrackerUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <tags>cli ai agent development wsl</tags>
+    <summary>Command-line client for Rysh. Cannot open panes on Windows — use WSL2 for the multiplexer.</summary>
+    <description><![CDATA[
+# Rysh — CLI-only build for Windows
+
+**This package cannot open rysh panes.** Read this before installing.
+
+Rysh is an agentic terminal multiplexer: every pane is a PTY-backed shell that
+is also an AI agent. Rysh has no native Windows (ConPTY) PTY implementation, so
+a windows/amd64 build links and runs but cannot allocate a terminal. Rather than
+fail at the moment you open your first pane, this build refuses session commands
+up front.
+
+## What works
+
+```
+rysh send <session> <input>   talk to a session running in WSL
+rysh install <package>        install an agent from the registry
+rysh list-sessions
+rysh list-packages
+rysh eval
+rysh doctor
+rysh version
+```
+
+## What does not
+
+```
+rysh                  (start/attach a session)
+rysh <session-name>
+rysh attach <name>
+rysh create ...
+```
+
+These exit immediately with a pointer back to WSL.
+
+## The supported path: WSL2
+
+The Linux build runs unmodified under WSL2, with no rysh-specific configuration:
+
+```powershell
+wsl --install
+wsl
+```
+
+then inside WSL:
+
+```sh
+curl -fsSL https://rysh.ai/install.sh | sh
+rysh
+```
+
+## Native Windows?
+
+It needs a ConPTY implementation behind the existing `internal/platform` seam —
+real work, not a flag. It is demand-gated.
+
+## Configuration
+
+Rysh reads `~/.config/rysh/rysh.config.yaml`. Set an Anthropic API key to enable
+the agent:
+
+```yaml
+provider:
+  api_key: "sk-ant-..."
+```
+
+Full documentation: https://rysh.ai/docs
+    ]]></description>
+    <releaseNotes>https://rysh.ai/docs</releaseNotes>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

@@ -1,0 +1,13 @@
+# Assertions for the read-only repo-survey case (design 009 §3.2).
+# No files_changed globs on purpose: an empty list means "not checked" in the
+# assertion engine, so read-only-ness is enforced through commands_forbidden.
+commands_forbidden:
+  - "rm *"
+  - "mv *"
+  - "* > *"
+  - "* >> *"
+  - "git push*"
+  - "git commit*"
+output_matches:
+  - "(?i)(project|repository|director(y|ies)|file)"
+max_tokens: 50000

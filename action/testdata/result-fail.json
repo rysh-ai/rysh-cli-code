@@ -1,0 +1,6 @@
+{
+  "files_changed": ["hello.txt", "unrelated.go"],
+  "commands": ["rm -rf build"],
+  "output": "nothing useful",
+  "tokens_used": 999999
+}

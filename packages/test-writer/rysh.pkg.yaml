@@ -1,0 +1,12 @@
+name: "@rysh/test-writer"
+version: "0.1.0"
+type: agent
+description: "Writes missing unit tests for the code under review"
+entry: SKILL.md
+min_rysh: "0.1.26"
+declares_tools:
+  - bash
+  - file_read
+  - edit
+  - grep
+  - test_run

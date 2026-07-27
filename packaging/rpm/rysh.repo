@@ -1,0 +1,10 @@
+[rysh]
+name=Rysh Stable - $basearch
+baseurl=https://packages.rysh.ai/rpm/stable/$basearch/
+enabled=1
+gpgcheck=1
+gpgkey=https://packages.rysh.ai/rpm/stable/rysh-gpg.asc
+repo_gpgcheck=0
+sslverify=1
+sslcacert=/etc/pki/tls/certs/ca-bundle.crt
+metadata_expire=300

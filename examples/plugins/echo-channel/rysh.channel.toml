@@ -1,0 +1,16 @@
+# Manifest for the reference echo channel plugin (docs/plugin-authoring.md).
+# Build the binary first, then install the directory:
+#   cd examples/plugins/echo-channel && GOWORK=off go build -o echo-channel .
+#   rysh channel install examples/plugins/echo-channel
+
+name      = "echo"         # the channel type humanoids use in `contacts:`
+version   = "0.1.0"
+transport = "stdio"        # newline-delimited JSON-RPC on stdin/stdout
+exec      = "echo-channel" # relative to this directory after install
+
+# Echo needs no credentials, scopes, or network — an honest empty consent
+# scan. A real plugin lists the ${ENV} vars it reads, and every host it
+# talks to (declared for consent; NOT enforced by rysh in v1).
+declares_creds  = []
+declares_scopes = []
+network_egress  = []

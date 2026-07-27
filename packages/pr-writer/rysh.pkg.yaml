@@ -1,0 +1,9 @@
+name: "@rysh/pr-writer"
+version: "0.1.0"
+type: agent
+description: "Drafts a pull-request title and body from the branch diff"
+entry: SKILL.md
+min_rysh: "0.1.26"
+declares_tools:
+  - bash
+  - file_read

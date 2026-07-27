@@ -1,0 +1,200 @@
+# Rysh configuration (YAML).
+# Copy this file to rysh.config.yaml and edit. The config is searched in the
+# current directory first, then ~/.config/rysh/rysh.config.yaml.
+
+rysh:
+  # Default session name (the NATS prefix / KV bucket suffix / registry key).
+  # The CLI/daemon argument and RYSH_SESSION override it; defaults to "default".
+  session_name: "default"
+  # Daemon-version-mismatch behavior on attach: off | warn | prompt | auto.
+  upgrade_on_attach: "warn"
+  # Inherited DEFAULT working directory: a workspace whose own working_directory
+  # is empty uses this. When this is also empty it is derived from the location
+  # of rysh.config.yaml:
+  #   - if rysh.config.yaml lives inside a ".rysh" directory, the parent of ".rysh" is used
+  #   - otherwise the directory directly containing rysh.config.yaml is used
+  # The actual pane working directory is PER-WORKSPACE (see the workspace: list
+  # below, or set it at runtime with ##workspace cwd <path>).
+  working_directory: ""
+
+nats:
+  mode: "embedded"                     # "embedded" or "external"
+  url: "nats://localhost:4222"         # used only when mode = "external"
+  data_dir: ""                         # JetStream storage dir; empty = auto (~/.local/state/rysh/nats)
+  port: 24242                          # TCP port for embedded NATS server (0 = auto)
+
+provider:
+  name: "claude"
+  command: "claude"                    # CLI fallback when api_key is empty
+  system_prompt: "system-prompt.md"
+  model: ""                            # empty = claude-sonnet-4-20250514 (API) or CLI default
+  api_key: ""                          # set to use Anthropic API instead of CLI
+  api_url: ""                          # empty = https://api.anthropic.com
+  max_tokens: 4096
+
+ui:
+  shell: ""                            # empty = $SHELL or /bin/bash
+  interactive_shell: true              # true (default): launch the shell with -i so it
+                                       #   sources your rc files (~/.bashrc, ~/.zshrc) and
+                                       #   shows your real prompt (PS1), aliases & functions.
+                                       # false: legacy minimal "$ " prompt with rysh-managed echo.
+                                       # Env override: RYSH_INTERACTIVE_SHELL=true|false
+  shell_color_output: true             # keep ANSI colors (ls --color, git diff) in the shell
+                                       #   scrollback; cursor/OSC escapes still stripped.
+                                       # Env: RYSH_SHELL_COLOR
+  shell_buffer_bytes: 262144           # pane scrollback cap in bytes (default 256 KiB).
+                                       # Env: RYSH_SHELL_BUFFER_BYTES
+  shell_readline_keys: true            # bash extras in shell mode: Ctrl+R reverse-i-search,
+                                       #   prefix history search (Up with a typed draft), and
+                                       #   PS2 multi-line continuation. Ctrl+R is the ONLY Ctrl
+                                       #   key taken — all other Ctrl shortcuts remain rysh
+                                       #   multiplexer chords. Env: RYSH_SHELL_READLINE
+  shell_history_size: 1000             # persistent per-session history file bound
+                                       #   (<rysh-dir>/history/<session>.history).
+                                       # Env: RYSH_SHELL_HISTORY_SIZE
+  shell_history_ignore_dups: true      # HISTCONTROL=ignoredups
+  shell_history_ignore_space: false    # HISTCONTROL=ignorespace (leading space = don't record)
+  shell_bash_completion: true          # Tab in argument position runs the command's real
+                                       #   bash-completion spec (git branches, ssh hosts, ...).
+                                       # Env: RYSH_SHELL_BASH_COMPLETION
+  shell_prompt: "{dir} > "             # shell-mode prompt template; placeholders {dir} {cwd}
+                                       #   {session}; live cwd via OSC 7. Env: RYSH_SHELL_PROMPT
+  initial_tabs: 1
+  initial_panes: 1
+# Tip: ##native [on|off] turns a pane into a full pass-through terminal —
+# bash owns readline/completion/history/PS1 100%; Esc Esc exits to AI mode.
+
+# Workspaces. A single session can host multiple fully isolated workspaces,
+# each with its own tabs/lanes/panes. Switch between them in the TUI with
+# Ctrl+W (1-9 to jump, arrows for prev/next). Workspaces are defined ONLY here
+# in rysh.config.yaml — there is no way to create one at runtime; add a workspace
+# list entry (with its own api_key) and restart.
+#
+# When NO workspace entries are present (the default), a single workspace is
+# synthesized from session.name and the ui settings above, so existing configs
+# keep working unchanged. Declare workspace list entries to define more.
+# Per-workspace initial_tabs/initial_panes/working_directory override the
+# top-level defaults; omit a field to inherit it.
+#
+# A workspace may also declare its own upstream via a nested `upstream:` mapping
+# — its own api_key and its own subscription limits (panes are enforced
+# per-workspace). Any field left empty inherits the session-wide `upstream:`
+# block below (notably `url`).
+#
+# The upstream NATS namespace is the server workspace id (UUID). You normally do
+# NOT set it: the CLI auto-resolves the id from the `api_key` via
+# /api/server-info at startup, so each workspace connects to whichever server
+# workspace its api_key belongs to. Set `workspace: "<uuid>"` only to pin it /
+# skip the lookup (copy the UUID from the dashboard's "Quick Setup"). The local
+# workspace `name` is just a local label — it does NOT pick the server
+# workspace; the api_key does.
+#
+# The workspaces below are listed in order; the first is active on startup.
+# They are commented out so this example stays single-workspace by default —
+# uncomment the `workspace:` list and a contiguous set of entries to enable them.
+#
+# workspace:
+#   # 1) Minimal: inherits everything from ui (1 tab, 1 pane) and rysh.
+#   - name: "main"
+#
+#   # 2) Override the layout: 1 tab with 2 panes, in a specific directory.
+#   - name: "web"
+#     initial_tabs: 1
+#     initial_panes: 2
+#     working_directory: "~/projects/web-app"
+#
+#   # 3) Upstream-backed: its own api_key. `workspace` is OMITTED — the CLI
+#   #    resolves the server workspace id from the api_key. `url` is inherited
+#   #    from the session-wide upstream block.
+#   - name: "halil-macbook"
+#     initial_panes: 1
+#     working_directory: "~/"
+#     upstream:
+#       enabled: true
+#       api_key: "rysh_...macbookKey"   # picks the server workspace; id auto-resolved
+#
+#   # 4) A second upstream-backed workspace with a DIFFERENT api_key, so it maps
+#   #    to a different server workspace. (If both keys belong to the SAME server
+#   #    workspace, both entries resolve to the same namespace and share its
+#   #    shares.) Optional lines show how to pin the UUID and override url/share-mode.
+#   - name: "halil-macbook-2"
+#     initial_panes: 1
+#     working_directory: "~/"
+#     upstream:
+#       enabled: true
+#       api_key: "rysh_...macbook2Key"
+#       # workspace: "22222222-2222-2222-2222-222222222222"  # optional: pin the UUID (skips the lookup)
+#       # url: "https://rysh.example.com"                     # optional: override the session url
+#       # default_share_mode: "view"
+#
+#   # 5) A scratch workspace with sharing explicitly disabled (no upstream),
+#   #    even if the session-wide `upstream:` below is enabled.
+#   - name: "scratch"
+#     upstream:
+#       enabled: false
+
+pane:
+  private_buffer_size: 10240           # max bytes for ##private pane output buffer (per pane)
+  public_buffer_size: 10240            # max bytes for ##public pane output buffer (per pane)
+
+web:
+  # The three ##rysh web parameters. Each can be overridden per start with
+  # `##rysh web start --bind <addr> --port <n> --token <t>`, or by the
+  # RYSH_WEB_HOST / RYSH_WEB_PORT / RYSH_WEB_TOKEN environment variables.
+  host: "127.0.0.1"                    # bind address (default). 127.0.0.1 = this
+                                       # machine only. Use "0.0.0.0" to expose the
+                                       # UI on every interface — anyone who can
+                                       # reach the port then needs only the token.
+  port: 23232                          # web UI server port
+  # token: ""                          # fixed access token; unset = a fresh random
+                                       # token per start, printed with the open URL
+
+logging:
+  # Logging is OFF by default to keep the terminal UI clean. Enable it here, or
+  # pass --log-level on the command line (the flag takes precedence over this).
+  # Levels: "off" (default, disabled) | "debug" | "info" | "warn" | "error".
+  # When "debug", logs are also written to /tmp/rysh/logs/rysh-<session>-<ts>.log.
+  log_level: "off"
+  log_messages: false                  # verbose actor message tracing (very noisy)
+
+upstream:
+  # Session-wide upstream connection. Workspaces inherit these values unless they
+  # declare their own nested `upstream:` override (see the workspace section above).
+  #
+  # The upstream NATS namespace is the server workspace id (UUID). You normally do
+  # NOT set `workspace`: the CLI auto-resolves it from `api_key` via
+  # /api/server-info. Set it only to pin the UUID / skip the lookup (copy it from
+  # the dashboard's "Quick Setup"). Server workspace names are unique per user, so
+  # the id — not the name — is what namespaces NATS subjects (ws.{id}.*).
+  enabled: true                        # enable remote upstream server connection
+  url: "https://rysh.ai"               # upstream server URL (required for sharing + auto-resolve)
+  api_key: "rysh_...yourKey"           # API key for upstream authentication (rysh_...)
+  # workspace: "00000000-0000-0000-0000-000000000000"  # optional: pin the workspace UUID (else auto-resolved from api_key)
+  auto_share: false                    # automatically share all panes with upstream on creation
+  reconnect_interval: "5s"             # reconnection interval on disconnect
+  max_reconnect_attempts: 10           # max reconnection attempts (0 = unlimited)
+  predictive_echo: false               # experimental: Mosh-style local echo for typing in control-mode shared tabs (hides round-trip latency)
+
+voice_control:
+  # Speech-to-text provider for voice prompting (the transcription backend).
+  tts_provider_name: "deepgram"        # "deepgram" (default) | "whisper" (alias: "openai")
+  api_key: ""                          # API key for the selected provider (Deepgram or OpenAI)
+
+voice:
+  # Recording / TUI behaviour for voice prompting.
+  enabled: false                       # master switch for the voice prompting feature
+  hotkey: "ctrl+r"                     # toggle record key (press to start, press again to stop)
+  recorder: "auto"                     # "auto" | "sox" | "ffmpeg" | "afrecord" | "arecord"
+  recorder_cmd: ""                     # optional full recorder command override (advanced)
+  max_seconds: 120                     # hard cap on a single recording
+  language: ""                         # optional BCP-47 language hint (e.g. "en"); empty = auto
+
+# An active workspace example (mirrors the original example's final block):
+# a single upstream-backed workspace with its own api_key.
+workspace:
+  - name: "dev-macmini"
+    initial_panes: 1
+    working_directory: "~/"
+    upstream:
+      enabled: true
+      api_key: "rysh_...devMacminiKey"  # this workspace's own key

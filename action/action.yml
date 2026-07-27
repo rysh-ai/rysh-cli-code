@@ -1,0 +1,174 @@
+# setup-rysh — composite GitHub Action (design 009 §3.3).
+#
+# Installs the rysh CLI (checksum-verified release download, or a from-source
+# build for hermetic CI) and runs ONE of:
+#   - `rysh run --prompt <task>`     (the `task` input)
+#   - `rysh run <skill.md>`          (the `skill-file` input)
+#   - `rysh eval <dirs> --live`      (the `eval` input)
+#   - `rysh eval <dirs> --result <r>`(the `eval` + `eval-result` inputs)
+#
+# SECURITY: there is deliberately NO api-key input. Provider keys must arrive
+# via environment variables from repository secrets (e.g. RYSH_API_KEY or
+# ANTHROPIC_API_KEY) so they are never captured as action inputs. See README.md.
+#
+# This directory is written to be splittable into a standalone
+# `rysh-ai/setup-rysh` repository later: it references nothing outside itself.
+
+name: "Setup rysh"
+description: >-
+  Install the rysh CLI and run a governed headless agent (rysh run) or the
+  agent eval harness (rysh eval) in CI. Fail-closed: approval gates block
+  unattended runs by design.
+author: "Rysh AI"
+
+branding:
+  icon: terminal
+  color: purple
+
+inputs:
+  version:
+    description: >-
+      rysh release to install: "latest" (default) or a pinned version such as
+      "0.1.28" / "v0.1.28". Ignored when build-from-source is "true".
+    required: false
+    default: "latest"
+  build-from-source:
+    description: >-
+      "true" to build rysh from a checkout (GOWORK=off go build) instead of
+      downloading a release. Requires Go on the runner (actions/setup-go).
+      Useful for hermetic CI in the rysh repo itself and for unreleased code.
+    required: false
+    default: "false"
+  source-dir:
+    description: >-
+      Directory containing the rysh-cli go.mod, used with build-from-source.
+    required: false
+    default: "."
+  task:
+    description: >-
+      Prompt string for `rysh run --prompt`. Mutually exclusive with
+      skill-file and eval.
+    required: false
+    default: ""
+  skill-file:
+    description: >-
+      Path to a skill markdown file for `rysh run <skill.md>`. Mutually
+      exclusive with task and eval.
+    required: false
+    default: ""
+  eval:
+    description: >-
+      Path to an eval case directory (or a directory of case dirs, each with
+      task.md + expect.yaml) for `rysh eval`. Runs --live unless eval-result
+      is set. Mutually exclusive with task and skill-file.
+    required: false
+    default: ""
+  eval-result:
+    description: >-
+      Path to a Result JSON artifact. With eval, grades it structurally via
+      `rysh eval <dirs> --result <file>` — no provider key, no token spend.
+    required: false
+    default: ""
+  provider:
+    description: >-
+      Provider override passed as --provider (rysh run / rysh eval --live).
+    required: false
+    default: ""
+  budget:
+    description: >-
+      Spend ceiling passed as --budget to rysh run: "$2" / "2usd" (cost) or
+      "150000" / "150k" (tokens). Not supported in eval mode.
+    required: false
+    default: ""
+  timeout:
+    description: >-
+      Overall deadline passed as --timeout (Go duration, e.g. "90s", "10m").
+    required: false
+    default: ""
+  worktree:
+    description: >-
+      "true" to run inside a fresh git worktree (--worktree).
+    required: false
+    default: "false"
+  fail-on:
+    description: >-
+      When to fail the step: "any" (default — any non-zero exit fails),
+      "error" (only hard failures: exit 1 error / 5 timeout; partial,
+      gate-blocked and budget-exhausted are reported via outputs but do not
+      fail), or "none" (never fail — gate on the status/exit-code outputs
+      yourself). When the step fails it exits with rysh's real exit code.
+    required: false
+    default: "any"
+  result-artifact:
+    description: >-
+      "true" to upload the Result JSON (and eval TAP, when present) with
+      actions/upload-artifact.
+    required: false
+    default: "false"
+  artifact-name:
+    description: Name for the uploaded artifact when result-artifact is "true".
+    required: false
+    default: "rysh-result"
+
+outputs:
+  status:
+    description: >-
+      Terminal status. Run modes: done, partial, gate_blocked,
+      budget_exhausted, timeout, error. Eval modes: eval_passed, eval_failed.
+    value: ${{ steps.run.outputs.status }}
+  exit-code:
+    description: >-
+      rysh's real exit code (0 done, 1 error, 2 partial-saved, 3 gate-blocked,
+      4 budget-exhausted, 5 timeout; eval: 0 all-pass, 1 otherwise) — emitted
+      even when fail-on tolerates it.
+    value: ${{ steps.run.outputs.exit-code }}
+  result-path:
+    description: >-
+      Absolute path of the Result JSON written by rysh run (empty in eval mode
+      or when the run failed before producing one).
+    value: ${{ steps.run.outputs.result-path }}
+  tap-path:
+    description: >-
+      Absolute path of the TAP output written by rysh eval (empty in run mode).
+    value: ${{ steps.run.outputs.tap-path }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install rysh
+      shell: bash
+      env:
+        RYSH_VERSION: ${{ inputs.version }}
+        RYSH_BUILD_FROM_SOURCE: ${{ inputs.build-from-source }}
+        RYSH_SOURCE_DIR: ${{ inputs.source-dir }}
+        RYSH_INSTALL_DIR: ${{ runner.temp }}/setup-rysh/bin
+      run: bash "${GITHUB_ACTION_PATH}/scripts/install.sh"
+
+    - name: Run rysh
+      id: run
+      shell: bash
+      env:
+        INPUT_TASK: ${{ inputs.task }}
+        INPUT_SKILL_FILE: ${{ inputs.skill-file }}
+        INPUT_EVAL: ${{ inputs.eval }}
+        INPUT_EVAL_RESULT: ${{ inputs.eval-result }}
+        INPUT_PROVIDER: ${{ inputs.provider }}
+        INPUT_BUDGET: ${{ inputs.budget }}
+        INPUT_TIMEOUT: ${{ inputs.timeout }}
+        INPUT_WORKTREE: ${{ inputs.worktree }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        RYSH_BIN: ${{ runner.temp }}/setup-rysh/bin/rysh
+        RYSH_OUT_DIR: ${{ github.workspace }}/rysh-out
+      run: bash "${GITHUB_ACTION_PATH}/scripts/run.sh"
+
+    - name: Upload result artifact
+      # always(): the artifact is most valuable exactly when the run step
+      # failed (gate-blocked / budget-exhausted partials are what you debug).
+      if: ${{ always() && inputs.result-artifact == 'true' && (steps.run.outputs.result-path != '' || steps.run.outputs.tap-path != '') }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          ${{ steps.run.outputs.result-path }}
+          ${{ steps.run.outputs.tap-path }}
+        if-no-files-found: warn

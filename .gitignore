@@ -1,0 +1,45 @@
+# Editor swap files
+*.swp
+*.swo
+
+# Built binaries
+rysh
+ry
+rysh_local
+
+# Config file (contains secrets / personal settings).
+# The committed template is rysh.config.yaml.example.
+rysh.config.yaml
+rysh.config.yml
+rysh.config
+
+# Session and test state
+secrets/
+.rysh/secrets/
+
+# Plugin dev-tier signing: the private key must never be committed
+# (docs/plugin-authoring.md); the example plugin binary is a build artifact.
+.rysh/plugin-signing.key
+examples/plugins/echo-channel/echo-channel
+
+# Claude Code worktrees
+.claude/worktrees/
+.claire/
+
+# Web frontend build artifacts
+internal/web/frontend/node_modules/
+internal/web/frontend/dist/
+
+# Logs
+*.log
+*.pid
+
+# Environment files — never commit secrets (keep .env.example templates)
+.env
+.env.*
+*.env
+!.env.example
+!**/.env.example
+
+# make artifacts (coverage reports, wire-test evidence)
+.build/

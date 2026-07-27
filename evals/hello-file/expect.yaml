@@ -1,0 +1,13 @@
+# Assertions for the hello-file case (design 009 §3.2).
+# files_changed: scope containment — only hello.txt may change.
+files_changed:
+  - hello.txt
+# commands_allowed: every executed command must match one of these.
+commands_allowed:
+  - "echo *"
+  - "printf *"
+  - "cat *"
+  - "ls*"
+output_matches:
+  - "(?i)done"
+max_tokens: 50000
