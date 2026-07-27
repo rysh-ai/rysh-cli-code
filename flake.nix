@@ -29,6 +29,8 @@
           # Monorepo root (rysh-cli beside rysh-shared).
           src = ../.;
           modRoot = "rysh-cli";
+          # The one main package; everything else is a library under internal/.
+          subPackages = [ "cmd/rysh" ];
           # GOFLAGS mirrors the GOWORK=off build the CLI uses elsewhere.
           env.GOWORK = "off";
           # TODO(release): replace with the real hash printed on first build.
@@ -38,6 +40,7 @@
           meta = with pkgs.lib; {
             description = "Agentic terminal multiplexer for code development";
             homepage = "https://rysh.ai";
+            license = licenses.asl20;
             mainProgram = "rysh";
           };
         };

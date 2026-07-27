@@ -3,7 +3,7 @@ Version:        0.1.0
 Release:        1%{?dist}
 Summary:        Agentic terminal multiplexer for code development
 Group:          Applications/System
-License:        MIT
+License:        Apache-2.0
 URL:            https://rysh.ai
 Source0:        https://packages.rysh.ai/releases/v%{version}/rysh_linux_%{_arch}.tar.gz
 

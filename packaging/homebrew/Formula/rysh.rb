@@ -15,7 +15,7 @@
 class Rysh < Formula
   desc "Agentic terminal multiplexer for code development"
   homepage "https://rysh.ai"
-  license "MIT"
+  license "Apache-2.0"
   version "0.1.0"
 
   on_macos do

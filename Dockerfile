@@ -19,7 +19,7 @@ COPY rysh-shared/ ./rysh-shared/
 COPY rysh-cli/ ./rysh-cli/
 WORKDIR /src/rysh-cli
 ENV GOWORK=off CGO_ENABLED=0
-RUN go build -ldflags "-s -w" -o /out/rysh .
+RUN go build -ldflags "-s -w" -o /out/rysh ./cmd/rysh
 
 # ---- runtime stage ---------------------------------------------------------
 FROM alpine:3.20

@@ -29,11 +29,11 @@ help: ## Show this help
 # ── Build ─────────────────────────────────────────────────────────────────────
 
 build: ## Build the rysh binary
-	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BIN) .
+	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BIN) ./cmd/rysh
 	@echo "Built $(BIN_DIR)/$(BIN)"
 
 build-alt: ## Build legacy 'ry' alias binary
-	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BIN_ALT) .
+	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BIN_ALT) ./cmd/rysh
 	@echo "Built $(BIN_DIR)/$(BIN_ALT)"
 
 install: build ## Build and install rysh to ~/.local/bin

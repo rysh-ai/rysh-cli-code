@@ -15,16 +15,15 @@
   <metadata>
     <id>rysh</id>
     <version>0.1.0</version>
-    <!-- rysh-cli is private and github.com/rysh-ai/rysh does not exist; point
-         at what is actually reachable. -->
-    <packageSourceUrl>https://rysh.ai/docs</packageSourceUrl>
+    <packageSourceUrl>https://github.com/rysh-ai/rysh-cli-code</packageSourceUrl>
     <owners>rysh-ai</owners>
     <title>Rysh (CLI-only build for Windows)</title>
     <authors>Rysh</authors>
     <projectUrl>https://rysh.ai</projectUrl>
-    <projectSourceUrl>https://rysh.ai</projectSourceUrl>
+    <projectSourceUrl>https://github.com/rysh-ai/rysh-cli-code</projectSourceUrl>
     <docsUrl>https://rysh.ai/docs</docsUrl>
-    <bugTrackerUrl>https://rysh.ai/docs</bugTrackerUrl>
+    <bugTrackerUrl>https://github.com/rysh-ai/rysh-cli-code/issues</bugTrackerUrl>
+    <licenseUrl>https://github.com/rysh-ai/rysh-cli-code/blob/main/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <tags>cli ai agent development wsl</tags>
     <summary>Command-line client for Rysh. Cannot open panes on Windows — use WSL2 for the multiplexer.</summary>
@@ -85,8 +84,9 @@ real work, not a flag. It is demand-gated.
 
 ## Configuration
 
-Rysh reads `~/.config/rysh/rysh.config.yaml`. Set an Anthropic API key to enable
-the agent:
+Rysh reads `rysh.config.yaml` from the directory you run it in (then
+`.rysh/rysh.config.yaml`). Config and state are project-local; there is no
+global location. Set an Anthropic API key to enable the agent:
 
 ```yaml
 provider:

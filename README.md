@@ -16,11 +16,11 @@ the shared one.
 ## Install
 
 ```sh
-go install github.com/rysh-ai/rysh-cli-code@latest
+go install github.com/rysh-ai/rysh-cli-code/cmd/rysh@latest
 ```
 
-The binary lands in `$(go env GOPATH)/bin` as `rysh-cli-code`; rename it to
-`rysh` for the short command. To build from source instead:
+The binary lands in `$(go env GOPATH)/bin` as `rysh`. To build from source
+instead:
 
 ```sh
 git clone --recursive https://github.com/rysh-ai/rysh-cli-parent
@@ -51,7 +51,7 @@ the keybindings, sessions, agents and humanoids.
 
 | Path | What |
 | --- | --- |
-| `main.go`, `*_cmd.go` | command surface |
+| `cmd/rysh` | the main package — entry point and command surface |
 | `internal/tui` | the terminal UI |
 | `internal/actors` | workspace / tab / pane / agent actors, proto.actor over NATS |
 | `internal/vterm` | terminal emulation, including a vt10x fork with scrollback |
