@@ -55,16 +55,16 @@ deps: ## Tidy Go module dependencies
 # targets are conveniences that defer to the shared renderer.
 
 build-frontend: ## Build embedded web assets from the shared rysh-cli-app renderer
-	@if [ -f ../rysh-cli-app/vite.web.config.ts ]; then \
+	@if [ -f ../rysh-cli-app-code/vite.web.config.ts ]; then \
 		echo "Building shared renderer (web) → internal/web/static"; \
-		cd ../rysh-cli-app && npx vite build --config vite.web.config.ts; \
+		cd ../rysh-cli-app-code && npx vite build --config vite.web.config.ts; \
 		echo "NOTE: rebuild the rysh binary so //go:embed static/* refreshes."; \
 	else \
-		echo "Shared renderer not found at ../rysh-cli-app — see web_electron_roadmap."; \
+		echo "Shared renderer not found at ../rysh-cli-app-code — see web_electron_roadmap."; \
 	fi
 
 frontend-dev: ## Run the shared renderer dev server (rysh-cli-app)
-	cd ../rysh-cli-app && npm run dev
+	cd ../rysh-cli-app-code && npm run dev
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 

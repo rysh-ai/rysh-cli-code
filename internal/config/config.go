@@ -919,7 +919,8 @@ type ryshLogging struct {
 
 // Load reads configuration from rysh.config.yaml, then applies environment
 // variable overrides. The config file is searched in the current directory
-// first, then ~/.config/rysh/rysh.config.yaml.
+// first, then <cwd>/.rysh/rysh.config.yaml — never any home-directory
+// location (rysh has no global state root; see resolveConfig).
 //
 // When the config file exists but cannot be parsed, a warning is written to
 // stderr. This avoids the silent trap where a single malformed value (for
