@@ -153,9 +153,10 @@ fi
 # ── install.sh: build-from-source ────────────────────────────────────────────
 if command -v go >/dev/null 2>&1; then
   src="${WORK}/src"
-  mkdir -p "$src"
+  mkdir -p "${src}/cmd/rysh"
   printf 'module fakerysh\n\ngo 1.21\n' >"${src}/go.mod"
-  printf 'package main\n\nimport "fmt"\n\nfunc main() { fmt.Println("fake source build") }\n' >"${src}/main.go"
+  # The main package lives in cmd/rysh, mirroring the real repo layout.
+  printf 'package main\n\nimport "fmt"\n\nfunc main() { fmt.Println("fake source build") }\n' >"${src}/cmd/rysh/main.go"
   dir="${WORK}/bin8"
   run_install "$dir" RYSH_BUILD_FROM_SOURCE=true RYSH_SOURCE_DIR="$src" RYSH_VERSION=0.0.1
   if [[ $INSTALL_RC -eq 0 ]] && "${dir}/rysh" | grep -q "fake source build" \

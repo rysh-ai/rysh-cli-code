@@ -136,7 +136,7 @@ build_from_source() {
   fi
   dest=$(cd "${RYSH_INSTALL_DIR}" && pwd)
   log "building rysh from source in ${src} (GOWORK=off go build)"
-  (cd "$src" && GOWORK=off go build -o "${dest}/rysh" .)
+  (cd "$src" && GOWORK=off go build -o "${dest}/rysh" ./cmd/rysh)
   log "built rysh into ${dest}/rysh"
 }
 
