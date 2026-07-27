@@ -13,12 +13,13 @@
 #   RYSH_VERSION      pin a specific version (e.g. "0.1.25" or "v0.1.25")
 #   RYSH_BASE_URL     artifact host (default: https://packages.rysh.ai)
 #   RYSH_INSTALL_DIR  install target (default: /usr/local/bin, else ~/.local/bin)
+#   RYSH_BINARY_NAME  binary/artifact name (default: ry; the open-source build is rysh)
 
 set -e
 
 RYSH_BASE_URL="${RYSH_BASE_URL:-https://packages.rysh.ai}"
 RYSH_INSTALL_DIR="${RYSH_INSTALL_DIR:-/usr/local/bin}"
-BINARY_NAME="rysh"
+BINARY_NAME="${RYSH_BINARY_NAME:-ry}"
 
 fail() {
   echo "ERROR: $1" >&2
@@ -94,7 +95,7 @@ TAG="v${VERSION}"
 echo "Latest version: ${TAG}"
 
 # ── Build download URLs ──────────────────────────────────────────────────────
-ARCHIVE="rysh_${OS}_${ARCH}.tar.gz"
+ARCHIVE="${BINARY_NAME}_${OS}_${ARCH}.tar.gz"
 RELEASE_URL="${RYSH_BASE_URL}/releases/${TAG}"
 URL="${RELEASE_URL}/${ARCHIVE}"
 CHECKSUM_URL="${RELEASE_URL}/checksums.txt"
@@ -176,8 +177,8 @@ echo ""
 echo "✓ Rysh ${TAG} installed at ${INSTALLED_PATH}"
 echo ""
 echo "Quick start:"
-echo "  rysh                       # start the default session"
-echo "  rysh my-project            # start a named session"
+echo "  ${BINARY_NAME}                         # start the default session"
+echo "  ${BINARY_NAME} my-project              # start a named session"
 echo ""
 echo "Set your Anthropic API key in rysh.config.yaml in your project directory"
 echo "(config and state are project-local; there is no global location):"

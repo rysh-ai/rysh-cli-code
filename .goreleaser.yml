@@ -1,0 +1,179 @@
+# GoReleaser configuration for the OPEN-SOURCE rysh build.
+#
+# This file is injected into rysh-cli-code by scripts/export-oss.sh. The private
+# repo's .goreleaser.yml is a different file and is never exported: that one
+# builds the closed product as `ry`, signs it, and uploads to packages.rysh.ai.
+# This one builds `rysh` and publishes to the public repo's GitHub Releases.
+#
+# It deliberately needs NO secrets beyond the workflow's built-in GITHUB_TOKEN:
+#   - no `signs` block      (no GPG key in a public repo)
+#   - no `blobs` block      (no S3 credentials)
+#   - no `brews` block      (pushing a formula needs a cross-repo token; see
+#                            the note at the bottom of this file)
+#
+# Schema version: v2
+version: 2
+
+project_name: rysh
+
+before:
+  hooks:
+    - go mod verify
+
+builds:
+  - id: rysh-linux-amd64
+    binary: rysh
+    main: ./cmd/rysh
+    goos: [linux]
+    goarch: [amd64]
+    env:
+      - CGO_ENABLED=0
+      - GOWORK=off
+    ldflags: &ldflags
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+  - id: rysh-linux-arm64
+    binary: rysh
+    main: ./cmd/rysh
+    goos: [linux]
+    goarch: [arm64]
+    env:
+      - CGO_ENABLED=0
+      - GOWORK=off
+    ldflags: *ldflags
+
+  - id: rysh-darwin
+    binary: rysh
+    main: ./cmd/rysh
+    goos: [darwin]
+    goarch: [amd64, arm64]
+    env:
+      - CGO_ENABLED=0
+      - GOWORK=off
+    ldflags: *ldflags
+
+  - id: rysh-windows
+    binary: rysh
+    main: ./cmd/rysh
+    goos: [windows]
+    goarch: [amd64]
+    env:
+      - CGO_ENABLED=0
+      - GOWORK=off
+    ldflags: *ldflags
+
+archives:
+  - id: rysh-archive
+    ids: [rysh-linux-amd64, rysh-linux-arm64, rysh-darwin]
+    name_template: "rysh_{{.Os}}_{{.Arch}}"
+    formats: [tar.gz]
+    files:
+      - README.md
+      - LICENSE
+      - NOTICE
+      - rysh.config.yaml.example
+
+  # Native Windows is a CLI-ONLY artifact: rysh has no ConPTY implementation, so
+  # it cannot open panes. The binary refuses session commands with WSL guidance
+  # (see requirePTY). The name says so, so nobody downloads it expecting a
+  # multiplexer.
+  - id: rysh-windows-archive
+    ids: [rysh-windows]
+    name_template: "rysh_{{.Os}}_{{.Arch}}_cli-only"
+    formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+      - NOTICE
+      - rysh.config.yaml.example
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+nfpms:
+  - id: rysh-packages
+    package_name: rysh
+    file_name_template: "rysh_{{ .Version }}_{{ .Arch }}"
+    ids: [rysh-linux-amd64, rysh-linux-arm64]
+    vendor: Rysh AI
+    homepage: https://github.com/rysh-ai/rysh-cli-parent
+    maintainer: Rysh AI <releases@rysh.ai>
+    description: |-
+      Rysh is an agentic terminal multiplexer for code development.
+      Each pane is an autonomous agent workspace that can execute shell
+      commands and answer LLM prompts.
+    license: Apache-2.0
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/bin
+    contents:
+      - src: rysh.config.yaml.example
+        dst: /etc/rysh/rysh.config.yaml.example
+        type: config|noreplace
+      - src: README.md
+        dst: /usr/share/doc/rysh/README.md
+      - src: LICENSE
+        dst: /usr/share/doc/rysh/LICENSE
+    scripts:
+      postinstall: packaging/scripts/postinstall.sh
+      preremove: packaging/scripts/preremove.sh
+    rpm:
+      group: Applications/System
+      compression: xz
+
+release:
+  github:
+    owner: rysh-ai
+    name: rysh-cli-code
+  name_template: "v{{ .Version }}"
+  draft: false
+  prerelease: auto
+  make_latest: true
+  header: |
+    ## Rysh {{ .Tag }}
+
+    Build from source, or `go install github.com/rysh-ai/rysh-cli-code/cmd/rysh@{{ .Tag }}`.
+    See [rysh-cli-parent](https://github.com/rysh-ai/rysh-cli-parent#readme) to get started.
+  footer: |
+    **Full Changelog**: https://github.com/rysh-ai/rysh-cli-code/compare/{{ .PreviousTag }}...{{ .Tag }}
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - typo
+      - Merge pull request
+
+# Publishing a Homebrew formula from here needs a token that can push to
+# rysh-ai/homebrew-rysh; the built-in GITHUB_TOKEN is scoped to this repo alone.
+# Add a HOMEBREW_TAP_TOKEN secret to rysh-ai/rysh-cli-code, pass it through in
+# .github/workflows/release.yml, and append:
+#
+#   brews:
+#     - name: rysh
+#       ids: [rysh-archive]
+#       repository:
+#         owner: rysh-ai
+#         name: homebrew-rysh
+#         branch: main
+#         token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+#       directory: Formula
+#       homepage: https://rysh.ai
+#       description: "Agentic terminal multiplexer for code development"
+#       license: Apache-2.0
+#       test: |
+#         system "#{bin}/rysh", "--version"
+#       install: |
+#         bin.install "rysh"
+#
+# `brews` is deprecated in favour of homebrew_casks, which changes the install
+# to `brew install --cask` and drops the Linux formula — decide before adopting.

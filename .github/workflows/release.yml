@@ -1,0 +1,46 @@
+# Release workflow for the OPEN-SOURCE rysh build.
+#
+# Injected into rysh-cli-code by scripts/export-oss.sh. Runs on a v* tag and
+# needs no secrets beyond the built-in GITHUB_TOKEN.
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      # rysh-cli-shared is resolved from the module proxy via go.sum, so there
+      # is no sibling checkout and no workspace here.
+      - name: Build
+        run: GOWORK=off go build ./...
+
+      - name: Test
+        run: GOWORK=off go test ./...
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          # Pinned to the v2 line: `latest` would adopt a new major the day it
+          # ships and break the release without warning.
+          version: '~> v2'
+          args: release --clean
+        env:
+          GOWORK: "off"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
