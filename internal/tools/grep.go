@@ -325,7 +325,7 @@ func isBinary(path string) bool {
 	defer f.Close()
 
 	buf := make([]byte, 512)
-	n, err := f.Read(buf)
+	n, _ := f.Read(buf)
 	if n == 0 {
 		return false
 	}

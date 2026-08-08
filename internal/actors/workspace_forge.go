@@ -35,6 +35,7 @@ import (
 func (w *WorkspaceActor) handleForgeSubcommand(out *strings.Builder, paneID string, args []string) {
 	if w.agSetup == nil || w.agSetup.Forge == nil {
 		fmt.Fprintf(out, "\n[forge] Forge is unavailable (agentic mode disabled?)\n")
+		w.failRysh("Forge is unavailable (agentic mode disabled?)")
 		return
 	}
 
@@ -62,7 +63,8 @@ func (w *WorkspaceActor) handleForgeSubcommand(out *strings.Builder, paneID stri
 			return
 		case "unsubscribe":
 			if len(args) < 2 {
-				fmt.Fprintf(out, "\n[forge] usage: ##forge unsubscribe <name>\n")
+				ryshWriter(out).UsageLineIn("forge", "##forge unsubscribe <name>")
+				w.failRyshUsage("usage: %s", "##forge unsubscribe <name>")
 				return
 			}
 			w.forgeShareDispatch(out, paneID, &msgForgeUnsubscribe{Name: args[1], PaneID: paneID}, fmt.Sprintf("unsubscribing from %q…", args[1]))
@@ -74,6 +76,7 @@ func (w *WorkspaceActor) handleForgeSubcommand(out *strings.Builder, paneID stri
 	workDir := w.agSetup.Forge.WorkDir()
 	fmt.Fprintln(out)
 	if err := forgecmd.Run(workDir, args, out); err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "[forge] %v\n", err)
 	}
 }
@@ -116,7 +119,8 @@ func (w *WorkspaceActor) handleForgeShare(out *strings.Builder, paneID string, a
 	}
 	// ##forge share api <name>
 	if len(args) < 2 || strings.ToLower(args[0]) != "api" {
-		fmt.Fprintf(out, "\n[forge] usage: ##forge share api <name>   (or: ##forge shares to list)\n")
+		ryshWriter(out).UsageLineIn("forge", "##forge share api <name>   (or: ##forge shares to list)")
+		w.failRyshUsage("usage: %s", "##forge share api <name>   (or: ##forge shares to list)")
 		return
 	}
 	name := args[1]
@@ -129,6 +133,7 @@ func (w *WorkspaceActor) handleForgeShare(out *strings.Builder, paneID string, a
 		ops := w.agSetup.Forge.APIOps(name)
 		if len(ops) == 0 {
 			fmt.Fprintf(out, "\n[forge] %q is not enabled — run '##integration enable %s' first (check with '##integration list')\n", name, name)
+			w.failRysh("%q is not enabled — run '##integration enable %s' first (check with '##integration list')", name, name)
 			return
 		}
 		fmt.Fprintf(out, "\n[forge] %q: %d op(s) found; handing off to upstream…\n", name, len(ops))
@@ -139,7 +144,8 @@ func (w *WorkspaceActor) handleForgeShare(out *strings.Builder, paneID string, a
 func (w *WorkspaceActor) handleForgeUnshare(out *strings.Builder, paneID string, args []string) {
 	// ##forge unshare api <name>
 	if len(args) < 2 || strings.ToLower(args[0]) != "api" {
-		fmt.Fprintf(out, "\n[forge] usage: ##forge unshare api <name>\n")
+		ryshWriter(out).UsageLineIn("forge", "##forge unshare api <name>")
+		w.failRyshUsage("usage: %s", "##forge unshare api <name>")
 		return
 	}
 	name := args[1]
@@ -150,13 +156,15 @@ func (w *WorkspaceActor) handleForgeSubscribe(out *strings.Builder, paneID strin
 	// ##forge subscribe <name> [--scope pane|panegroup|lane|tab]   (default: tab)
 	scopeTok, rest := extractScopeFlag(args)
 	if len(rest) < 1 {
-		fmt.Fprintf(out, "\n[forge] usage: ##forge subscribe <name> [--scope pane|panegroup|lane|tab]\n")
+		ryshWriter(out).UsageLineIn("forge", "##forge subscribe <name> [--scope pane|panegroup|lane|tab]")
+		w.failRyshUsage("usage: %s", "##forge subscribe <name> [--scope pane|panegroup|lane|tab]")
 		return
 	}
 	name := rest[0]
 	kind, ok := agentic.ParseScope(scopeTok)
 	if !ok {
 		fmt.Fprintf(out, "\n[forge] unknown --scope %q (use pane|panegroup|lane|tab)\n", scopeTok)
+		w.failRysh("unknown --scope %q (use pane|panegroup|lane|tab)", scopeTok)
 		return
 	}
 	// The SUBSCRIBER chooses the scope; resolve the concrete instance ids from the

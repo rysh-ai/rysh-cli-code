@@ -276,16 +276,22 @@ func (m Model) paneInputModeFor(paneID string) string {
 	return mode
 }
 
-// paneOutputForMode returns the appropriate output string for a pane based on
-// that pane's own input mode. Every pane (active or not) renders its own mode's
-// buffer so a chat/prompt/rysh pane keeps its content when another pane is
-// focused.
-func (m Model) paneOutputForMode(pane *domain.PaneSnapshot) string {
-	// Key off the pane's OWN stored mode, not the active pane's. Otherwise a
-	// chat/prompt/rysh pane reverts to the merged Output buffer the instant it
-	// loses focus — the chat conversation vanishes and shell output shows in its
-	// place, which reads as "chat mode returned to shell mode".
-	switch m.paneInputModeFor(pane.ID) {
+// paneModeOutput returns the buffer a pane renders for a given input mode. It
+// is the SINGLE selector every render path uses — the live view, the
+// selection/copy line builder (buildDisplayLines), and the scroll/hit-test math
+// (paneOutputForMode) — so all three agree on what is on screen.
+//
+// They did not always agree. The live view carried its own inline switch with
+// no "web" and no dynamic-humanoid case, so a web pane silently rendered the
+// merged shell buffer while the scroll math measured a placeholder that was
+// never drawn. Any new mode has to be added here, once, or that skew returns.
+//
+// Modes the terminal cannot paint natively resolve to a placeholder that says
+// so and says what to do instead. That is the whole terminal-side contract for
+// desktop-app sessions: the pane is still live and still driveable, it just
+// cannot show you pixels.
+func paneModeOutput(pane domain.PaneSnapshot, inputMode string) string {
+	switch inputMode {
 	case "prompt":
 		// AI mode shows only the AI stream. The merged Output buffer also
 		// carries shell + ## system-command output (## is published as
@@ -297,24 +303,48 @@ func (m Model) paneOutputForMode(pane *domain.PaneSnapshot) string {
 	case "chat":
 		return pane.ChatOutput
 	case "external", "email":
-		// "email" renders via the dedicated buildEmailPanel branch; this buffer
-		// (the humanoid's streamed drafts) backs scroll math / hit-testing only.
+		// "email" renders via the dedicated buildEmailPanel branch — the
+		// terminal has a real three-column client, so nothing degrades here;
+		// this buffer (the humanoid's streamed drafts) backs scroll math and
+		// hit-testing only.
 		return pane.ExternalOutput
 	case "web":
-		return m.paneWebPlaceholder(pane)
+		return webPanePlaceholder(pane)
+	case "shell", "":
+		return pane.Output
 	default:
-		// Dynamic per-humanoid mode: render that humanoid's own buffer.
-		if v, ok := pane.ModeOutputs[m.paneInputModeFor(pane.ID)]; ok {
-			return v
+		// Dynamic per-humanoid mode: render that humanoid's own buffer, headed
+		// by a note that this is the text mirror of a surface the desktop app
+		// draws as an interactive client.
+		if v, ok := pane.ModeOutputs[inputMode]; ok {
+			return humanoidModeHeader(inputMode) + v
 		}
 	}
 	return pane.Output
 }
 
-// paneWebPlaceholder renders the terminal-side summary for a web-mode pane. The
-// embedded Chromium browser is rendered by the Rysh desktop app; the terminal
-// can only show the binding.
-func (m Model) paneWebPlaceholder(pane *domain.PaneSnapshot) string {
+// paneOutputForMode returns the appropriate output string for a pane based on
+// that pane's own input mode. Every pane (active or not) renders its own mode's
+// buffer so a chat/prompt/rysh pane keeps its content when another pane is
+// focused.
+//
+// Keying off the pane's OWN stored mode, not the active pane's, is what stops a
+// chat/prompt/rysh pane reverting to the merged Output buffer the instant it
+// loses focus — which reads as "chat mode returned to shell mode".
+func (m Model) paneOutputForMode(pane *domain.PaneSnapshot) string {
+	return paneModeOutput(*pane, m.paneInputModeFor(pane.ID))
+}
+
+// webPanePlaceholder renders the terminal-side face of a web-mode pane.
+//
+// A web pane's browser lives wherever a renderer can host one: the desktop
+// app's embedded Chromium, or the server-side Chromium the browser UI streams
+// frames from. A terminal has neither, so it shows the binding instead of the
+// page — but the pane is NOT inert. Its automation runs against CLI-owned
+// headless Chromium (`##web headless on`), and typing a URL below still
+// rebinds it. Both are spelled out because a placeholder that only says
+// "unavailable" reads as a broken pane.
+func webPanePlaceholder(pane domain.PaneSnapshot) string {
 	url := pane.WebURL
 	if url == "" {
 		url = "about:blank"
@@ -323,7 +353,31 @@ func (m Model) paneWebPlaceholder(pane *domain.PaneSnapshot) string {
 	if profile == "" {
 		profile = "default"
 	}
-	return fmt.Sprintf("\U0001F310 web mode\n\n  profile: %s\n  url:     %s\n\nThe embedded browser is rendered by the Rysh desktop app.\nType a URL below to navigate; ##mode delete web to exit.\n", profile, url)
+	title := pane.WebTitle
+	if title == "" {
+		title = "(no page loaded yet)"
+	}
+	return fmt.Sprintf(
+		"\U0001F310 web mode — bound, but not painted here\n\n"+
+			"  profile: %s\n"+
+			"  url:     %s\n"+
+			"  title:   %s\n\n"+
+			"A live page needs a renderer that can host a browser: the Rysh desktop app,\n"+
+			"or `##rysh web start` opened in your own browser. The pane still works here:\n\n"+
+			"  ##web headless on      drive this page with CLI-owned headless Chromium\n"+
+			"  ##webai <prompt>       ask the pane's browser agent to act on the page\n"+
+			"  <type a url below>     rebind the pane to another address\n"+
+			"  ##mode delete web      leave web mode\n",
+		profile, url, title)
+}
+
+// humanoidModeHeader labels the plain-text mirror of a humanoid's channel
+// buffer. The desktop app renders some of these — WhatsApp above all — as a
+// threaded client with a reading pane; the terminal shows the same messages as
+// a transcript. Naming that difference on the pane's own face is what keeps it
+// from looking like the rich view simply failed to load.
+func humanoidModeHeader(humanoid string) string {
+	return fmt.Sprintf("[%s] channel transcript — the desktop app renders this as a threaded client\n\n", humanoid)
 }
 
 // paneModeEnabled reports whether mode is enabled for the pane. Pre-field

@@ -1,0 +1,13 @@
+name: "@rysh/softdev-loop"
+version: "0.1.0"
+type: loop
+description: "Go software-development loop: implement, test, vet — repeat until the suite is green"
+entry: SKILL.md
+min_rysh: "0.1.26"
+declares_tools:
+  - bash
+  - file_read
+  - edit
+  - grep
+  - glob
+  - test_run

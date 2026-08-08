@@ -103,8 +103,17 @@ const (
 	// Given-name messages (Workspace → Pane, direct)
 	TagPaneSetGivenName = "MsgPaneSetGivenName"
 
+	// Per-pane metadata for whoever is driving the pane (Workspace → Pane,
+	// direct), and the foreground-program announcement (Pane → anyone).
+	TagPaneSetMeta        = "MsgPaneSetMeta"
+	TagLaunchClaudeInPane = "MsgLaunchClaudeInPane"
+	TagPaneProcess        = "MsgPaneProcess"
+
 	// Per-pane provider override (Workspace → Pane, direct; design 002 §3.4)
 	TagPaneSetProvider = "MsgPaneSetProvider"
+
+	// Interactive `##llm select` picker (Workspace → front-end push)
+	TagLLMPickerOpen = "MsgLLMPickerOpen"
 
 	// Per-pane mode enable/disable (Workspace → Pane, direct)
 	TagPaneEnableMode    = "MsgPaneEnableMode"
@@ -293,6 +302,8 @@ const (
 	TagHumanoidChannelStatus     = "MsgHumanoidChannelStatus"
 	TagHumanoidSetReplyMode      = "MsgHumanoidSetReplyMode"
 	TagHumanoidSetGovernance     = "MsgHumanoidSetGovernance"
+	TagHumanoidGovernanceChanged = "MsgHumanoidGovernanceChanged"
+	TagHumanoidReplyModeChanged  = "MsgHumanoidReplyModeChanged"
 	TagHumanoidSetProvider       = "MsgHumanoidSetProvider"
 	TagHumanoidInboundMessage    = "MsgHumanoidInboundMessage"
 	TagHumanoidOutboundMessage   = "MsgHumanoidOutboundMessage"
@@ -332,6 +343,7 @@ const (
 
 	// Raw/interactive terminal mode
 	TagPaneResize      = "MsgPaneResize"
+	TagPaneReleaseSize = "MsgPaneReleaseSize"
 	TagPaneResized     = "MsgPaneResized"
 	TagRawKeyInput     = "MsgRawKeyInput"
 	TagPaneClearOutput = "MsgPaneClearOutput"
@@ -442,7 +454,11 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagPaneExecChat, "*msg.MsgPaneExecChat", jsonDecoder[MsgPaneExecChat]())
 	r.Register(TagPaneSetTitle, "*msg.MsgPaneSetTitle", jsonDecoder[MsgPaneSetTitle]())
 	r.Register(TagPaneSetGivenName, "*msg.MsgPaneSetGivenName", jsonDecoder[MsgPaneSetGivenName]())
+	r.Register(TagPaneSetMeta, "*msg.MsgPaneSetMeta", jsonDecoder[MsgPaneSetMeta]())
+	r.Register(TagLaunchClaudeInPane, "*msg.MsgLaunchClaudeInPane", jsonDecoder[MsgLaunchClaudeInPane]())
+	r.Register(TagPaneProcess, "*msg.MsgPaneProcess", jsonDecoder[MsgPaneProcess]())
 	r.Register(TagPaneSetProvider, "*msg.MsgPaneSetProvider", jsonDecoder[MsgPaneSetProvider]())
+	r.Register(TagLLMPickerOpen, "*msg.MsgLLMPickerOpen", jsonDecoder[MsgLLMPickerOpen]())
 	r.Register(TagPaneEnableMode, "*msg.MsgPaneEnableMode", jsonDecoder[MsgPaneEnableMode]())
 	r.Register(TagPaneActivateMode, "*msg.MsgPaneActivateMode", jsonDecoder[MsgPaneActivateMode]())
 	r.Register(TagPaneWebHeadless, "*msg.MsgPaneWebHeadless", jsonDecoder[MsgPaneWebHeadless]())
@@ -450,6 +466,7 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagPaneDisableMode, "*msg.MsgPaneDisableMode", jsonDecoder[MsgPaneDisableMode]())
 	r.Register(TagPaneStop, "*msg.MsgPaneStop", jsonDecoder[MsgPaneStop]())
 	r.Register(TagPaneResize, "*msg.MsgPaneResize", jsonDecoder[MsgPaneResize]())
+	r.Register(TagPaneReleaseSize, "*msg.MsgPaneReleaseSize", jsonDecoder[MsgPaneReleaseSize]())
 	r.Register(TagPaneResized, "*msg.MsgPaneResized", jsonDecoder[MsgPaneResized]())
 	r.Register(TagRawKeyInput, "*msg.MsgRawKeyInput", jsonDecoder[MsgRawKeyInput]())
 	r.Register(TagPaneClearOutput, "*msg.MsgPaneClearOutput", jsonDecoder[MsgPaneClearOutput]())
@@ -623,6 +640,8 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagHumanoidChannelStatus, "*msg.MsgHumanoidChannelStatus", jsonDecoder[MsgHumanoidChannelStatus]())
 	r.Register(TagHumanoidSetReplyMode, "*msg.MsgHumanoidSetReplyMode", jsonDecoder[MsgHumanoidSetReplyMode]())
 	r.Register(TagHumanoidSetGovernance, "*msg.MsgHumanoidSetGovernance", jsonDecoder[MsgHumanoidSetGovernance]())
+	r.Register(TagHumanoidGovernanceChanged, "*msg.MsgHumanoidGovernanceChanged", jsonDecoder[MsgHumanoidGovernanceChanged]())
+	r.Register(TagHumanoidReplyModeChanged, "*msg.MsgHumanoidReplyModeChanged", jsonDecoder[MsgHumanoidReplyModeChanged]())
 	r.Register(TagHumanoidSetProvider, "*msg.MsgHumanoidSetProvider", jsonDecoder[MsgHumanoidSetProvider]())
 	r.Register(TagHumanoidInboundMessage, "*msg.MsgHumanoidInboundMessage", jsonDecoder[MsgHumanoidInboundMessage]())
 	r.Register(TagHumanoidOutboundMessage, "*msg.MsgHumanoidOutboundMessage", jsonDecoder[MsgHumanoidOutboundMessage]())

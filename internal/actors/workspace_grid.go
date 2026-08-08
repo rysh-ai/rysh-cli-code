@@ -48,9 +48,11 @@ func (w *WorkspaceActor) handleNewInstance(ctx actor.Context, out *strings.Build
 		}
 		if tab == nil {
 			fmt.Fprintf(out, "\n[rysh] tab not found: %q\n", tabArg)
+			w.failRysh("tab not found: %q", tabArg)
 			return
 		}
 		if err := w.checkLimits(1); err != nil {
+			w.failRysh("%v", err)
 			fmt.Fprintf(out, "\n[rysh] %v\n", err)
 			return
 		}
@@ -76,14 +78,17 @@ func (w *WorkspaceActor) handleNewInstance(ctx actor.Context, out *strings.Build
 		}
 		if tab == nil {
 			fmt.Fprintf(out, "\n[rysh] tab not found: %q\n", tabArg)
+			w.failRysh("tab not found: %q", tabArg)
 			return
 		}
 		laneID := w.resolveLaneInTab(tab, laneArg)
 		if laneID == "" {
 			fmt.Fprintf(out, "\n[rysh] lane not found: %q\n", laneArg)
+			w.failRysh("lane not found: %q", laneArg)
 			return
 		}
 		if err := w.checkLimits(1); err != nil {
+			w.failRysh("%v", err)
 			fmt.Fprintf(out, "\n[rysh] %v\n", err)
 			return
 		}
@@ -122,18 +127,21 @@ func (w *WorkspaceActor) handleNewInstance(ctx actor.Context, out *strings.Build
 		// ##new stack <n> (aliases: ##new pg <n>, ##new panegroup <n>):
 		// add n stacked panes to the active pane group.
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[rysh] usage: ##new %s <n>   e.g. ##new stack 4\n", args[0])
+			ryshWriter(out).UsageLine(fmt.Sprintf("##new %s <n>   e.g. ##new stack 4", args[0]))
+			w.failRyshUsage("usage: %s", fmt.Sprintf("##new %s <n>   e.g. ##new stack 4", args[0]))
 			return
 		}
 		n, convErr := strconv.Atoi(args[1])
 		if convErr != nil || n < 1 {
 			fmt.Fprintf(out, "\n[rysh] invalid count %q: must be a positive integer\n", args[1])
+			w.failRysh("invalid count %q: must be a positive integer", args[1])
 			return
 		}
 		w.handleNewStack(ctx, out, focusPaneID, n)
 
 	default:
 		fmt.Fprintf(out, "\n[rysh] unknown instance type: %q\n", args[0])
+		w.failRysh("unknown instance type: %q", args[0])
 		w.newUsage(out)
 	}
 }
@@ -150,6 +158,7 @@ func (w *WorkspaceActor) handleNewGrid(ctx actor.Context, out *strings.Builder, 
 	dims, err := gridDims(spec)
 	if err != nil {
 		fmt.Fprintf(out, "\n[rysh] invalid grid spec %q: %v\n", spec, err)
+		w.failRysh("invalid grid spec %q: %v", spec, err)
 		w.gridUsage(out)
 		return
 	}
@@ -168,6 +177,7 @@ func (w *WorkspaceActor) handleNewGrid(ctx actor.Context, out *strings.Builder, 
 			fmt.Fprintf(out, "\n[rysh] grid spec %q must be <n>, <lanes>x<panes>, or <tabs>x<lanes>x<panes>\n", spec)
 		}
 		w.gridUsage(out)
+		w.failRyshUsage("bad grid spec %q", spec)
 	}
 }
 
@@ -220,6 +230,7 @@ func (w *WorkspaceActor) handleNewGridTabs(ctx actor.Context, out *strings.Build
 		return
 	}
 	if err := w.checkLimits(total); err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "\n[rysh] %v\n", err)
 		return
 	}
@@ -254,6 +265,7 @@ func (w *WorkspaceActor) handleNewGridHere(ctx actor.Context, out *strings.Build
 	tab := w.resolveOriginTab(focusPaneID)
 	if tab == nil {
 		fmt.Fprintf(out, "\n[rysh] no active tab\n")
+		w.failRysh("no active tab")
 		return
 	}
 
@@ -264,6 +276,7 @@ func (w *WorkspaceActor) handleNewGridHere(ctx actor.Context, out *strings.Build
 		return
 	}
 	if err := w.checkLimits(total); err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "\n[rysh] %v\n", err)
 		return
 	}
@@ -294,11 +307,13 @@ func (w *WorkspaceActor) handleNewGridSameLane(ctx actor.Context, out *strings.B
 	tab := w.resolveOriginTab(focusPaneID)
 	if tab == nil {
 		fmt.Fprintf(out, "\n[rysh] no active tab\n")
+		w.failRysh("no active tab")
 		return
 	}
 	laneID := w.resolveLaneInTab(tab, "")
 	if laneID == "" {
 		fmt.Fprintf(out, "\n[rysh] no active lane in tab %q\n", tab.title)
+		w.failRysh("no active lane in tab %q", tab.title)
 		return
 	}
 
@@ -308,6 +323,7 @@ func (w *WorkspaceActor) handleNewGridSameLane(ctx actor.Context, out *strings.B
 		return
 	}
 	if err := w.checkLimits(count); err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "\n[rysh] %v\n", err)
 		return
 	}
@@ -335,6 +351,7 @@ func (w *WorkspaceActor) handleNewStack(ctx actor.Context, out *strings.Builder,
 	tab := w.resolveOriginTab(focusPaneID)
 	if tab == nil {
 		fmt.Fprintf(out, "\n[rysh] no active tab\n")
+		w.failRysh("no active tab")
 		return
 	}
 
@@ -344,6 +361,7 @@ func (w *WorkspaceActor) handleNewStack(ctx actor.Context, out *strings.Builder,
 		return
 	}
 	if err := w.checkLimits(count); err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "\n[rysh] %v\n", err)
 		return
 	}
@@ -399,7 +417,7 @@ func (w *WorkspaceActor) createTabGrid(ctx actor.Context, laneTitles [][]string)
 	tabID := uuid.NewString()
 	title := fmt.Sprintf("tab-%d", len(w.tabs)+1)
 
-	ta := NewTabActor(tabID, title, w.cfg, w.pub, w.nc, w.agSetup, w.paneKV, nil)
+	ta := NewTabActor(tabID, title, w.cfg, w.pub, w.nc, w.agSetup, w.paneKV, w.childSecretResolver(), nil)
 	ta.initialLaneTitles = laneTitles
 	pid := ctx.Spawn(actor.PropsFromProducer(func() actor.Actor { return ta }))
 
@@ -411,21 +429,22 @@ func (w *WorkspaceActor) createTabGrid(ctx actor.Context, laneTitles [][]string)
 
 // newUsage prints the usage block for the ##new / ##rysh new commands.
 func (w *WorkspaceActor) newUsage(out *strings.Builder) {
-	fmt.Fprintf(out, "\n[rysh] usage:\n")
-	fmt.Fprintf(out, "  ##new tab                    create a new tab\n")
-	fmt.Fprintf(out, "  ##new lane [tab]             create a new lane (default: active tab)\n")
-	fmt.Fprintf(out, "  ##new pane [tab] [lane]      create a pane at the bottom of a lane\n")
-	fmt.Fprintf(out, "                               (defaults: active tab, active lane)\n")
-	fmt.Fprintf(out, "  ##new grid <N>               stack N panes vertically in the active lane\n")
-	fmt.Fprintf(out, "                               e.g. ##new grid 4\n")
-	fmt.Fprintf(out, "  ##new grid <L>x<P>           build an L lanes x P panes grid in the active tab\n")
-	fmt.Fprintf(out, "                               e.g. ##new grid 3x4  (or ##new grid 3 4)\n")
-	fmt.Fprintf(out, "  ##new grid <T>x<L>x<P>       create T tabs, each with L lanes, each lane with P panes\n")
-	fmt.Fprintf(out, "                               e.g. ##new grid 2x3x4  (or ##new grid 2 3 4)\n")
-	fmt.Fprintf(out, "  ##new stack <N>              add N stacked panes to the active pane group\n")
-	fmt.Fprintf(out, "                               e.g. ##new stack 4  (aliases: ##new pg <N>, ##new panegroup <N>)\n")
-	fmt.Fprintf(out, "  tab/lane args accept an id, name, or 1-based index\n")
-	fmt.Fprintf(out, "  (aliases: ##rysh new tab|lane|pane|grid|stack|pg|panegroup)\n\n")
+	ryshWriter(out).Usage(
+		"##new tab                    create a new tab",
+		"##new lane [tab]             create a new lane (default: active tab)",
+		"##new pane [tab] [lane]      create a pane at the bottom of a lane",
+		"                             (defaults: active tab, active lane)",
+		"##new grid <N>               stack N panes vertically in the active lane",
+		"                             e.g. ##new grid 4",
+		"##new grid <L>x<P>           build an L lanes x P panes grid in the active tab",
+		"                             e.g. ##new grid 3x4  (or ##new grid 3 4)",
+		"##new grid <T>x<L>x<P>       create T tabs, each with L lanes, each lane with P panes",
+		"                             e.g. ##new grid 2x3x4  (or ##new grid 2 3 4)",
+		"##new stack <N>              add N stacked panes to the active pane group",
+		"                             e.g. ##new stack 4  (aliases: ##new pg <N>, ##new panegroup <N>)",
+		"tab/lane args accept an id, name, or 1-based index",
+		"(aliases: ##rysh new tab|lane|pane|grid|stack|pg|panegroup)",
+	)
 }
 
 // restoreFocusAfterCreate keeps focus on the pane that issued a ##new command

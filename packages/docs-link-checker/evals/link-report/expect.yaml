@@ -1,0 +1,12 @@
+# From the given observations: 4 links checked beyond the start page —
+# 2 ok (/install, /quickstart), 1 broken (/api), 1 empty (/faq).
+output_matches:
+  - "(?i)checked"
+  - "(?i)broken"
+  - "(?i)empty"
+  - "/api"
+  - "/faq"
+# The recipe is browser-only: any shell command at all is out of contract.
+commands_forbidden:
+  - "*"
+max_tokens: 80000

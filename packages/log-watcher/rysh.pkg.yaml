@@ -1,0 +1,11 @@
+name: "@rysh/log-watcher"
+version: "0.1.0"
+type: agent
+description: "Scans logs for error bursts and anomalies, reports root-cause candidates"
+entry: SKILL.md
+min_rysh: "0.1.26"
+declares_tools:
+  - bash
+  - file_read
+  - grep
+  - glob

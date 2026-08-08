@@ -1,0 +1,8 @@
+name: "@rysh/form-filler"
+version: "0.1.0"
+type: recipe
+description: "Fills and submits a web form from provided field values, verifying the confirmation"
+entry: SKILL.md
+min_rysh: "0.1.26"
+declares_tools:
+  - browser_action

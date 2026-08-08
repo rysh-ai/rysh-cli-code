@@ -847,11 +847,11 @@ func runOnboardWizard(cfg config.Config, configPath string, logger *slog.Logger,
 	var sessionNote string
 	store, storeErr := session.NewStore(cfg)
 	if storeErr == nil {
-		// Settle the name BEFORE the wizard runs: step 3 shows it in the launch
-		// prompt, so consent has to be collected for the session we will
-		// actually open. A "default" record owned by the desktop app would
-		// otherwise be spawned into and refused (see ownableSessionName).
-		sessionName, sessionNote = ownableSessionName(store, sessionName, session.NormalizeSource(cfg.SessionSource))
+		// Collect the render caveats BEFORE the wizard runs: step 3 shows them
+		// in the launch prompt, so consent covers what the session will
+		// actually look like here (a "default" record created by the desktop
+		// app opens fine, but its web panes will not paint in a terminal).
+		sessionNote = sessionOpenNote(store, sessionName, session.NormalizeSource(cfg.SessionSource))
 		if rec, err := store.Get(sessionName); err == nil && rec.PID > 0 && session.ProcessAlive(rec.PID) && rec.NATSPort > 0 {
 			sessionLive = true
 		}

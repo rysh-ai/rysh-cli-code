@@ -58,12 +58,12 @@ func TestUsageActor_UnknownModelFlagged(t *testing.T) {
 func TestUsageActor_BudgetCheck(t *testing.T) {
 	u := newTestUsageActor()
 	// No ceiling ⇒ always ok.
-	if r := u.checkBudget("p"); !r.Ok || r.CeilingTokens != 0 {
+	if r := u.checkBudget("p", ""); !r.Ok || r.CeilingTokens != 0 {
 		t.Fatalf("no ceiling: %+v, want Ok=true ceiling=0", r)
 	}
 	u.ingest(&msg.MsgUsageRecord{PaneID: "p", Model: "claude-opus-4-8", InTokens: 400, OutTokens: 200, TS: time.Now()})
 	u.ceilings["p"] = 500 // spent tokens = 600 (400 in + 200 out)
-	r := u.checkBudget("p")
+	r := u.checkBudget("p", "")
 	if r.Ok {
 		t.Fatalf("over ceiling should be !Ok: %+v", r)
 	}
@@ -80,5 +80,93 @@ func TestUsageActor_EmptySnapshot(t *testing.T) {
 	}
 	if snap.Window != "week" {
 		t.Fatalf("window = %q, want week", snap.Window)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Per-tenant accounting (design 022 §4.3)
+// ---------------------------------------------------------------------------
+
+// TestUsageActor_TenantIndexDoesNotDoubleCount is the regression the rejected
+// design would have caused. Tenant accounting is a SECOND INDEX over the same
+// records, not a second stream of them — emitting a synthetic `tenant:` record
+// would have inflated every `##cost` figure by the tenanted portion.
+func TestUsageActor_TenantIndexDoesNotDoubleCount(t *testing.T) {
+	now := time.Now()
+	rec := func(tenant string) *msg.MsgUsageRecord {
+		return &msg.MsgUsageRecord{
+			PaneID: "pane-a", Model: "claude-opus-4-8",
+			InTokens: 1000, OutTokens: 100, Tenant: tenant, TS: now,
+		}
+	}
+
+	plain := newTestUsageActor()
+	plain.ingest(rec(""))
+	plain.ingest(rec(""))
+	want := plain.snapshot("today")
+
+	tenanted := newTestUsageActor()
+	tenanted.ingest(rec("acme"))
+	tenanted.ingest(rec("acme"))
+	got := tenanted.snapshot("today")
+
+	if got.SessionCostMicroUSD != want.SessionCostMicroUSD {
+		t.Fatalf("session cost changed once records carried a tenant: %d, want %d",
+			got.SessionCostMicroUSD, want.SessionCostMicroUSD)
+	}
+	if got.SessionTokens != want.SessionTokens {
+		t.Fatalf("session tokens changed once records carried a tenant: %d, want %d",
+			got.SessionTokens, want.SessionTokens)
+	}
+	if len(got.ByPane) != len(want.ByPane) {
+		t.Fatalf("ByPane length changed: %d, want %d", len(got.ByPane), len(want.ByPane))
+	}
+	// And the tenant index did accumulate — otherwise this test passes for the
+	// wrong reason (nothing was indexed at all).
+	if spent := tenanted.spentTodayTenant("acme"); spent != 2200 {
+		t.Fatalf("tenant spend = %d, want 2200 (2 x 1100)", spent)
+	}
+}
+
+// TestUsageActor_TenantCeilingBindsWithPaneHeadroom: a pane well under its own
+// ceiling must still be refused when its customer is out of budget, or a tenant
+// cap is escaped simply by opening another pane.
+func TestUsageActor_TenantCeilingBindsWithPaneHeadroom(t *testing.T) {
+	u := newTestUsageActor()
+	u.SetTenantCeilings(map[string]int64{"acme": 1000})
+	u.ceilings["pane-a"] = 1_000_000 // pane has plenty of room
+
+	u.ingest(&msg.MsgUsageRecord{
+		PaneID: "pane-a", Model: "claude-opus-4-8",
+		InTokens: 900, OutTokens: 200, Tenant: "acme", TS: time.Now(),
+	})
+
+	r := u.checkBudget("pane-a", "acme")
+	if r.Ok {
+		t.Fatalf("tenant over ceiling must refuse even with pane headroom: %+v", r)
+	}
+	if r.Scope != msg.UsageScopeTenant || r.Tenant != "acme" {
+		t.Fatalf("reply must name the binding scope: %+v", r)
+	}
+	if r.SpentTokens != 1100 || r.CeilingTokens != 1000 {
+		t.Fatalf("reply carries the wrong figures: %+v", r)
+	}
+
+	// The same pane, unattributed, is still fine — the tenant ceiling binds the
+	// tenant, not the pane.
+	if r := u.checkBudget("pane-a", ""); !r.Ok {
+		t.Fatalf("untenanted check should pass on pane headroom: %+v", r)
+	}
+}
+
+// TestUsageActor_TenantWithoutCeilingIsUnbounded keeps the default honest: a
+// tenant that exists for attribution only must never be refused.
+func TestUsageActor_TenantWithoutCeilingIsUnbounded(t *testing.T) {
+	u := newTestUsageActor()
+	u.ingest(&msg.MsgUsageRecord{
+		PaneID: "pane-a", InTokens: 10_000_000, Tenant: "acme", TS: time.Now(),
+	})
+	if r := u.checkBudget("pane-a", "acme"); !r.Ok {
+		t.Fatalf("a tenant with no ceiling must not be refused: %+v", r)
 	}
 }

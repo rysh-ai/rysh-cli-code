@@ -14,6 +14,12 @@ import (
 // was approved in Meta Business Manager, sent to a recipient who opted in.
 type WhatsAppSendTemplateTool struct {
 	adapter *channels.WhatsAppAdapter
+	// humanGoverned reports whether the owning humanoid is currently in
+	// draft-and-confirm mode; read per call. Template sends carry model-chosen
+	// parameter text but can never come from a reviewable draft, so under
+	// human governance this tool refuses outright — otherwise it would be a
+	// side door around the whatsapp_send gate. nil ⇒ never human-governed.
+	humanGoverned func() bool
 }
 
 // WhatsAppSendTemplateParams holds the parameters for the
@@ -26,8 +32,12 @@ type WhatsAppSendTemplateParams struct {
 }
 
 // NewWhatsAppSendTemplateTool creates a new WhatsAppSendTemplateTool.
-func NewWhatsAppSendTemplateTool(adapter *channels.WhatsAppAdapter) *WhatsAppSendTemplateTool {
-	return &WhatsAppSendTemplateTool{adapter: adapter}
+// humanGoverned may be nil (never gated).
+func NewWhatsAppSendTemplateTool(
+	adapter *channels.WhatsAppAdapter,
+	humanGoverned func() bool,
+) *WhatsAppSendTemplateTool {
+	return &WhatsAppSendTemplateTool{adapter: adapter, humanGoverned: humanGoverned}
 }
 
 // Spec returns the tool specification.
@@ -61,6 +71,16 @@ func (t *WhatsAppSendTemplateTool) Execute(ctx context.Context, params json.RawM
 	}
 	if p.To == "" || p.TemplateName == "" {
 		return ErrOutput(ErrKindValidation, "to and template_name are required"), nil
+	}
+
+	// Human governance: a template send cannot be draft-and-confirmed (there
+	// is no draft to approve), so it is refused rather than becoming the one
+	// outbound path with no owner in the loop.
+	if t.humanGoverned != nil && t.humanGoverned() {
+		return ErrOutput(ErrKindValidation,
+			"human governance is on: whatsapp_send_template sends without a reviewable draft, "+
+				"so it is not permitted in this mode. Use whatsapp_draft to compose a reply and "+
+				"wait for the owner to confirm it."), nil
 	}
 
 	// The adapter defaults an empty language to en_US and validates connection

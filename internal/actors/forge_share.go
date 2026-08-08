@@ -132,7 +132,7 @@ type msgForgePong struct {
 // --- wire structs (JSON over the upstream namespace) ---
 
 type forgeCatalogReq struct {
-	Api string `json:"api,omitempty"` // optional name filter
+	API string `json:"api,omitempty"` // optional name filter
 }
 type forgeRemoteAPI struct {
 	Name   string             `json:"name"`
@@ -368,7 +368,7 @@ func (a *ForgeShareActor) handleCatalogReq(m *nats.Msg) {
 	a.mu.Unlock()
 	var apis []forgeRemoteAPI
 	for _, n := range names {
-		if req.Api != "" && req.Api != n {
+		if req.API != "" && req.API != n {
 			continue
 		}
 		apis = append(apis, forgeRemoteAPI{Name: n, Source: a.uid, Ops: specsOf(a.forge.APIOps(n))})
@@ -579,8 +579,8 @@ func (a *ForgeShareActor) scatter(filter string) []forgeCatalogResp {
 	if err != nil {
 		return nil
 	}
-	defer sub.Unsubscribe()
-	req, _ := json.Marshal(forgeCatalogReq{Api: filter})
+	defer func() { _ = sub.Unsubscribe() }()
+	req, _ := json.Marshal(forgeCatalogReq{API: filter})
 	if a.nc.PublishRequest(forgeCatalogSubject(a.ws), inbox, req) != nil {
 		return nil
 	}

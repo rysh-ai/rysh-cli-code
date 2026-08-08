@@ -45,3 +45,17 @@ func processGroupAlive(pgid int) bool {
 	err := unix.Kill(-pgid, 0)
 	return err == nil || err == unix.EPERM
 }
+
+// terminateProcessGroup sends SIGTERM to a whole process group, used by
+// `[proxy] strict` to stop an agent CLI that is talking to a provider around
+// the governance proxy (design 022 §8.2).
+//
+// The negative pid is the point: an agent CLI is usually a runtime with
+// children of its own, and signalling only the leader would leave those
+// children on the wire.
+func terminateProcessGroup(pgid int) error {
+	if pgid <= 1 {
+		return unix.EINVAL
+	}
+	return unix.Kill(-pgid, unix.SIGTERM)
+}

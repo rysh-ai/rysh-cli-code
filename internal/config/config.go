@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"github.com/rysh-ai/rysh-cli-code/internal/progname"
@@ -108,7 +109,28 @@ type NATSConfig struct {
 
 // UpstreamConfig holds settings for the remote upstream server connection.
 type UpstreamConfig struct {
-	Enabled                bool     `yaml:"enabled"`
+	Enabled bool `yaml:"enabled"`
+	// Governance opts this daemon into the server-side control plane
+	// (design 023): usage batches, org-wide leases and central policy.
+	//
+	// OFF by default, and separately from `enabled`, because reporting local
+	// spend to a server is a data-egress decision — the same posture 013 §3
+	// takes for audit forwarding. With it off, nothing in design 023 activates
+	// and every control behaves exactly as it does today; the OSS client stays
+	// fully functional standalone.
+	Governance bool `yaml:"governance"`
+	// GovernanceOnPartition decides what happens when the server is unreachable
+	// AND the daemon's lease has expired (design 023 §4.3):
+	//
+	//	local  (default) fall back to the machine-local ceiling — which is
+	//	       exactly what exists today, so a partition can never be WORSE
+	//	       than not having the feature
+	//	strict refuse
+	//	open   allow
+	//
+	// Never "unlimited" by accident: an unrecognised value reads as local.
+	GovernanceOnPartition string `yaml:"governance_on_partition"`
+
 	URL                    string   `yaml:"url"`
 	APIKey                 string   `yaml:"api_key"`
 	Workspace              string   `yaml:"workspace"` // upstream NATS namespace: MUST be the server workspace ID (UUID), shown in the dashboard. Workspace names are unique per user, so the globally unique id is the wire namespace (ws.{id}.*). All sessions using the same id see the same shares.
@@ -405,7 +427,6 @@ type Config struct {
 	PublicBufferSize  int    // max bytes for ##public pane output buffer (per pane)
 	WebPort           int    // web UI server port (default 23232)
 	WebHost           string // web UI bind IP (default "" = web.DefaultHost, 127.0.0.1; set 0.0.0.0 to expose on the network)
-	WebToken          string // web UI access token (default "" = no token auth)
 	WebAutoStart      bool   // auto-start web server on daemon startup
 	// Prometheus metrics exporter (follow-up 3b). When MetricsEnabled, the
 	// daemon serves the agentic MetricsSink as Prometheus text on
@@ -699,10 +720,13 @@ type ryshPane struct {
 	PublicBufferSize  int `yaml:"public_buffer_size"`
 }
 
+// ryshWeb maps the [web] section. `token` used to configure the UI's access
+// token; access-token auth is gone (internal/web/auth.go) and the web UI is
+// guarded by `##rysh web auth` instead, so the key is no longer read — a
+// leftover one in an existing config is ignored rather than rejected.
 type ryshWeb struct {
 	Port      int    `yaml:"port"`
 	Host      string `yaml:"host"`
-	Token     string `yaml:"token"`
 	AutoStart bool   `yaml:"auto_start"`
 }
 
@@ -742,6 +766,184 @@ type ProxyConfig struct {
 	// credentials pass through untouched, so the pane keeps working (and is
 	// still redacted, metered and audited).
 	Keys map[string]string
+	// RateLimit bounds request RATE, independently of token spend
+	// (design 022 §4.2). Empty ⇒ unlimited.
+	RateLimit ProxyRateLimitConfig
+	// Failover routes to a secondary upstream when the primary is failing
+	// (design 022 §4.1). Disabled ⇒ exactly one attempt, as before.
+	Failover ProxyFailoverConfig
+	// Tenants carries per-customer caps on a shared upstream key
+	// (design 022 §4.3). Empty ⇒ untenanted, every control keys off the pane.
+	Tenants ProxyTenantConfig
+	// Adapters names the CLIs whose spawn environment rysh may rewrite to
+	// force them through the proxy (design 022 §4.4). Empty ⇒ detect and warn
+	// only.
+	//
+	// Opt-in because an adapter can change how the CLI authenticates: the codex
+	// adapter deliberately withholds a ChatGPT session, since that session is
+	// exactly what lets it egress around the proxy. Governing the pane and
+	// preserving an existing login are mutually exclusive there, and which one
+	// the user wants is not ours to assume.
+	Adapters []string
+	// Strict escalates the ungoverned-CLI warning (design 022 §4.4) to a block:
+	// a known agent CLI that runs past the grace window with no governed request
+	// is stopped instead of merely warned about.
+	//
+	// Off by default and opt-in, because the detection is NEGATIVE evidence: an
+	// idle CLI looks exactly like an escaped one, so strict mode can stop
+	// innocent work. `##proxy check <cli>` is the deterministic answer, and the
+	// warning stays the default posture (022 §8.2).
+	Strict bool
+	// Models bounds which models a governed pane may call (design 001 §4.7).
+	// Empty ⇒ every model is allowed, which is the default.
+	Models ProxyModelRules
+}
+
+// ProxyModelRules is the model allowlist/denylist (design 001 §4.7).
+//
+// Patterns are shell-style globs matched case-insensitively against the model
+// name in the request body: "claude-*", "gpt-4o", "*-opus-*".
+//
+// Deny is evaluated first and always wins, so a broad allow plus a narrow deny
+// expresses "this family, except that one" without having to enumerate every
+// permitted version — the version numbers change on the provider's schedule,
+// not the operator's.
+type ProxyModelRules struct {
+	Allow []string
+	Deny  []string
+}
+
+// Any reports whether any model rule is configured; false ⇒ the check is
+// skipped entirely rather than evaluated to "allow".
+func (m ProxyModelRules) Any() bool { return len(m.Allow) > 0 || len(m.Deny) > 0 }
+
+// AdapterEnabled reports whether rysh may rewrite this CLI's spawn environment.
+func (c ProxyConfig) AdapterEnabled(binary string) bool {
+	for _, a := range c.Adapters {
+		if strings.EqualFold(strings.TrimSpace(a), binary) {
+			return true
+		}
+	}
+	return false
+}
+
+// TenantRule is one customer's caps (design 022 §4.3).
+type TenantRule struct {
+	// Panes PINS these panes to this tenant. A pin is authoritative and cannot
+	// be overridden by a request header — see ProxyTenantConfig.TrustHeader.
+	Panes []string
+	// CeilingTokens is the tenant's daily token ceiling (0 ⇒ none). It binds in
+	// ADDITION to the pane's own: the stricter of the two wins.
+	CeilingTokens int64
+	// RateLimit bounds this tenant's request rate across all its panes.
+	RateLimit RateLimitRule
+	// Keys maps a dialect to the upstream API key used for THIS tenant's
+	// traffic (design 022 §8.3). A dialect absent here falls back to
+	// ProxyConfig.Keys, so a tenant may override one provider and inherit the
+	// rest.
+	//
+	// This is what turns a tenant from "a cap on a shared key" into a
+	// credential boundary: a reseller can bill each customer on the customer's
+	// own provider account, and one customer's key is never used for another's
+	// request.
+	Keys map[string]string
+}
+
+// ProxyTenantConfig configures per-customer policy on a shared upstream key.
+type ProxyTenantConfig struct {
+	// Header names the request header carrying the tenant. Empty ⇒ X-Rysh-Tenant.
+	Header string
+	// TrustHeader allows an unpinned pane to name its own tenant via the header.
+	//
+	// Default FALSE, and that default is the security property. Anything running
+	// inside a pane can set a header, so a trusted header lets a pane select a
+	// more generous tenant and turns every cap in the system into a suggestion.
+	// Enable it only where the caller is not the thing being capped.
+	TrustHeader bool
+	// Tenants maps a tenant name to its rule.
+	Tenants map[string]TenantRule
+}
+
+// FailoverUpstream is one entry in a dialect's ordered upstream list. Key is
+// the credential for THIS upstream; empty means reuse the dialect key. A corp
+// gateway fallback normally needs a different credential from the vendor's own
+// endpoint, and without a per-entry key the fallback would be sent a key that
+// does not belong to it.
+type FailoverUpstream struct {
+	URL string
+	Key string
+}
+
+// ProxyFailoverConfig configures upstream retry (design 022 §4.1).
+type ProxyFailoverConfig struct {
+	// Enabled gates the whole feature. Off ⇒ one attempt against the primary,
+	// byte-for-byte the pre-022 behaviour.
+	Enabled bool
+	// MaxAttempts bounds total attempts INCLUDING the primary. <= 0 ⇒ try
+	// every configured upstream once.
+	MaxAttempts int
+	// HeaderTimeout bounds how long an upstream may take to return response
+	// HEADERS before it counts as failed.
+	//
+	// Default 0 (off), deliberately. A NON-streaming completion can legitimately
+	// send no bytes for minutes while the model generates, so any default here
+	// would eventually reclassify a slow-but-working request as a dead upstream
+	// and retry it — paying for the same generation twice. Timeout-based
+	// failover is therefore opt-in; transport errors and retryable statuses are
+	// unambiguous and need no such judgement.
+	HeaderTimeout time.Duration
+	// RetryStatus overrides which upstream status codes trigger the next
+	// upstream. Empty ⇒ 429, 500, 502, 503, 504.
+	RetryStatus []int
+	// Upstreams maps a dialect to its ordered FALLBACK list. The primary comes
+	// from Proxy.Upstreams (or the dialect default) and is always tried first.
+	Upstreams map[string][]FailoverUpstream
+}
+
+// RateLimitRule is one token bucket: Rate requests per second with a Burst
+// allowance. Rate <= 0 disables the rule — the default, so a control that did
+// not exist yesterday never silently throttles a session that used to work.
+type RateLimitRule struct {
+	Rate  float64
+	Burst int
+}
+
+// Enabled reports whether this rule binds at all.
+func (r RateLimitRule) Enabled() bool { return r.Rate > 0 }
+
+// EffectiveBurst is the configured burst, defaulted to one second's worth of
+// requests (minimum 1) when unset. A bucket with burst 0 admits nothing, which
+// is never what someone writing `rate: 5` and omitting `burst` meant.
+func (r RateLimitRule) EffectiveBurst() int {
+	if r.Burst > 0 {
+		return r.Burst
+	}
+	if b := int(math.Ceil(r.Rate)); b > 0 {
+		return b
+	}
+	return 1
+}
+
+// ProxyRateLimitConfig holds the request-rate rules, checked pane → dialect →
+// session. A request must satisfy every rule that is configured.
+type ProxyRateLimitConfig struct {
+	PerPane    RateLimitRule
+	PerDialect map[string]RateLimitRule
+	Global     RateLimitRule
+}
+
+// Any reports whether any rule is configured. False ⇒ the proxy skips the
+// limiter entirely rather than building buckets nothing will consult.
+func (c ProxyRateLimitConfig) Any() bool {
+	if c.PerPane.Enabled() || c.Global.Enabled() {
+		return true
+	}
+	for _, r := range c.PerDialect {
+		if r.Enabled() {
+			return true
+		}
+	}
+	return false
 }
 
 // UsageConfig configures the cost-observability ledger (design 003).
@@ -805,11 +1007,72 @@ func (c Config) providerDialect() string {
 }
 
 type ryshProxy struct {
-	Keys         map[string]string `yaml:"keys"`
-	Enabled      bool              `yaml:"enabled"`
-	InjectKey    bool              `yaml:"inject_key"`
-	AuditContent bool              `yaml:"audit_content"`
-	Upstreams    map[string]string `yaml:"upstreams"`
+	Keys         map[string]string         `yaml:"keys"`
+	Enabled      bool                      `yaml:"enabled"`
+	InjectKey    bool                      `yaml:"inject_key"`
+	AuditContent bool                      `yaml:"audit_content"`
+	Upstreams    map[string]string         `yaml:"upstreams"`
+	RateLimit    ryshProxyRateLimit        `yaml:"rate_limit"`
+	Failover     ryshProxyFailover         `yaml:"failover"`
+	Adapters     []string                  `yaml:"adapters"`
+	Strict       bool                      `yaml:"strict"`
+	Models       ryshProxyModels           `yaml:"models"`
+	TenantHeader string                    `yaml:"tenant_header"`
+	TrustTenant  bool                      `yaml:"trust_tenant_header"`
+	Tenants      map[string]ryshTenantRule `yaml:"tenants"`
+}
+
+type ryshProxyModels struct {
+	Allow []string `yaml:"allow"`
+	Deny  []string `yaml:"deny"`
+}
+
+type ryshTenantRule struct {
+	Panes         []string          `yaml:"panes"`
+	CeilingTokens int64             `yaml:"ceiling_tokens"`
+	RateLimit     ryshRateLimitRule `yaml:"rate_limit"`
+	Keys          map[string]string `yaml:"keys"`
+}
+
+type ryshProxyFailover struct {
+	Enabled       bool                              `yaml:"enabled"`
+	MaxAttempts   int                               `yaml:"max_attempts"`
+	HeaderTimeout string                            `yaml:"header_timeout"`
+	RetryStatus   []int                             `yaml:"retry_status"`
+	Upstreams     map[string][]ryshFailoverUpstream `yaml:"upstreams"`
+}
+
+// ryshFailoverUpstream accepts either a bare URL string or a {url, key}
+// mapping, so the common case (same credential, different endpoint) stays a
+// one-liner and only the case that needs its own key pays for the extra nesting.
+type ryshFailoverUpstream struct {
+	URL string `yaml:"url"`
+	Key string `yaml:"key"`
+}
+
+func (u *ryshFailoverUpstream) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		u.URL = value.Value
+		return nil
+	}
+	type raw ryshFailoverUpstream // avoid recursing into this method
+	var r raw
+	if err := value.Decode(&r); err != nil {
+		return err
+	}
+	*u = ryshFailoverUpstream(r)
+	return nil
+}
+
+type ryshRateLimitRule struct {
+	Rate  float64 `yaml:"rate"`
+	Burst int     `yaml:"burst"`
+}
+
+type ryshProxyRateLimit struct {
+	PerPane    ryshRateLimitRule            `yaml:"per_pane"`
+	PerDialect map[string]ryshRateLimitRule `yaml:"per_dialect"`
+	Global     ryshRateLimitRule            `yaml:"global"`
 }
 
 // ReplayConfig configures session replay capture (design 006).
@@ -1078,6 +1341,14 @@ func applyAutomationLLMDefaults(a *AutomationConfig) {
 	}
 }
 
+// DefaultAnthropicAPIURL is the api_url every config starts with, because the
+// default provider is Claude. It is exported because consumers must be able to
+// RECOGNIZE it: a non-Claude provider that inherits this value would send its
+// requests to Anthropic's host and get a bare 404, so provider construction
+// treats it as "no endpoint chosen for this family" rather than as a
+// deliberate override (see internal/provider.NewOpenAIAgenticProvider).
+const DefaultAnthropicAPIURL = "https://api.anthropic.com"
+
 func applyDefaults() Config {
 	return Config{
 		NATS: NATSConfig{
@@ -1119,7 +1390,7 @@ func applyDefaults() Config {
 		ShellPrompt:             "{dir} > ",
 		DefaultModel:            "",
 		APIKey:                  "",
-		APIURL:                  "https://api.anthropic.com",
+		APIURL:                  DefaultAnthropicAPIURL,
 		MaxTokens:               4096,
 		SessionName:             "default",
 		SessionDir:              defaultSessionDir(),
@@ -1317,9 +1588,6 @@ func loadFromFile(path string, cfg Config) (Config, error) {
 	if v := strings.TrimSpace(f.Web.Host); v != "" {
 		cfg.WebHost = v
 	}
-	if v := strings.TrimSpace(f.Web.Token); v != "" {
-		cfg.WebToken = v
-	}
 	if f.Web.AutoStart {
 		cfg.WebAutoStart = true
 	}
@@ -1331,7 +1599,7 @@ func loadFromFile(path string, cfg Config) (Config, error) {
 	if len(f.Usage.Pricing) > 0 {
 		cfg.Usage.Pricing = make(map[string]UsagePriceOverride, len(f.Usage.Pricing))
 		for k, v := range f.Usage.Pricing {
-			cfg.Usage.Pricing[k] = UsagePriceOverride{In: v.In, Out: v.Out, CacheRead: v.CacheRead, CacheWrite: v.CacheWrite}
+			cfg.Usage.Pricing[k] = UsagePriceOverride(v)
 		}
 	}
 	if f.Proxy.Enabled {
@@ -1352,6 +1620,84 @@ func loadFromFile(path string, cfg Config) (Config, error) {
 		}
 		for dialect, key := range f.Proxy.Keys {
 			cfg.Proxy.Keys[strings.ToLower(strings.TrimSpace(dialect))] = key
+		}
+	}
+	if r := f.Proxy.RateLimit.PerPane; r.Rate > 0 {
+		cfg.Proxy.RateLimit.PerPane = RateLimitRule(r)
+	}
+	if r := f.Proxy.RateLimit.Global; r.Rate > 0 {
+		cfg.Proxy.RateLimit.Global = RateLimitRule(r)
+	}
+	if len(f.Proxy.RateLimit.PerDialect) > 0 {
+		if cfg.Proxy.RateLimit.PerDialect == nil {
+			cfg.Proxy.RateLimit.PerDialect = map[string]RateLimitRule{}
+		}
+		for dialect, r := range f.Proxy.RateLimit.PerDialect {
+			cfg.Proxy.RateLimit.PerDialect[strings.ToLower(strings.TrimSpace(dialect))] = RateLimitRule(r)
+		}
+	}
+	if len(f.Proxy.Adapters) > 0 {
+		cfg.Proxy.Adapters = f.Proxy.Adapters
+	}
+	if f.Proxy.Strict {
+		cfg.Proxy.Strict = true
+	}
+	if len(f.Proxy.Models.Allow) > 0 {
+		cfg.Proxy.Models.Allow = f.Proxy.Models.Allow
+	}
+	if len(f.Proxy.Models.Deny) > 0 {
+		cfg.Proxy.Models.Deny = f.Proxy.Models.Deny
+	}
+	if h := strings.TrimSpace(f.Proxy.TenantHeader); h != "" {
+		cfg.Proxy.Tenants.Header = h
+	}
+	if f.Proxy.TrustTenant {
+		cfg.Proxy.Tenants.TrustHeader = true
+	}
+	if len(f.Proxy.Tenants) > 0 {
+		if cfg.Proxy.Tenants.Tenants == nil {
+			cfg.Proxy.Tenants.Tenants = map[string]TenantRule{}
+		}
+		for name, r := range f.Proxy.Tenants {
+			var keys map[string]string
+			if len(r.Keys) > 0 {
+				keys = make(map[string]string, len(r.Keys))
+				for dialect, key := range r.Keys {
+					keys[strings.ToLower(strings.TrimSpace(dialect))] = strings.TrimSpace(key)
+				}
+			}
+			cfg.Proxy.Tenants.Tenants[strings.TrimSpace(name)] = TenantRule{
+				Panes:         r.Panes,
+				CeilingTokens: r.CeilingTokens,
+				RateLimit:     RateLimitRule(r.RateLimit),
+				Keys:          keys,
+			}
+		}
+	}
+	if f.Proxy.Failover.Enabled {
+		cfg.Proxy.Failover.Enabled = true
+	}
+	if f.Proxy.Failover.MaxAttempts > 0 {
+		cfg.Proxy.Failover.MaxAttempts = f.Proxy.Failover.MaxAttempts
+	}
+	if d, err := time.ParseDuration(strings.TrimSpace(f.Proxy.Failover.HeaderTimeout)); err == nil && d > 0 {
+		cfg.Proxy.Failover.HeaderTimeout = d
+	}
+	if len(f.Proxy.Failover.RetryStatus) > 0 {
+		cfg.Proxy.Failover.RetryStatus = f.Proxy.Failover.RetryStatus
+	}
+	if len(f.Proxy.Failover.Upstreams) > 0 {
+		if cfg.Proxy.Failover.Upstreams == nil {
+			cfg.Proxy.Failover.Upstreams = map[string][]FailoverUpstream{}
+		}
+		for dialect, list := range f.Proxy.Failover.Upstreams {
+			out := make([]FailoverUpstream, 0, len(list))
+			for _, u := range list {
+				if url := strings.TrimSpace(u.URL); url != "" {
+					out = append(out, FailoverUpstream{URL: url, Key: strings.TrimSpace(u.Key)})
+				}
+			}
+			cfg.Proxy.Failover.Upstreams[strings.ToLower(strings.TrimSpace(dialect))] = out
 		}
 	}
 	if f.Replay.Enabled {
@@ -1537,9 +1883,6 @@ func applyEnvOverrides(cfg Config) Config {
 	if v := env("RYSH_WEB_HOST"); v != "" {
 		cfg.WebHost = v
 	}
-	if v := env("RYSH_WEB_TOKEN"); v != "" {
-		cfg.WebToken = v
-	}
 	if v := env("RYSH_WEB_AUTO_START"); v == "true" || v == "1" {
 		cfg.WebAutoStart = true
 	}
@@ -1611,19 +1954,37 @@ func applyEnvOverrides(cfg Config) Config {
 		cfg.APIKey = v
 	} else if cfg.APIKey == "" {
 		// Provider-conventional fallback, keyed by the provider selected above
-		// (RYSH_PROVIDER wins over the config file at this point). Gemini takes
-		// GEMINI_API_KEY, falling back to GOOGLE_API_KEY — so
-		// `RYSH_PROVIDER=gemini GEMINI_API_KEY=... rysh` needs no rysh-specific
-		// key var. An ANTHROPIC_API_KEY must NOT flow to Gemini: a foreign key
-		// would only produce a confusing upstream 401.
+		// (RYSH_PROVIDER wins over the config file at this point), so
+		// `RYSH_PROVIDER=<name> <NAME>_API_KEY=... rysh` needs no rysh-specific
+		// key var for any provider. The order matches providerKeyFromEnv, which
+		// resolves the same thing for a per-pane/humanoid provider override —
+		// the two disagreeing is how a session ends up authenticating one way
+		// at the top level and another inside a pane.
+		//
+		// A FOREIGN key must never flow to a provider: handing OpenAI or Gemini
+		// an ambient ANTHROPIC_API_KEY produces a confusing upstream 401 that
+		// reads like a broken account rather than a missing variable. That is
+		// why each family names its own variables and the anthropic fallback is
+		// reachable only from the Claude default.
 		switch strings.ToLower(strings.TrimSpace(cfg.ProviderName)) {
+		case "openai":
+			if v := env("OPENAI_API_KEY"); v != "" {
+				cfg.APIKey = v
+			}
 		case "gemini":
 			if v := env("GEMINI_API_KEY"); v != "" {
 				cfg.APIKey = v
 			} else if v := env("GOOGLE_API_KEY"); v != "" {
 				cfg.APIKey = v
 			}
-		default:
+		case "ollama":
+			// Local Ollama authenticates by nothing at all (RequiresAPIKey is
+			// false for it); the variable is honored only for the hosted
+			// deployments that do gate on one.
+			if v := env("OLLAMA_API_KEY"); v != "" {
+				cfg.APIKey = v
+			}
+		default: // "", claude, anthropic, claude-agentic, claude-cli, unknown
 			if v := env("ANTHROPIC_API_KEY"); v != "" {
 				cfg.APIKey = v
 			}

@@ -39,16 +39,18 @@ func (w *WorkspaceActor) handleGroundingCommand(out *strings.Builder, paneID str
 
 	default:
 		fmt.Fprintf(out, "\n[grounding] unknown argument: %q\n", arg)
+		w.failRysh("unknown argument: %q", arg)
 		w.groundingUsage(out)
 	}
 }
 
 func (w *WorkspaceActor) groundingUsage(out *strings.Builder) {
-	fmt.Fprintf(out, "\n[rysh] usage:\n")
-	fmt.Fprintf(out, "  ##grounding                       show grounding state for active pane\n")
-	fmt.Fprintf(out, "  ##grounding off|prompt|enforced   override mode for this pane (persisted; next prompt)\n")
-	fmt.Fprintf(out, "  ##grounding reset                 clear the override, revert to the default\n")
-	fmt.Fprintf(out, "  ##grounding report                show the last grounding report\n\n")
+	ryshWriter(out).Usage(
+		"##grounding                       show grounding state for active pane",
+		"##grounding off|prompt|enforced   override mode for this pane (persisted; next prompt)",
+		"##grounding reset                 clear the override, revert to the default",
+		"##grounding report                show the last grounding report",
+	)
 }
 
 // groundingState fetches the pane's grounding state from its LLM-execution
@@ -73,6 +75,7 @@ func (w *WorkspaceActor) cmdGroundingStatus(out *strings.Builder, paneID string,
 	state, err := w.groundingState(paneID)
 	if err != nil {
 		fmt.Fprintf(out, "\n[grounding] could not read state for this pane (no LLM session yet?)\n")
+		w.failRysh("could not read state for this pane (no LLM session yet?)")
 		return
 	}
 

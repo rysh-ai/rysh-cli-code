@@ -16,8 +16,20 @@ import "sync/atomic"
 // server binds/unbinds; read by pane shell startup. atomic ⇒ race-free.
 var endpoint atomic.Value // string
 
+// current holds the running Server, for the same reason and with the same
+// caveat as endpoint above: pane-side code (ungoverned-CLI detection, design
+// 022 §4.4) needs to reach it from deep in the actor hierarchy. nil when no
+// proxy is running, and every caller must handle that.
+var current atomic.Value // *Server
+
 // SetEndpoint records the running proxy's loopback base URL (or "" to clear).
 func SetEndpoint(base string) { endpoint.Store(base) }
+
+// Current returns the running proxy server, or nil when none is running.
+func Current() *Server {
+	s, _ := current.Load().(*Server)
+	return s
+}
 
 // Endpoint returns the running proxy's base URL, or "" if none is running.
 // PaneActor injects <endpoint>/<dialect>/<paneID> as ANTHROPIC_BASE_URL etc.

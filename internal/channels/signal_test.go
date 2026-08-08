@@ -158,10 +158,10 @@ func TestIsSignalGroupID(t *testing.T) {
 		want bool
 	}{
 		{testGroupID, true},
-		{"+15552223333", false},                              // phone number
-		{"11111111-2222-3333-4444-555555555555", false},      // ACI uuid (dashes)
-		{"", false},                                          // empty
-		{"abc", false},                                       // too short
+		{"+15552223333", false},                         // phone number
+		{"11111111-2222-3333-4444-555555555555", false}, // ACI uuid (dashes)
+		{"", false},                                     // empty
+		{"abc", false},                                  // too short
 		{"not!valid@base64#with$symbols%andmorelength", false}, // bad charset
 	}
 	for _, tt := range tests {

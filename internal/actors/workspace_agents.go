@@ -105,6 +105,7 @@ func (w *WorkspaceActor) handleAgentSubcommand(out *strings.Builder, paneID stri
 
 	if w.agentRegistryPID == nil {
 		fmt.Fprintf(out, "\n[agents] agent registry not available (agentic mode disabled?)\n")
+		w.failRysh("agent registry not available (agentic mode disabled?)")
 		return
 	}
 
@@ -115,10 +116,11 @@ func (w *WorkspaceActor) handleAgentSubcommand(out *strings.Builder, paneID stri
 		// `isolation: worktree` in the skill frontmatter.
 		spawnArgs, forceWorktree := stripWorktreeFlag(args[1:])
 		if len(spawnArgs) == 0 {
-			fmt.Fprintf(out, "\n[agents] usage:\n")
-			fmt.Fprintf(out, "  ##agent spawn <name> [--worktree]      load .rysh/agents/<name>/SKILL.md\n")
-			fmt.Fprintf(out, "  ##agent spawn <path-to-file.md>        load explicit skill file\n")
-			fmt.Fprintf(out, "  ##agent spawn <name> <system-prompt>   create agent inline\n")
+			ryshWriter(out).UsageIn("agents",
+				"##agent spawn <name> [--worktree]      load .rysh/agents/<name>/SKILL.md",
+				"##agent spawn <path-to-file.md>        load explicit skill file",
+				"##agent spawn <name> <system-prompt>   create agent inline",
+			)
 			return
 		}
 		// Single arg: skill lookup (bare name or explicit .md/path).
@@ -154,7 +156,8 @@ func (w *WorkspaceActor) handleAgentSubcommand(out *strings.Builder, paneID stri
 
 	case "register-output":
 		if len(args) < 3 {
-			fmt.Fprintf(out, "\n[agents] usage: ##agent register-output <agent-name> <pane-name>\n")
+			ryshWriter(out).UsageLineIn("agents", "##agent register-output <agent-name> <pane-name>")
+			w.failRyshUsage("usage: %s", "##agent register-output <agent-name> <pane-name>")
 			return
 		}
 		agentName := args[1]
@@ -162,6 +165,7 @@ func (w *WorkspaceActor) handleAgentSubcommand(out *strings.Builder, paneID stri
 		targetPaneID := w.resolvePaneID(paneName)
 		if targetPaneID == "" {
 			fmt.Fprintf(out, "\n[agents] pane not found: %s\n", paneName)
+			w.failRysh("pane not found: %s", paneName)
 			return
 		}
 		w.actorSystem.Root.Send(w.agentRegistryPID, &msg.MsgAgentRegisterPane{
@@ -173,7 +177,8 @@ func (w *WorkspaceActor) handleAgentSubcommand(out *strings.Builder, paneID stri
 
 	case "unregister-output":
 		if len(args) < 3 {
-			fmt.Fprintf(out, "\n[agents] usage: ##agent unregister-output <agent-name> <pane-name>\n")
+			ryshWriter(out).UsageLineIn("agents", "##agent unregister-output <agent-name> <pane-name>")
+			w.failRyshUsage("usage: %s", "##agent unregister-output <agent-name> <pane-name>")
 			return
 		}
 		agentName := args[1]
@@ -181,6 +186,7 @@ func (w *WorkspaceActor) handleAgentSubcommand(out *strings.Builder, paneID stri
 		targetPaneID := w.resolvePaneID(paneName)
 		if targetPaneID == "" {
 			fmt.Fprintf(out, "\n[agents] pane not found: %s\n", paneName)
+			w.failRysh("pane not found: %s", paneName)
 			return
 		}
 		w.actorSystem.Root.Send(w.agentRegistryPID, &msg.MsgAgentUnregisterPane{
@@ -203,21 +209,24 @@ func (w *WorkspaceActor) handleAgentSubcommand(out *strings.Builder, paneID stri
 		case "artefacts", "artifacts", "artefact", "artifact", "files", "disk":
 			w.agentListArtefacts(out)
 		default:
-			fmt.Fprintf(out, "\n[agents] usage: ##agent list [instances|artefacts]\n")
+			ryshWriter(out).UsageLineIn("agents", "##agent list [instances|artefacts]")
+			w.failRyshUsage("usage: %s", "##agent list [instances|artefacts]")
 			fmt.Fprintf(out, "  instances  loaded in this workspace (default)\n")
 			fmt.Fprintf(out, "  artefacts  skill files under .rysh/agents, marking the loaded ones\n")
 		}
 
 	case "show":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[agents] usage: ##agent show <name>\n")
+			ryshWriter(out).UsageLineIn("agents", "##agent show <name>")
+			w.failRyshUsage("usage: %s", "##agent show <name>")
 			return
 		}
 		w.agentShow(out, args[1])
 
 	case "delete":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[agents] usage: ##agent delete <name>\n")
+			ryshWriter(out).UsageLineIn("agents", "##agent delete <name>")
+			w.failRyshUsage("usage: %s", "##agent delete <name>")
 			return
 		}
 		w.actorSystem.Root.Send(w.agentRegistryPID, &msg.MsgAgentDelete{Name: args[1]})
@@ -225,7 +234,8 @@ func (w *WorkspaceActor) handleAgentSubcommand(out *strings.Builder, paneID stri
 
 	case "activate":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[agents] usage: ##agent activate <name>\n")
+			ryshWriter(out).UsageLineIn("agents", "##agent activate <name>")
+			w.failRyshUsage("usage: %s", "##agent activate <name>")
 			return
 		}
 		w.actorSystem.Root.Send(w.agentRegistryPID, &msg.MsgAgentActivate{Name: args[1]})
@@ -233,7 +243,8 @@ func (w *WorkspaceActor) handleAgentSubcommand(out *strings.Builder, paneID stri
 
 	case "deactivate":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[agents] usage: ##agent deactivate <name>\n")
+			ryshWriter(out).UsageLineIn("agents", "##agent deactivate <name>")
+			w.failRyshUsage("usage: %s", "##agent deactivate <name>")
 			return
 		}
 		w.actorSystem.Root.Send(w.agentRegistryPID, &msg.MsgAgentDeactivate{Name: args[1]})
@@ -250,7 +261,8 @@ func (w *WorkspaceActor) handleAgentSubcommand(out *strings.Builder, paneID stri
 		w.handleAgentMetrics(out)
 
 	default:
-		fmt.Fprintf(out, "\n[agents] unknown subcommand: %q\n", sub)
+		ryshWriter(out).UnknownIn("agents", sub)
+		w.failRyshUsage("unknown %s subcommand: %q", "agents", sub)
 		w.agentHelp(out)
 	}
 }
@@ -292,6 +304,7 @@ func (w *WorkspaceActor) agentShow(out *strings.Builder, name string) {
 	}
 	fmt.Fprintf(out, "\n[agents] no recipe for %q: no skill file at %s, and no agent by that name is loaded\n",
 		name, path)
+	w.failRysh("no recipe for %q", name)
 }
 
 // loadedAgent returns the loaded instance with this name, if any.
@@ -321,6 +334,7 @@ func (w *WorkspaceActor) agentListInstances(out *strings.Builder) {
 	agents, err := w.queryAgents()
 	if err != nil {
 		fmt.Fprintf(out, "\n[agents] failed to list agents: %v\n", err)
+		w.failRysh("failed to list agents: %v", err)
 		return
 	}
 	if len(agents) == 0 {
@@ -357,6 +371,7 @@ func (w *WorkspaceActor) agentListArtefacts(out *strings.Builder) {
 	// environment only (no secret-store lookups, no values shown).
 	defs, err := parseSkillDir("", envOnlyExpand)
 	if err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "\n[agents] no artefacts under %s (%v)\n", dir, err)
 		return
 	}
@@ -412,6 +427,7 @@ func (w *WorkspaceActor) createAgentFromFile(out *strings.Builder, paneID, path 
 	def, err := parseSkillFile(path, w.namedExpandFunc(paneID))
 	if err != nil {
 		fmt.Fprintf(out, "\n[agents] failed to parse skill file %q: %v\n", path, err)
+		w.failRysh("failed to parse skill file %q: %v", path, err)
 		return
 	}
 	if def.Name == "" {
@@ -446,6 +462,7 @@ func (w *WorkspaceActor) createAgentsFromDir(out *strings.Builder, paneID, dirPa
 	defs, err := parseSkillDir(dirPath, w.namedExpandFunc(paneID))
 	if err != nil {
 		fmt.Fprintf(out, "\n[agents] failed to read directory %q: %v\n", dirPath, err)
+		w.failRysh("failed to read directory %q: %v", dirPath, err)
 		return
 	}
 	if len(defs) == 0 {
@@ -456,6 +473,7 @@ func (w *WorkspaceActor) createAgentsFromDir(out *strings.Builder, paneID, dirPa
 	for _, def := range defs {
 		if def.Name == "" || def.SystemPrompt == "" {
 			fmt.Fprintf(out, "\n[agents] skipping invalid definition in %q\n", dirPath)
+			w.failRysh("skipping invalid definition in %q", dirPath)
 			continue
 		}
 		var wtBranch, wtPath string
@@ -539,36 +557,37 @@ func (w *WorkspaceActor) isolateAgentWorktree(out *strings.Builder, paneID, name
 
 // agentHelp writes agent command help text.
 func (w *WorkspaceActor) agentHelp(out *strings.Builder) {
-	fmt.Fprintf(out, "\n[agents] usage:\n")
-	fmt.Fprintf(out, "  ##agent spawn <name> [--worktree]             load .rysh/agents/<name>/SKILL.md\n")
-	fmt.Fprintf(out, "  ##agent spawn <path-to-file.md>               load explicit skill file\n")
-	fmt.Fprintf(out, "  ##agent spawn <name> <system-prompt>          create agent inline\n")
-	fmt.Fprintf(out, "  ##agent spawn-all [directory] [--worktree]     spawn all agents (default: .rysh/agents)\n")
-	fmt.Fprintf(out, "    --worktree (or `isolation: worktree` frontmatter): per-agent git worktree,\n")
-	fmt.Fprintf(out, "    branch agent/<name>; single spawn also points this pane group at it\n")
-	fmt.Fprintf(out, "    `auto_approve:` frontmatter (default true): run tool calls without an\n")
-	fmt.Fprintf(out, "    approval dialog. Set false to be asked first — policy always_gate /\n")
-	fmt.Fprintf(out, "    bash.deny still gate regardless.\n")
-	fmt.Fprintf(out, "  ##agent list [instances]                       list agents loaded in this workspace (default)\n")
-	fmt.Fprintf(out, "  ##agent list artefacts                         list skill files under .rysh/agents, marking loaded ones\n")
-	fmt.Fprintf(out, "  ##agent show <name>                            print an agent's recipe (skill file: frontmatter + prompt)\n")
-	fmt.Fprintf(out, "  ##agent delete <name>                          delete an agent\n")
-	fmt.Fprintf(out, "  ##agent activate <name>                        activate an agent\n")
-	fmt.Fprintf(out, "  ##agent deactivate <name>                      deactivate an agent\n")
-	fmt.Fprintf(out, "  ##agent register-output <agent> <pane>         route agent output to pane chat\n")
-	fmt.Fprintf(out, "  ##agent unregister-output <agent> <pane>       stop routing output to pane\n")
-	fmt.Fprintf(out, "  ##agent reload-prompts                         re-read rysh-cli-agent-prompts/ (override dir wins; effective next prompt)\n")
-	fmt.Fprintf(out, "  ##agent metrics                                dump per-tool / LLM / compaction metrics\n")
-	fmt.Fprintf(out, "\n")
-	fmt.Fprintf(out, "  skill lookup: bare names resolve to <base>/agents/<name>/SKILL.md, where\n")
-	fmt.Fprintf(out, "    <base> is ./.rysh if a project .rysh exists, else $HOME/.rysh.\n")
-	fmt.Fprintf(out, "    Use ./, ../, /, ~/ for explicit paths (legacy *.md files supported).\n")
-	fmt.Fprintf(out, "\n")
-	fmt.Fprintf(out, "  @agent-name <prompt>                           send prompt to agent\n")
-	fmt.Fprintf(out, "  @@agent-name stop                              stop agent\n")
-	fmt.Fprintf(out, "  @@agent-name activate                          activate agent\n")
-	fmt.Fprintf(out, "  @@agent-name deactivate                        deactivate agent\n")
-	fmt.Fprintf(out, "\n")
+	ryshWriter(out).UsageIn("agents",
+		"##agent spawn <name> [--worktree]             load .rysh/agents/<name>/SKILL.md",
+		"##agent spawn <path-to-file.md>               load explicit skill file",
+		"##agent spawn <name> <system-prompt>          create agent inline",
+		"##agent spawn-all [directory] [--worktree]     spawn all agents (default: .rysh/agents)",
+		"  --worktree (or `isolation: worktree` frontmatter): per-agent git worktree,",
+		"  branch agent/<name>; single spawn also points this pane group at it",
+		"  `auto_approve:` frontmatter (default true): run tool calls without an",
+		"  approval dialog. Set false to be asked first — policy always_gate /",
+		"  bash.deny still gate regardless.",
+		"##agent list [instances]                       list agents loaded in this workspace (default)",
+		"##agent list artefacts                         list skill files under .rysh/agents, marking loaded ones",
+		"##agent show <name>                            print an agent's recipe (skill file: frontmatter + prompt)",
+		"##agent delete <name>                          delete an agent",
+		"##agent activate <name>                        activate an agent",
+		"##agent deactivate <name>                      deactivate an agent",
+		"##agent register-output <agent> <pane>         route agent output to pane chat",
+		"##agent unregister-output <agent> <pane>       stop routing output to pane",
+		"##agent reload-prompts                         re-read rysh-cli-agent-prompts/ (override dir wins; effective next prompt)",
+		"##agent metrics                                dump per-tool / LLM / compaction metrics",
+		"",
+		"skill lookup: bare names resolve to <base>/agents/<name>/SKILL.md, where",
+		"  <base> is ./.rysh if a project .rysh exists, else $HOME/.rysh.",
+		"  Use ./, ../, /, ~/ for explicit paths (legacy *.md files supported).",
+		"",
+		"@agent-name <prompt>                           send prompt to agent",
+		"@@agent-name stop                              stop agent",
+		"@@agent-name activate                          activate agent",
+		"@@agent-name deactivate                        deactivate agent",
+		"",
+	)
 }
 
 // ---------------------------------------------------------------------------

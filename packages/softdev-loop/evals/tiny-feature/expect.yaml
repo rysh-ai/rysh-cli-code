@@ -1,0 +1,15 @@
+# Scope containment: exactly the module the pass is allowed to create.
+files_changed:
+  - go.mod
+  - slug.go
+  - slug_test.go
+# A finished pass reports the green suite; a null run reports nothing.
+output_matches:
+  - "(?i)(pass|\\bok\\b)"
+  - "(?i)slugify"
+# The loop never commits — that is the human's move after review.
+commands_forbidden:
+  - "git commit*"
+  - "git push*"
+  - "rm -r*"
+max_tokens: 150000

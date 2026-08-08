@@ -36,7 +36,7 @@ func TestBudgetCheck_BlocksOverCeiling(t *testing.T) {
 		PaneID: "p1", SpentTokens: 120_000, CeilingTokens: 100_000, Ok: false,
 	}, nil)
 
-	allowed, chk := b.check("p1")
+	allowed, chk := b.check("p1", "")
 	if allowed {
 		t.Fatal("a pane over its ceiling must not be allowed to spend")
 	}
@@ -49,14 +49,14 @@ func TestBudgetCheck_AllowsUnderCeilingAndWhenNoCeilingSet(t *testing.T) {
 	under, _ := newTestChecker(&msg.MsgUsageCheckReply{
 		PaneID: "p1", SpentTokens: 10, CeilingTokens: 100_000, Ok: true,
 	}, nil)
-	if allowed, _ := under.check("p1"); !allowed {
+	if allowed, _ := under.check("p1", ""); !allowed {
 		t.Fatal("a pane under its ceiling must be allowed")
 	}
 
 	none, _ := newTestChecker(&msg.MsgUsageCheckReply{
 		PaneID: "p2", SpentTokens: 999_999, CeilingTokens: 0, Ok: true,
 	}, nil)
-	if allowed, _ := none.check("p2"); !allowed {
+	if allowed, _ := none.check("p2", ""); !allowed {
 		t.Fatal("no ceiling set (CeilingTokens==0) must always allow")
 	}
 }
@@ -68,14 +68,14 @@ func TestBudgetCheck_AllowsUnderCeilingAndWhenNoCeilingSet(t *testing.T) {
 // test should change with it — it must not drift silently.
 func TestBudgetCheck_FailsOpenWhenLedgerUnreachable(t *testing.T) {
 	b, _ := newTestChecker(nil, errors.New("nats: timeout"))
-	if allowed, _ := b.check("p1"); !allowed {
+	if allowed, _ := b.check("p1", ""); !allowed {
 		t.Fatal("an unreachable ledger must allow the request (documented fail-open)")
 	}
 }
 
 func TestBudgetCheck_NoLedgerConfiguredAllows(t *testing.T) {
 	b := newBudgetChecker(nil) // nil publisher ⇒ no request seam
-	if allowed, _ := b.check("p1"); !allowed {
+	if allowed, _ := b.check("p1", ""); !allowed {
 		t.Fatal("with no ledger wired the proxy must not block traffic")
 	}
 }
@@ -87,22 +87,22 @@ func TestBudgetCheck_CachesPerPaneAndExpires(t *testing.T) {
 	now := time.Now()
 	b.now = func() time.Time { return now }
 
-	b.check("p1")
-	b.check("p1")
-	b.check("p1")
+	b.check("p1", "")
+	b.check("p1", "")
+	b.check("p1", "")
 	if *calls != 1 {
 		t.Fatalf("expected the ledger to be queried once within the TTL, got %d", *calls)
 	}
 
 	// A different pane is cached separately.
-	b.check("p2")
+	b.check("p2", "")
 	if *calls != 2 {
 		t.Fatalf("expected a separate query per pane, got %d", *calls)
 	}
 
 	// Past the TTL the entry is refetched.
 	now = now.Add(budgetCacheTTL + time.Millisecond)
-	b.check("p1")
+	b.check("p1", "")
 	if *calls != 3 {
 		t.Fatalf("expected a refetch after the TTL expired, got %d", *calls)
 	}
@@ -110,9 +110,9 @@ func TestBudgetCheck_CachesPerPaneAndExpires(t *testing.T) {
 
 func TestBudgetCheck_InvalidateForcesRefetch(t *testing.T) {
 	b, calls := newTestChecker(&msg.MsgUsageCheckReply{PaneID: "p1", Ok: true}, nil)
-	b.check("p1")
+	b.check("p1", "")
 	b.invalidate("p1")
-	b.check("p1")
+	b.check("p1", "")
 	if *calls != 2 {
 		t.Fatalf("invalidate must force a refetch, got %d calls", *calls)
 	}
@@ -158,7 +158,7 @@ func TestWriteBudgetExceeded_IsDialectShaped(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.dialect, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			lookupDialect(tc.dialect).WriteBudgetExceeded(rec, "over budget")
+			lookupDialect(tc.dialect).WriteRateLimited(rec, "over budget", budgetRetryAfter)
 
 			if rec.Code != http.StatusTooManyRequests {
 				t.Fatalf("status = %d, want 429", rec.Code)

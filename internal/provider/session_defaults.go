@@ -20,19 +20,38 @@ type SessionDefaults struct {
 	v atomic.Pointer[sessionSeat]
 }
 
-type sessionSeat struct{ model, effort string }
+// sessionSeat is the whole session selection in ONE atomic value: the model,
+// the effort, and — for a cross-family switch — the provider that serves them.
+// Keeping the provider in the same seat is what stops a reader pairing the
+// model from one ##llm switch with the provider from another.
+type sessionSeat struct {
+	model, effort string
+	// prov is set only when the session switched to a DIFFERENT provider
+	// family than the configured one; nil means "keep the configured
+	// provider and just re-pin its model".
+	prov AgenticProvider
+}
 
 // NewSessionDefaults returns an empty holder (no session override).
 func NewSessionDefaults() *SessionDefaults { return &SessionDefaults{} }
 
-// Set installs the session default. Empty strings clear the respective field;
-// Set("", "") clears the override entirely.
+// Set installs the session default on the CONFIGURED provider. Empty strings
+// clear the respective field; Set("", "") clears the override entirely,
+// including any cross-family provider a previous SetProvider installed.
 func (s *SessionDefaults) Set(model, effort string) {
-	if model == "" && effort == "" {
+	s.SetProvider(model, effort, nil)
+}
+
+// SetProvider installs the session default AND the provider that serves it —
+// the cross-family case, where `##llm use openai/sol` on an anthropic session
+// must change which client the request goes to, not merely which model id
+// rides on the existing one. A nil prov keeps the configured provider.
+func (s *SessionDefaults) SetProvider(model, effort string, prov AgenticProvider) {
+	if model == "" && effort == "" && prov == nil {
 		s.v.Store(nil)
 		return
 	}
-	s.v.Store(&sessionSeat{model: model, effort: effort})
+	s.v.Store(&sessionSeat{model: model, effort: effort, prov: prov})
 }
 
 // Get returns the current session default ("" when unset).
@@ -41,6 +60,15 @@ func (s *SessionDefaults) Get() (model, effort string) {
 		return seat.model, seat.effort
 	}
 	return "", ""
+}
+
+// Provider returns the session's cross-family provider, or nil when the
+// session runs on the configured one.
+func (s *SessionDefaults) Provider() AgenticProvider {
+	if seat := s.v.Load(); seat != nil {
+		return seat.prov
+	}
+	return nil
 }
 
 // WithSessionDefaults wraps an agentic provider so every call resolves the
@@ -64,22 +92,45 @@ type sessionAgenticProvider struct {
 	defaults    *SessionDefaults
 }
 
-// resolved returns the provider to use for one call: the inner provider when
-// no session default is set, otherwise a per-call model/effort variant.
-func (p *sessionAgenticProvider) resolved() AgenticProvider {
-	model, effort := p.defaults.Get()
-	if model == "" && effort == "" {
-		return p.inner
+// active returns the provider the session currently runs on — the cross-family
+// one when ##llm switched families, else the configured provider this
+// decorator wraps.
+func (p *sessionAgenticProvider) active() AgenticProvider {
+	if prov := p.defaults.Provider(); prov != nil {
+		return prov
 	}
-	return p.overridable.WithModelEffort(model, effort)
+	return p.inner
 }
 
-func (p *sessionAgenticProvider) Name() string { return p.inner.Name() }
+// resolved returns the provider to use for one call: the active provider with
+// the session's model/effort applied when it can take them.
+//
+// The override is applied to the ACTIVE provider, not to the configured one.
+// Applying it to p.overridable unconditionally is what would send an OpenAI
+// model id down the Anthropic client on a cross-family switch.
+func (p *sessionAgenticProvider) resolved() AgenticProvider {
+	model, effort := p.defaults.Get()
+	target := p.active()
+	if model == "" && effort == "" {
+		return target
+	}
+	if mo, ok := target.(sharedprovider.ModelEffortOverridable); ok {
+		return mo.WithModelEffort(model, effort)
+	}
+	return target
+}
 
-// Unwrap exposes the wrapped provider so capability detection (Caps) sees the
+// Name reports the ACTIVE provider's name, so attribution, usage accounting
+// and the status line follow a cross-family switch instead of still claiming
+// the configured provider.
+func (p *sessionAgenticProvider) Name() string { return p.active().Name() }
+
+// Unwrap exposes the active provider so capability detection (Caps) sees the
 // real provider rather than this decorator's own type. Without it the wrapper
-// would mask tool/streaming support behind itself.
-func (p *sessionAgenticProvider) Unwrap() Provider { return p.inner }
+// would mask tool/streaming support behind itself — and after a cross-family
+// switch it would report the capabilities of the provider no longer serving
+// the session.
+func (p *sessionAgenticProvider) Unwrap() Provider { return p.active() }
 
 func (p *sessionAgenticProvider) Complete(ctx context.Context, prompt string) (string, error) {
 	return p.resolved().Complete(ctx, prompt)
@@ -127,6 +178,9 @@ func (p *sessionAgenticProvider) WithMaxTokens(maxTokens int) AgenticProvider {
 	if capped == nil {
 		return nil
 	}
+	// Re-wrap with the same holder: the capped variant must keep resolving the
+	// session seat per call, including a cross-family provider, which the
+	// re-wrap preserves because the holder — not this wrapper — owns it.
 	return WithSessionDefaults(capped, p.defaults)
 }
 
@@ -141,6 +195,11 @@ func (p *sessionAgenticProvider) WithModelEffort(model, effort string) AgenticPr
 	}
 	if effort == "" {
 		effort = se
+	}
+	// Route through the ACTIVE provider: an explicit seat that pins only the
+	// effort must still land on the family the session switched to.
+	if mo, ok := p.active().(sharedprovider.ModelEffortOverridable); ok {
+		return mo.WithModelEffort(model, effort)
 	}
 	return p.overridable.WithModelEffort(model, effort)
 }

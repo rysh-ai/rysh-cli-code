@@ -617,7 +617,12 @@ func (s *SlackAdapter) eventLoop(ctx context.Context, smClient *socketmode.Clien
 					"api_event_type", eventsAPIEvent.Type,
 					"inner_event_type", eventsAPIEvent.InnerEvent.Type)
 				// Ack immediately BEFORE processing to avoid Slack retry.
-				smClient.Ack(*evt.Request)
+				// A failed ack is not fatal — Slack redelivers, which is the
+				// designed fallback — but it explains a duplicate event later,
+				// so it is worth a line in the log rather than a bare discard.
+				if err := smClient.Ack(*evt.Request); err != nil {
+					slog.Warn("slack: ack failed; Slack will redeliver this event", "error", err)
+				}
 				s.handleEventsAPI(eventsAPIEvent)
 			default:
 				slog.Debug("slack: unhandled socket mode event type", "type", evt.Type)

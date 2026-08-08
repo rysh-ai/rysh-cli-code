@@ -43,8 +43,20 @@ type UsageActor struct {
 	// the session total is summed from byDayPane only, so there is no
 	// double-counting across the two views.
 	byDayAgent map[string]map[string]*usageAgg
+	// observer, when set, receives every record for org-wide reporting
+	// (design 023 §4.4). Never consulted for a local figure.
+	observer UsageObserver
+	// byDayTenant[dayKey][tenant] accumulates spend attributed to a customer
+	// (design 022 §4.3). Same shape and same reasoning as byDayAgent: it is a
+	// SECOND INDEX over the same records, not a second stream of them. The
+	// session total is summed from byDayPane only, so tenant accounting cannot
+	// double-count `##cost` — which is exactly what emitting a second record
+	// under a synthetic tenant id would have done.
+	byDayTenant map[string]map[string]*usageAgg
 	// ceilings[paneID] is the pane's hard token ceiling (0 ⇒ none).
 	ceilings map[string]int64
+	// tenantCeilings[tenant] is the customer's hard token ceiling (0 ⇒ none).
+	tenantCeilings map[string]int64
 	// lastPersist gates KV writes to ≤1 / 2s per persisted key.
 	lastPersist map[string]time.Time
 }
@@ -70,14 +82,37 @@ func NewUsageActor(sessionName string, pub *msg.NATSPublisher, nc *nats.Conn) *U
 		sessionName = "default"
 	}
 	return &UsageActor{
-		sessionName:   sessionName,
-		pub:           pub,
-		nc:            nc,
-		retentionDays: 90,
-		byDayPane:     map[string]map[string]*usageAgg{},
-		byDayAgent:    map[string]map[string]*usageAgg{},
-		ceilings:      map[string]int64{},
-		lastPersist:   map[string]time.Time{},
+		sessionName:    sessionName,
+		pub:            pub,
+		nc:             nc,
+		retentionDays:  90,
+		byDayPane:      map[string]map[string]*usageAgg{},
+		byDayAgent:     map[string]map[string]*usageAgg{},
+		byDayTenant:    map[string]map[string]*usageAgg{},
+		ceilings:       map[string]int64{},
+		tenantCeilings: map[string]int64{},
+		lastPersist:    map[string]time.Time{},
+	}
+}
+
+// SetTenantCeilings pre-seeds per-tenant token ceilings (design 022 §4.3),
+// from [proxy] tenants and from policy keys of the form "tenant:<name>".
+// Called before the actor starts, so it races nothing.
+func (u *UsageActor) SetTenantCeilings(c map[string]int64) {
+	for k, v := range c {
+		if v <= 0 {
+			continue
+		}
+		// LOWER WINS, not last-writer-wins. Two sources seed this map —
+		// [proxy] tenants and policy's "tenant:<name>" keys — and policy's own
+		// Merge already resolves a conflict between org and project files by
+		// taking the lower ceiling. Overwriting here would make the ORDER of two
+		// calls in workspace.go decide a customer's budget, and a looser number
+		// arriving second would silently raise a cap policy had lowered.
+		if cur, ok := u.tenantCeilings[k]; ok && cur > 0 && cur < v {
+			continue
+		}
+		u.tenantCeilings[k] = v
 	}
 }
 
@@ -136,7 +171,7 @@ func (u *UsageActor) Receive(ctx actor.Context) {
 	case *msg.RequestEnvelope:
 		switch inner := m.Inner.(type) {
 		case *msg.MsgUsageCheck:
-			_ = m.Reply(u.checkBudget(inner.PaneID))
+			_ = m.Reply(u.checkBudget(inner.PaneID, inner.Tenant))
 		case *msg.MsgUsageSnapshotRequest:
 			_ = m.Reply(u.snapshot(inner.Window))
 		}
@@ -181,7 +216,37 @@ func (u *UsageActor) ingest(rec *msg.MsgUsageRecord) {
 		addToAgg(agentAgg, rec, cost, known)
 		u.persistAgg(agentAggKVKey(day, rec.AgentName), agentAgg)
 	}
+
+	// By tenant (design 022 §4.3) — the same record, indexed a second way.
+	if rec.Tenant != "" {
+		tenantAgg := aggFor(u.byDayTenant, day, rec.Tenant)
+		addToAgg(tenantAgg, rec, cost, known)
+		u.persistAgg(tenantAggKVKey(day, rec.Tenant), tenantAgg)
+	}
+
+	// The org-wide observer (design 023 §4.4). It batches the SAME record to
+	// the server; it is additive and never authoritative, so `##cost` stays a
+	// local, offline-capable view whether or not governance is on. Cost is
+	// passed as priced here, so the server is not asked to re-derive it from a
+	// pricing table it does not have.
+	if u.observer != nil {
+		priced := *rec
+		priced.CostMicroUSD = cost
+		u.observer.Record(priced)
+	}
 }
+
+// UsageObserver is a side-channel consumer of the same records the ledger
+// aggregates (design 023 §4.4). It exists so the shared-ledger client can be
+// fed without UsageActor knowing anything about the network — the observer is
+// expected to batch and never to block.
+type UsageObserver interface {
+	Record(rec msg.MsgUsageRecord)
+}
+
+// SetUsageObserver installs the org-wide reporter. Called before the actor
+// starts, so it races nothing. nil ⇒ local-only, which is the default.
+func (u *UsageActor) SetUsageObserver(o UsageObserver) { u.observer = o }
 
 // aggFor returns (creating as needed) the aggregate for one (day, key) in a
 // byDay map — shared by the pane and agent rollups.
@@ -222,15 +287,49 @@ func (u *UsageActor) spentToday(paneID string) int64 {
 	return 0
 }
 
-func (u *UsageActor) checkBudget(paneID string) *msg.MsgUsageCheckReply {
+// spentTodayTenant is the tenant equivalent of spentToday, read from the second
+// index rather than by re-summing panes.
+func (u *UsageActor) spentTodayTenant(tenant string) int64 {
+	if tenants := u.byDayTenant[dayKeyOf(time.Now())]; tenants != nil {
+		if agg := tenants[tenant]; agg != nil {
+			return agg.tokens()
+		}
+	}
+	return 0
+}
+
+// checkBudget answers the hot-path budget query.
+//
+// When a tenant is named, BOTH ceilings are evaluated and the refusal wins: a
+// pane with headroom under a customer that is out of budget must still be
+// stopped, or per-tenant caps would be trivially escaped by opening a new pane.
+// The reply says which one bound, so the message names the right budget.
+func (u *UsageActor) checkBudget(paneID, tenant string) *msg.MsgUsageCheckReply {
 	ceiling := u.ceilings[paneID]
 	spent := u.spentToday(paneID)
-	ok := ceiling == 0 || spent < ceiling
+	paneOK := ceiling == 0 || spent < ceiling
+
+	if tenant != "" {
+		tCeiling := u.tenantCeilings[tenant]
+		tSpent := u.spentTodayTenant(tenant)
+		if tCeiling > 0 && tSpent >= tCeiling {
+			return &msg.MsgUsageCheckReply{
+				PaneID:        paneID,
+				SpentTokens:   tSpent,
+				CeilingTokens: tCeiling,
+				Ok:            false,
+				Scope:         msg.UsageScopeTenant,
+				Tenant:        tenant,
+			}
+		}
+	}
+
 	return &msg.MsgUsageCheckReply{
 		PaneID:        paneID,
 		SpentTokens:   spent,
 		CeilingTokens: ceiling,
-		Ok:            ok,
+		Ok:            paneOK,
+		Scope:         msg.UsageScopePane,
 	}
 }
 
@@ -352,8 +451,9 @@ func (u *UsageActor) openKV() {
 	u.kv = kv
 }
 
-func aggKVKey(day, paneID string) string    { return "agg/" + day + "/" + paneID }
-func agentAggKVKey(day, name string) string { return "agentagg/" + day + "/" + name }
+func aggKVKey(day, paneID string) string     { return "agg/" + day + "/" + paneID }
+func agentAggKVKey(day, name string) string  { return "agentagg/" + day + "/" + name }
+func tenantAggKVKey(day, name string) string { return "tenantagg/" + day + "/" + name }
 
 // persistAgg writes one aggregate under kvKey, time-gated to ≤1 write / 2s per
 // key. Used for both pane ("agg/…") and agent ("agentagg/…") rollups.
@@ -404,6 +504,13 @@ func (u *UsageActor) flushAll() {
 			}
 		}
 	}
+	for day, tenants := range u.byDayTenant {
+		for name, agg := range tenants {
+			if data, err := json.Marshal(agg); err == nil {
+				_, _ = u.kv.Put(tenantAggKVKey(day, name), data)
+			}
+		}
+	}
 	u.persistCeilings()
 }
 
@@ -428,6 +535,10 @@ func (u *UsageActor) restoreFromKV() {
 		// but keeping them explicit avoids a future refactor mixing them up).
 		if strings.HasPrefix(key, "agentagg/") {
 			restoreAgg(u.byDayAgent, strings.TrimPrefix(key, "agentagg/"), entry.Value())
+			continue
+		}
+		if strings.HasPrefix(key, "tenantagg/") {
+			restoreAgg(u.byDayTenant, strings.TrimPrefix(key, "tenantagg/"), entry.Value())
 			continue
 		}
 		if strings.HasPrefix(key, "agg/") {
@@ -471,6 +582,16 @@ func (u *UsageActor) pruneOld() {
 				}
 			}
 			delete(u.byDayAgent, day)
+		}
+	}
+	for day := range u.byDayTenant {
+		if day < cutoff {
+			if u.kv != nil {
+				for name := range u.byDayTenant[day] {
+					_ = u.kv.Delete(tenantAggKVKey(day, name))
+				}
+			}
+			delete(u.byDayTenant, day)
 		}
 	}
 }

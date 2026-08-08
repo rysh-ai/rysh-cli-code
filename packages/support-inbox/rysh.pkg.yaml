@@ -1,0 +1,14 @@
+name: "@rysh/support-inbox"
+version: "0.1.0"
+type: humanoid
+description: "Customer-support humanoid for an email inbox (IMAP/SMTP), human-governed drafts"
+entry: SKILL.md
+min_rysh: "0.1.26"
+declares_channels:
+  - email
+declares_env:
+  - SUPPORT_EMAIL_ADDRESS
+  - SUPPORT_IMAP_HOST
+  - SUPPORT_SMTP_HOST
+  - SUPPORT_EMAIL_USER
+  - SUPPORT_EMAIL_PASS

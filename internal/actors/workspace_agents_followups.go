@@ -6,6 +6,7 @@ import (
 
 	sharedagentic "github.com/rysh-ai/rysh-cli-shared/agentic"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 	"github.com/rysh-ai/rysh-cli-code/internal/metrics"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 )
@@ -61,15 +62,8 @@ func (w *WorkspaceActor) collectAllPaneIDs() []string {
 		if snap == nil {
 			continue
 		}
-		for _, lane := range snap.Lanes {
-			for _, g := range lane.PaneGroups {
-				for _, p := range g.Panes {
-					if p.ID != "" {
-						ids = append(ids, p.ID)
-					}
-				}
-			}
-		}
+		tabIDs, _ := domain.PaneIDsInTabWhere(snap, func(p *domain.PaneSnapshot) bool { return p.ID != "" })
+		ids = append(ids, tabIDs...)
 	}
 	return ids
 }

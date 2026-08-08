@@ -30,6 +30,8 @@ func normalizeModeName(s string) string {
 		return "chat"
 	case "external", "ext":
 		return "external"
+	case "email", "mail", "inbox":
+		return "email"
 	case "web", "browser":
 		return "web"
 	default:
@@ -63,18 +65,20 @@ func (w *WorkspaceActor) handleModeSubcommand(out *strings.Builder, paneID strin
 		w.modeWeb(out, paneID, args[1:])
 	default:
 		w.modeHelp(out)
+		w.failRyshUsage("unknown ##mode subcommand: %q", sub)
 	}
 }
 
 func (w *WorkspaceActor) modeHelp(out *strings.Builder) {
-	out.WriteString("\n[rysh] ##mode usage:\n")
-	out.WriteString("  ##mode list                         list enabled + available input modes\n")
-	out.WriteString("  ##mode new <mode>                   enable a mode (shell|prompt(ai)|rysh|chat|external|web)\n")
-	out.WriteString("  ##mode new web [--profile N] [url]  enable web mode bound to a persistent browser profile\n")
-	out.WriteString("  ##mode profiles                     list known browser profiles (logins persist per profile)\n")
-	out.WriteString("  ##mode web ai [--pane <id|name>] <prompt>  send a prompt to a pane's web AI (default: this pane; --pane targets another)\n")
-	out.WriteString("  ##mode web ai [--pane <id|name>] history [print] [N]  print a pane's last N Ask Rysh turns (default 5)\n")
-	out.WriteString("  ##mode delete <mode>                disable a mode (shell cannot be disabled)\n")
+	ryshWriter(out).Usage(
+		"##mode list                         list enabled + available input modes",
+		"##mode new <mode>                   enable a mode (shell|prompt(ai)|rysh|chat|external|email|web)",
+		"##mode new web [--profile N] [url]  enable web mode bound to a persistent browser profile",
+		"##mode profiles                     list known browser profiles (logins persist per profile)",
+		"##mode web ai [--pane <id|name>] <prompt>  send a prompt to a pane's web AI (default: this pane; --pane targets another)",
+		"##mode web ai [--pane <id|name>] history [print] [N]  print a pane's last N Ask Rysh turns (default 5)",
+		"##mode delete <mode>                disable a mode (shell cannot be disabled)",
+	)
 }
 
 // modeWeb handles `##mode web <action>` — acting on a pane's web mode without
@@ -83,7 +87,8 @@ func (w *WorkspaceActor) modeHelp(out *strings.Builder) {
 // embedded browser via its browser tools) from any mode, e.g. shell.
 func (w *WorkspaceActor) modeWeb(out *strings.Builder, paneID string, args []string) {
 	if len(args) == 0 {
-		out.WriteString("\n[rysh] usage: ##mode web ai <prompt>   (send a prompt to this pane's web AI assistant)\n")
+		ryshWriter(out).UsageLine("##mode web ai <prompt>   (send a prompt to this pane's web AI assistant)")
+		w.failRyshUsage("usage: %s", "##mode web ai <prompt>   (send a prompt to this pane's web AI assistant)")
 		return
 	}
 	switch strings.ToLower(args[0]) {
@@ -91,6 +96,7 @@ func (w *WorkspaceActor) modeWeb(out *strings.Builder, paneID string, args []str
 		w.sendWebAIPrompt(out, paneID, strings.Join(args[1:], " "))
 	default:
 		fmt.Fprintf(out, "\n[rysh] unknown web action %q (usage: ##mode web ai <prompt>)\n", args[0])
+		w.failRysh("unknown web action %q (usage: ##mode web ai <prompt>)", args[0])
 	}
 }
 
@@ -109,6 +115,7 @@ func (w *WorkspaceActor) sendWebAIPrompt(out *strings.Builder, paneID, rawPrompt
 		resolved := w.resolvePaneID(targetRef)
 		if resolved == "" {
 			fmt.Fprintf(out, "\n[rysh] pane %q not found\n", targetRef)
+			w.failRysh("pane %q not found", targetRef)
 			return
 		}
 		paneID = resolved
@@ -125,7 +132,8 @@ func (w *WorkspaceActor) sendWebAIPrompt(out *strings.Builder, paneID, rawPrompt
 
 	prompt := stripSurroundingQuotes(strings.TrimSpace(rawPrompt))
 	if prompt == "" {
-		out.WriteString("\n[rysh] usage: ##webai [--pane <id|name>] <prompt> | history [print] [N]\n")
+		ryshWriter(out).UsageLine("##webai [--pane <id|name>] <prompt> | history [print] [N]")
+		w.failRyshUsage("usage: %s", "##webai [--pane <id|name>] <prompt> | history [print] [N]")
 		return
 	}
 	// The AI assistant drives the target pane's embedded browser, so web mode must
@@ -142,6 +150,7 @@ func (w *WorkspaceActor) sendWebAIPrompt(out *strings.Builder, paneID, rawPrompt
 	}
 	if !webOn {
 		fmt.Fprintf(out, "\n[rysh] web mode is not enabled on %s — run `##mode new web [--profile N] [url]` there first\n", paneLabel)
+		w.failRysh("web mode is not enabled on %s — run `##mode new web [--profile N] [url]` there first", paneLabel)
 		return
 	}
 	// Tell the desktop app to render this prompt as a human bubble in the target
@@ -222,6 +231,7 @@ func (w *WorkspaceActor) webAIHistory(out *strings.Builder, paneID, paneLabel st
 	}
 	if !webOn {
 		fmt.Fprintf(out, "\n[rysh] web mode is not enabled on %s — run `##mode new web [--profile N] [url]` there first\n", paneLabel)
+		w.failRysh("web mode is not enabled on %s — run `##mode new web [--profile N] [url]` there first", paneLabel)
 		return
 	}
 
@@ -235,6 +245,7 @@ func (w *WorkspaceActor) webAIHistory(out *strings.Builder, paneID, paneLabel st
 	)
 	if err != nil {
 		fmt.Fprintf(out, "\n[rysh] could not read Ask Rysh history for %s (no active session yet?)\n", paneLabel)
+		w.failRysh("could not read Ask Rysh history for %s (no active session yet?)", paneLabel)
 		return
 	}
 	reply, ok := res.(*msg.MsgConversationHistoryReply)
@@ -341,6 +352,7 @@ func (w *WorkspaceActor) modeListProfiles(out *strings.Builder, paneID string) {
 	regs, err := browserinstance.LoadRegistry(w.browserWorkDir())
 	if err != nil {
 		fmt.Fprintf(out, "\n[rysh] failed to read browser profiles: %v\n", err)
+		w.failRysh("failed to read browser profiles: %v", err)
 		return
 	}
 
@@ -414,12 +426,14 @@ func (w *WorkspaceActor) modeList(out *strings.Builder, paneID string) {
 
 func (w *WorkspaceActor) modeNew(out *strings.Builder, paneID string, args []string) {
 	if len(args) == 0 {
-		out.WriteString("\n[rysh] usage: ##mode new <mode>  (shell|prompt(ai)|rysh|chat|external|web)\n")
+		ryshWriter(out).UsageLine("##mode new <mode>  (shell|prompt(ai)|rysh|chat|external|email|web)")
+		w.failRyshUsage("usage: %s", "##mode new <mode>  (shell|prompt(ai)|rysh|chat|external|email|web)")
 		return
 	}
 	mode := normalizeModeName(args[0])
 	if mode == "" {
-		fmt.Fprintf(out, "\n[rysh] unknown mode %q (valid: shell, prompt(ai), rysh, chat, external, web)\n", args[0])
+		fmt.Fprintf(out, "\n[rysh] unknown mode %q (valid: shell, prompt(ai), rysh, chat, external, email, web)\n", args[0])
+		w.failRysh("unknown mode %q (valid: shell, prompt(ai), rysh, chat, external, email, web)", args[0])
 		return
 	}
 
@@ -429,11 +443,21 @@ func (w *WorkspaceActor) modeNew(out *strings.Builder, paneID string, args []str
 		dir, err := browserinstance.EnsureProfile(w.browserWorkDir(), profile)
 		if err != nil {
 			fmt.Fprintf(out, "\n[rysh] failed to create browser profile %q: %v\n", profile, err)
+			w.failRysh("failed to create browser profile %q: %v", profile, err)
 			return
 		}
 		_ = w.pub.Send(msg.T("pane", paneID, "inbox"),
 			&msg.MsgPaneEnableMode{PaneID: paneID, Mode: "web", WebProfile: profile, WebURL: url})
 		fmt.Fprintf(out, "\n[rysh] enabled web mode (profile %q → %s, url %s)\n", profile, dir, url)
+		// The pane binding is real either way, but only a rich renderer paints
+		// the page. Enabling web mode from a bare terminal otherwise looks like
+		// a no-op — the command succeeds and the pane shows a placeholder — so
+		// say which of the two is happening, and how to get a live page.
+		if !w.hasRichRenderer() {
+			out.WriteString("  no browser-capable client is attached, so this pane shows the binding, not the page\n")
+			out.WriteString("  to automate it here:      ##web headless on\n")
+			out.WriteString("  to see the page:          attach the desktop app, or `##rysh web start` and open the URL\n")
+		}
 		return
 	}
 
@@ -444,12 +468,14 @@ func (w *WorkspaceActor) modeNew(out *strings.Builder, paneID string, args []str
 
 func (w *WorkspaceActor) modeDelete(out *strings.Builder, paneID string, args []string) {
 	if len(args) == 0 {
-		out.WriteString("\n[rysh] usage: ##mode delete <mode>\n")
+		ryshWriter(out).UsageLine("##mode delete <mode>")
+		w.failRyshUsage("usage: %s", "##mode delete <mode>")
 		return
 	}
 	mode := normalizeModeName(args[0])
 	if mode == "" {
-		fmt.Fprintf(out, "\n[rysh] unknown mode %q\n", args[0])
+		fmt.Fprintf(out, "\n[rysh] unknown mode %q (valid: prompt(ai), rysh, chat, external, email, web)\n", args[0])
+		w.failRysh("unknown mode %q (valid: prompt(ai), rysh, chat, external, email, web)", args[0])
 		return
 	}
 	if mode == "shell" {

@@ -2,7 +2,7 @@ module github.com/rysh-ai/rysh-cli-code
 
 go 1.25.3
 
-require github.com/rysh-ai/rysh-cli-shared v0.1.0
+require github.com/rysh-ai/rysh-cli-shared v0.2.3
 
 require (
 	github.com/asynkron/protoactor-go v0.0.0-20260118094027-288962e52f3f
@@ -27,6 +27,7 @@ require (
 	github.com/prometheus/client_golang v1.23.2
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/slack-go/slack v0.23.1
+	golang.org/x/crypto v0.49.0
 	golang.org/x/sys v0.43.0
 	golang.org/x/term v0.42.0
 	google.golang.org/grpc v1.77.0
@@ -100,7 +101,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.38.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	golang.org/x/arch v0.22.0 // indirect
-	golang.org/x/crypto v0.49.0 // indirect
 	golang.org/x/net v0.51.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/text v0.35.0 // indirect

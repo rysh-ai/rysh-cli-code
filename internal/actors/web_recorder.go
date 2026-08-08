@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -100,11 +101,18 @@ type WebRecorderActor struct {
 	reqSeq     int
 	inFlight   string    // outstanding capture RequestID ("" = idle)
 	inFlightAt time.Time // when it was sent, for the stall guard
+	// sentAt records when each issued capture was REQUESTED, keyed by request
+	// id. It outlives inFlight on purpose: the stall guard stops us waiting on
+	// a slow screenshot, but it must not make us throw the answer away when it
+	// does arrive. A frame is stamped with its request time rather than its
+	// arrival time, so a late one still sits at the right point in the video.
+	sentAt map[string]time.Duration
 
-	frames  []recFrame
-	dropped int // ticks skipped because a capture was still outstanding
-	failed  int // captures that came back unsuccessful
-	done    bool
+	frames   []recFrame
+	dropped  int // ticks skipped because a capture was still outstanding
+	failed   int // captures that came back unsuccessful
+	timedOut int // captures the stall guard stopped waiting on (some still arrive)
+	done     bool
 }
 
 // NewWebRecorderActor builds the recorder. outPath must be absolute and
@@ -212,20 +220,35 @@ func (r *WebRecorderActor) capture() {
 	if r.inFlight != "" {
 		// Stall guard: a peer that never answers (browser died, desktop app
 		// detached) would otherwise wedge recording forever. After a few
-		// intervals, give up on that frame and let the next tick try again.
+		// intervals, stop WAITING on that frame so the next tick can try
+		// again.
+		//
+		// Stop waiting, but do not disown it. The id stays in sentAt, so if
+		// the screenshot was merely slow rather than lost, handleFrame still
+		// keeps it. Clearing inFlight used to be the same thing as discarding
+		// the answer, which meant a machine where every screenshot took longer
+		// than the guard's window recorded NOTHING — every capture succeeded,
+		// every one arrived a moment too late, and the run reported "no frames
+		// captured". A busy machine is exactly when a long automation is being
+		// recorded, so that was the case most likely to need the video.
 		if time.Since(r.inFlightAt) > 4*r.spec.Interval {
 			r.inFlight = ""
-			r.failed++
+			r.timedOut++
 		}
 		r.dropped++
 		return
 	}
+	r.pruneSentAt()
 	if r.spec.MaxFrames > 0 && len(r.frames) >= r.spec.MaxFrames {
 		return // cap reached; keep the run going, just stop growing the file
 	}
 	r.reqSeq++
 	r.inFlight = r.reqPrefix + fmt.Sprint(r.reqSeq)
 	r.inFlightAt = time.Now()
+	if r.sentAt == nil {
+		r.sentAt = make(map[string]time.Duration, 4)
+	}
+	r.sentAt[r.inFlight] = time.Since(r.startedAt)
 
 	// settle:false tells the desktop app's executor to skip the
 	// requestAnimationFrame + 80ms wait it runs before an agent screenshot.
@@ -252,10 +275,19 @@ func (r *WebRecorderActor) handleFrame(m *msg.MsgBrowserActionResponse) {
 	if r.done || !strings.HasPrefix(m.RequestID, r.reqPrefix) {
 		return
 	}
-	if m.RequestID != r.inFlight {
-		return // a late frame we already gave up on
+	// Every capture WE issued counts, whether or not we are still waiting on
+	// it. A slow screenshot is not a lost one: it is a real picture of the
+	// page at the moment it was requested, and dropping it because the stall
+	// guard had already moved on threw away frames the browser had gone to the
+	// trouble of producing.
+	at, ours := r.sentAt[m.RequestID]
+	if !ours {
+		return // already recorded, or pruned long ago
 	}
-	r.inFlight = ""
+	delete(r.sentAt, m.RequestID)
+	if m.RequestID == r.inFlight {
+		r.inFlight = ""
+	}
 	if !m.Success || m.Screenshot == "" {
 		r.failed++
 		return
@@ -272,7 +304,35 @@ func (r *WebRecorderActor) handleFrame(m *msg.MsgBrowserActionResponse) {
 		r.failed++
 		return
 	}
-	r.frames = append(r.frames, recFrame{name: name, at: time.Since(r.startedAt)})
+	// Stamped with when the capture was REQUESTED, not when its answer landed:
+	// that is when the pixels were of, and it keeps a late frame in its true
+	// place in the timeline rather than bunched up against whatever followed.
+	r.frames = append(r.frames, recFrame{name: name, at: at})
+}
+
+// pruneSentAt forgets captures too old to still be in flight, so a peer that
+// answers nothing cannot grow the map for the length of a long run. The window
+// is deliberately generous — many times the stall guard's — because the whole
+// point of keeping these is to accept an answer the guard already gave up on.
+func (r *WebRecorderActor) pruneSentAt() {
+	if len(r.sentAt) == 0 {
+		return
+	}
+	cutoff := time.Since(r.startedAt) - sentAtRetention(r.spec.Interval)
+	for id, at := range r.sentAt {
+		if at < cutoff {
+			delete(r.sentAt, id)
+		}
+	}
+}
+
+// sentAtRetention is how long a requested capture stays claimable. Floored so
+// a very short interval still leaves a usable window on a slow machine.
+func sentAtRetention(interval time.Duration) time.Duration {
+	if d := 30 * interval; d > 10*time.Second {
+		return d
+	}
+	return 10 * time.Second
 }
 
 // handleStep is the unsupervised run-end detector. It reuses the supervisor's
@@ -322,8 +382,8 @@ func (r *WebRecorderActor) finish(ctx actor.Context, reason string) {
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "\n[web] recording: %s — %d frames over %s", reason, len(r.frames), elapsed)
-	if r.dropped > 0 || r.failed > 0 {
-		fmt.Fprintf(&sb, " (%d ticks dropped, %d failed)", r.dropped, r.failed)
+	if r.dropped > 0 || r.failed > 0 || r.timedOut > 0 {
+		fmt.Fprintf(&sb, " (%d ticks dropped, %d failed, %d timed out)", r.dropped, r.failed, r.timedOut)
 	}
 	sb.WriteString("\n")
 
@@ -340,12 +400,18 @@ func (r *WebRecorderActor) finish(ctx actor.Context, reason string) {
 	}
 	_ = r.pub.SendPaneRyshOutput(r.paneID, sb.String())
 	slog.Info("web-record: finished", "pane", r.paneID, "frames", len(r.frames),
-		"dropped", r.dropped, "failed", r.failed, "out", r.outPath)
+		"dropped", r.dropped, "failed", r.failed, "timed_out", r.timedOut, "out", r.outPath)
 	ctx.Stop(ctx.Self())
 }
 
 // encode turns the frames into the output video via ffmpeg's concat demuxer.
 func (r *WebRecorderActor) encode() error {
+	// Frames are appended in ARRIVAL order but timestamped by REQUEST time, and
+	// once a capture the stall guard gave up on can still be kept, a slow
+	// answer can land after a later, faster one. Order by capture time so the
+	// video plays in the order the pixels actually happened.
+	sort.Slice(r.frames, func(i, j int) bool { return r.frames[i].at < r.frames[j].at })
+
 	concatPath := filepath.Join(r.framesDir, concatFileName)
 	if err := os.WriteFile(concatPath, []byte(buildConcatFile(r.frames, r.spec.Interval)), 0o644); err != nil {
 		return fmt.Errorf("write concat list: %w", err)

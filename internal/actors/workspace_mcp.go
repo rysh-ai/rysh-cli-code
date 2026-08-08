@@ -24,6 +24,7 @@ import (
 func (w *WorkspaceActor) handleMCPSubcommand(out *strings.Builder, paneID string, args []string) {
 	if w.agSetup == nil || w.agSetup.MCP == nil {
 		fmt.Fprintf(out, "\n[mcp] MCP is unavailable (agentic mode disabled?)\n")
+		w.failRysh("MCP is unavailable (agentic mode disabled?)")
 		return
 	}
 	mgr := w.agSetup.MCP
@@ -39,7 +40,8 @@ func (w *WorkspaceActor) handleMCPSubcommand(out *strings.Builder, paneID string
 
 	case "tools":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[mcp] usage: ##mcp tools <name>\n")
+			ryshWriter(out).UsageLineIn("mcp", "##mcp tools <name>")
+			w.failRyshUsage("usage: %s", "##mcp tools <name>")
 			return
 		}
 		w.mcpTools(out, mgr, args[1])
@@ -49,10 +51,12 @@ func (w *WorkspaceActor) handleMCPSubcommand(out *strings.Builder, paneID string
 		kind, sok := agentic.ParseScope(scopeStr)
 		if !sok {
 			fmt.Fprintf(out, "\n[mcp] unknown scope %q (use pane|panegroup|lane|tab)\n", scopeStr)
+			w.failRysh("unknown scope %q (use pane|panegroup|lane|tab)", scopeStr)
 			return
 		}
 		def, err := mcp.ParseAddArgs(rest)
 		if err != nil {
+			w.failRysh("%v", err)
 			fmt.Fprintf(out, "\n[mcp] %v\n", err)
 			w.mcpHelp(out)
 			return
@@ -76,7 +80,8 @@ func (w *WorkspaceActor) handleMCPSubcommand(out *strings.Builder, paneID string
 
 	case "reconnect":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[mcp] usage: ##mcp reconnect <name>\n")
+			ryshWriter(out).UsageLineIn("mcp", "##mcp reconnect <name>")
+			w.failRyshUsage("usage: %s", "##mcp reconnect <name>")
 			return
 		}
 		name := args[1]
@@ -95,18 +100,21 @@ func (w *WorkspaceActor) handleMCPSubcommand(out *strings.Builder, paneID string
 
 	case "remove", "rm", "delete":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[mcp] usage: ##mcp remove <name>\n")
+			ryshWriter(out).UsageLineIn("mcp", "##mcp remove <name>")
+			w.failRyshUsage("usage: %s", "##mcp remove <name>")
 			return
 		}
 		name := args[1]
 		if err := mgr.RemoveServer(name); err != nil {
+			w.failRysh("%v", err)
 			fmt.Fprintf(out, "\n[mcp] %v\n", err)
 			return
 		}
 		fmt.Fprintf(out, "\n[mcp] removed %q (tools unregistered, definition deleted)\n", name)
 
 	default:
-		fmt.Fprintf(out, "\n[mcp] unknown subcommand: %q\n", args[0])
+		ryshWriter(out).UnknownIn("mcp", args[0])
+		w.failRyshUsage("unknown %s subcommand: %q", "mcp", args[0])
 		w.mcpHelp(out)
 	}
 }

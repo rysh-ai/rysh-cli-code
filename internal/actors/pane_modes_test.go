@@ -114,6 +114,19 @@ func TestHandleDisableMode(t *testing.T) {
 			p.enabledModes, p.webURL, p.webProfile)
 	}
 
+	// "email" — enabled by a humanoid with an email channel — is removable by hand.
+	// It used to be unreachable from ##mode (normalizeModeName had no case for it),
+	// so a pane the humanoid had flipped to email could never be flipped back.
+	p.handleEnableMode("email", "", "", false)
+	p.mode = "email"
+	p.handleDisableMode("email", false)
+	if modesContain(p.enabledModes, "email") {
+		t.Fatalf("email still enabled: %v", p.enabledModes)
+	}
+	if p.mode != "shell" {
+		t.Fatalf("current mode not clamped to shell after email disable: %q", p.mode)
+	}
+
 	// A dynamic per-humanoid mode can be enabled then disabled, clearing its
 	// tracking + buffer.
 	p.handleEnableMode("email-bot", "", "", true)

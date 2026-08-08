@@ -4,10 +4,13 @@ package main
 // server always runs INSIDE a session's daemon (it is a WorkspaceActor child
 // serving that session's bus), so this command does not boot a server: it
 // drives the in-daemon `##rysh web start|stop` through the same path as
-// `rysh send`. What it adds over raw send is a complete, printable URL: the
-// daemon prints its access token into the pane, which is invisible for a
-// detached/headless session — so `rysh web start` generates the token
-// CLIENT-side, passes it explicitly, and prints the full ?token= URL here.
+// `rysh send`. What it adds over raw send is a printable URL: the daemon prints
+// its address into the pane, which is invisible for a detached/headless
+// session.
+//
+// The UI is guarded by a username/password login, so a session with no login
+// stored yet needs one passing through: `--username`/`--password` are forwarded
+// to the daemon, which stores them for later starts.
 
 import (
 	"errors"
@@ -19,15 +22,26 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/cli"
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
 	"github.com/rysh-ai/rysh-cli-code/internal/session"
-	"github.com/rysh-ai/rysh-cli-code/internal/web"
 )
 
 // webCmdDefaultPort mirrors the daemon-side default (workspace_web_args.go).
 const webCmdDefaultPort = 23232
 
+// firstFlagVal returns the value of whichever of the given flag names appears
+// first with a value — flagVal takes a single name, and the login flags each
+// have a short alias.
+func firstFlagVal(args []string, names ...string) string {
+	for _, n := range names {
+		if v := flagVal(args, n); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // buildWebStartCommand composes the in-daemon `##rysh web start` invocation.
 // Pure so the flag plumbing is testable without a session.
-func buildWebStartCommand(port int, host, token string, control, noToken bool) string {
+func buildWebStartCommand(port int, host, username, password string, control bool) string {
 	var b strings.Builder
 	b.WriteString("##rysh web start")
 	if port > 0 {
@@ -36,11 +50,11 @@ func buildWebStartCommand(port int, host, token string, control, noToken bool) s
 	if host != "" {
 		b.WriteString(" --host " + host)
 	}
-	switch {
-	case noToken:
-		b.WriteString(" --no-token")
-	case token != "":
-		b.WriteString(" --token " + token)
+	if username != "" {
+		b.WriteString(" --username " + username)
+	}
+	if password != "" {
+		b.WriteString(" --password " + password)
 	}
 	if control {
 		b.WriteString(" --control")
@@ -51,20 +65,16 @@ func buildWebStartCommand(port int, host, token string, control, noToken bool) s
 // webCmdURL renders the URL the daemon will serve, matching the daemon's
 // control-mode loopback downgrade so we never print an address that the
 // server refuses to bind.
-func webCmdURL(port int, host, token string, control bool) string {
+func webCmdURL(port int, host string, control bool) string {
 	if host == "" || control {
 		host = "127.0.0.1"
 	}
-	u := fmt.Sprintf("http://%s:%d/", host, port)
-	if token != "" {
-		u += "?token=" + token
-	}
-	return u
+	return fmt.Sprintf("http://%s:%d/", host, port)
 }
 
 // runWebCmd implements `rysh web start|stop <session> [flags]`.
 func runWebCmd(cfg config.Config, args []string) error {
-	usage := errors.New(progname.Rewrite("usage: rysh web start <session-name> [--control] [--port <n>] [--host <h>] [--no-token]\n") +
+	usage := errors.New(progname.Rewrite("usage: rysh web start <session-name> [--control] [--port <n>] [--host <h>] [--username <u> --password <p>]\n") +
 		progname.Rewrite("       rysh web stop <session-name>"))
 	if len(args) < 3 {
 		return usage
@@ -88,18 +98,25 @@ func runWebCmd(cfg config.Config, args []string) error {
 		}
 		host := flagVal(flags, "--host")
 		control := hasFlag(flags, "--control")
-		noToken := hasFlag(flags, "--no-token", "--no-auth")
-		token := flagVal(flags, "--token")
-		if token == "" && !noToken {
-			token = web.GenerateToken()
+		username := firstFlagVal(flags, "--username", "--user")
+		password := firstFlagVal(flags, "--password", "--pass")
+		// Half a login never reaches the daemon: it would be rejected there,
+		// one process and one pane away from the person who mistyped it.
+		if (username == "") != (password == "") {
+			return errors.New("pass both --username and --password, or neither to use the stored login")
 		}
 
-		cmd := buildWebStartCommand(port, host, token, control, noToken)
+		cmd := buildWebStartCommand(port, host, username, password, control)
 		if err := cli.PaneSendInput(store, sessName, "", cmd, "shell"); err != nil {
 			return err
 		}
 		fmt.Printf("requested web viewer in session %q\n", sessName)
-		fmt.Printf("  open:   %s\n", webCmdURL(port, host, token, control))
+		fmt.Printf("  open:   %s\n", webCmdURL(port, host, control))
+		if username != "" {
+			fmt.Printf("  login:  %s (stored for this workspace)\n", username)
+		} else if !control {
+			fmt.Printf("  login:  the workspace's stored login — set one with `##rysh web auth` if the start is refused\n")
+		}
 		if control {
 			fmt.Printf("  mode:   control (bind forced to 127.0.0.1)\n")
 		}

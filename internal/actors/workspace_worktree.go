@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 	"github.com/rysh-ai/rysh-cli-code/internal/worktree"
 )
@@ -28,10 +29,12 @@ func (w *WorkspaceActor) baseDir() string {
 func (w *WorkspaceActor) handleWorktreeCommand(out *strings.Builder, paneID string, args []string) {
 	if !worktree.IsGitRepo(w.baseDir()) {
 		fmt.Fprintf(out, "worktree: %s is not a git repository\n", w.baseDir())
+		w.failRysh("worktree: %s is not a git repository", w.baseDir())
 		return
 	}
 	root, err := worktree.RepoRoot(w.baseDir())
 	if err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "worktree: %v\n", err)
 		return
 	}
@@ -52,6 +55,7 @@ func (w *WorkspaceActor) handleWorktreeCommand(out *strings.Builder, paneID stri
 		w.worktreeCwd(out, root, paneID, args[1:])
 	default:
 		fmt.Fprintf(out, "usage: ##worktree new <branch> | list | status | cwd <branch> | remove <branch> | merge <branch> [--confirm]\n")
+		w.failRyshUsage("unknown ##worktree subcommand: %q", sub)
 	}
 }
 
@@ -82,6 +86,7 @@ func (w *WorkspaceActor) worktreeCwd(out *strings.Builder, root, paneID string, 
 	groupID := w.groupIDForPane(paneID)
 	if groupID == "" {
 		fmt.Fprintf(out, "worktree: could not resolve the active pane group\n")
+		w.failRysh("worktree: could not resolve the active pane group")
 		return
 	}
 
@@ -109,14 +114,8 @@ func (w *WorkspaceActor) groupIDForPane(paneID string) string {
 	if tabSnap == nil {
 		return ""
 	}
-	for li := range tabSnap.Lanes {
-		for gi := range tabSnap.Lanes[li].PaneGroups {
-			for _, p := range tabSnap.Lanes[li].PaneGroups[gi].Panes {
-				if p.ID == paneID {
-					return tabSnap.Lanes[li].PaneGroups[gi].ID
-				}
-			}
-		}
+	if g := domain.GroupOfPane(tabSnap, paneID); g != nil {
+		return g.ID
 	}
 	return ""
 }
@@ -130,6 +129,7 @@ func (w *WorkspaceActor) worktreeNew(out *strings.Builder, root string, args []s
 	path := worktree.Dir(root, branch)
 	if err := worktree.Add(root, path, branch); err != nil {
 		fmt.Fprintf(out, "worktree: create failed: %v\n", err)
+		w.failRysh("worktree: create failed: %v", err)
 		return
 	}
 	fmt.Fprintf(out, "worktree created: %s  (branch %s)\n", path, branch)
@@ -140,6 +140,7 @@ func (w *WorkspaceActor) worktreeNew(out *strings.Builder, root string, args []s
 func (w *WorkspaceActor) worktreeList(out *strings.Builder, root string, status bool) {
 	infos, err := worktree.List(root)
 	if err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "worktree: %v\n", err)
 		return
 	}
@@ -167,6 +168,7 @@ func (w *WorkspaceActor) worktreeRemove(out *strings.Builder, root string, args 
 	path := worktree.Dir(root, args[0])
 	clean, err := worktree.IsClean(path)
 	if err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "worktree: %v\n", err)
 		return
 	}
@@ -180,6 +182,7 @@ func (w *WorkspaceActor) worktreeRemove(out *strings.Builder, root string, args 
 	}
 	if err := worktree.Remove(root, path, false); err != nil {
 		fmt.Fprintf(out, "worktree: remove failed: %v\n", err)
+		w.failRysh("worktree: remove failed: %v", err)
 		return
 	}
 	fmt.Fprintf(out, "worktree removed: %s\n", path)
@@ -203,6 +206,7 @@ func (w *WorkspaceActor) worktreeMerge(out *strings.Builder, root string, args [
 		preview, err := worktree.MergePreview(root, branch)
 		if err != nil {
 			fmt.Fprintf(out, "worktree: preview failed: %v\n", err)
+			w.failRysh("worktree: preview failed: %v", err)
 			return
 		}
 		if strings.TrimSpace(preview) == "" {
@@ -215,6 +219,7 @@ func (w *WorkspaceActor) worktreeMerge(out *strings.Builder, root string, args [
 	res, err := worktree.Merge(root, branch)
 	if err != nil {
 		fmt.Fprintf(out, "worktree: merge failed (fail-closed — resolve conflicts manually):\n%s\n%v\n", res, err)
+		w.failRysh("worktree: merge failed (fail-closed — resolve conflicts manually):\n%s\n%v", res, err)
 		return
 	}
 	fmt.Fprintf(out, "merged %s:\n%s\n", branch, res)

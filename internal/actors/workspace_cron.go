@@ -209,6 +209,7 @@ func (w *WorkspaceActor) findCronJob(name string) *cron.Job {
 func (w *WorkspaceActor) handleCronCommand(ctx actor.Context, out *strings.Builder, paneID, rawCmd string) {
 	if w.cron == nil {
 		fmt.Fprintf(out, "\n[cron] cron service is not available in this workspace\n")
+		w.failRysh("cron service is not available in this workspace")
 		return
 	}
 	// Strip the leading "cron" token; keep the remainder verbatim for add.
@@ -226,25 +227,29 @@ func (w *WorkspaceActor) handleCronCommand(ctx actor.Context, out *strings.Build
 		w.cronAdd(out, strings.TrimSpace(strings.TrimPrefix(rest, "add")))
 	case "show":
 		if len(fields) < 2 {
-			fmt.Fprintf(out, "\n[cron] usage: ##cron show <name>\n")
+			ryshWriter(out).UsageLineIn("cron", "##cron show <name>")
+			w.failRyshUsage("usage: %s", "##cron show <name>")
 			return
 		}
 		w.cronShow(out, fields[1])
 	case "rm", "remove", "delete":
 		if len(fields) < 2 {
-			fmt.Fprintf(out, "\n[cron] usage: ##cron rm <name>\n")
+			ryshWriter(out).UsageLineIn("cron", "##cron rm <name>")
+			w.failRyshUsage("usage: %s", "##cron rm <name>")
 			return
 		}
 		w.cronRemove(out, fields[1])
 	case "enable", "disable":
 		if len(fields) < 2 {
-			fmt.Fprintf(out, "\n[cron] usage: ##cron %s <name>\n", sub)
+			ryshWriter(out).UsageLineIn("cron", fmt.Sprintf("##cron %s <name>", sub))
+			w.failRyshUsage("usage: %s", fmt.Sprintf("##cron %s <name>", sub))
 			return
 		}
 		w.cronSetEnabled(out, fields[1], sub == "enable")
 	case "run":
 		if len(fields) < 2 {
-			fmt.Fprintf(out, "\n[cron] usage: ##cron run <name>\n")
+			ryshWriter(out).UsageLineIn("cron", "##cron run <name>")
+			w.failRyshUsage("usage: %s", "##cron run <name>")
 			return
 		}
 		w.cronRunNow(ctx, out, fields[1])
@@ -252,7 +257,8 @@ func (w *WorkspaceActor) handleCronCommand(ctx actor.Context, out *strings.Build
 		w.cronNext(out)
 	case "logs":
 		if len(fields) < 2 {
-			fmt.Fprintf(out, "\n[cron] usage: ##cron logs <name> [N]\n")
+			ryshWriter(out).UsageLineIn("cron", "##cron logs <name> [N]")
+			w.failRyshUsage("usage: %s", "##cron logs <name> [N]")
 			return
 		}
 		n := 10
@@ -265,27 +271,30 @@ func (w *WorkspaceActor) handleCronCommand(ctx actor.Context, out *strings.Build
 	case "help":
 		w.cronUsage(out)
 	default:
-		fmt.Fprintf(out, "\n[cron] unknown subcommand: %q\n", sub)
+		ryshWriter(out).UnknownIn("cron", sub)
+		w.failRyshUsage("unknown %s subcommand: %q", "cron", sub)
 		w.cronUsage(out)
 	}
 }
 
 func (w *WorkspaceActor) cronUsage(out *strings.Builder) {
-	fmt.Fprintf(out, "\n[rysh] usage:\n")
-	fmt.Fprintf(out, "  ##cron add <name> \"<schedule>\" [--pane <id|name|active>] [--mode M] <input...>\n")
-	fmt.Fprintf(out, "  ##cron list | show <name> | next\n")
-	fmt.Fprintf(out, "  ##cron enable <name> | disable <name> | rm <name>\n")
-	fmt.Fprintf(out, "  ##cron run <name>            fire now (test without waiting)\n")
-	fmt.Fprintf(out, "  ##cron logs <name> [N]       last N run records (default 10)\n")
-	fmt.Fprintf(out, "  schedule: 5-field cron (\"0 9 * * *\"), or @every 15m / @daily / @hourly\n")
-	fmt.Fprintf(out, "  jobs fire while the session daemon is alive (running or detached)\n\n")
+	ryshWriter(out).Usage(
+		"##cron add <name> \"<schedule>\" [--pane <id|name|active>] [--mode M] <input...>",
+		"##cron list | show <name> | next",
+		"##cron enable <name> | disable <name> | rm <name>",
+		"##cron run <name>            fire now (test without waiting)",
+		"##cron logs <name> [N]       last N run records (default 10)",
+		"schedule: 5-field cron (\"0 9 * * *\"), or @every 15m / @daily / @hourly",
+		"jobs fire while the session daemon is alive (running or detached)",
+	)
 }
 
 // cronAdd parses `<name> "<schedule>" [--pane P] [--mode M] <input...>`.
 func (w *WorkspaceActor) cronAdd(out *strings.Builder, argstr string) {
 	name, rest := nextToken(argstr)
 	if name == "" {
-		fmt.Fprintf(out, "\n[cron] usage: ##cron add <name> \"<schedule>\" [--pane P] [--mode M] <input...>\n")
+		ryshWriter(out).UsageLineIn("cron", "##cron add <name> \"<schedule>\" [--pane P] [--mode M] <input...>")
+		w.failRyshUsage("usage: %s", "##cron add <name> \"<schedule>\" [--pane P] [--mode M] <input...>")
 		return
 	}
 	schedule, rest := extractSchedule(rest)
@@ -322,14 +331,17 @@ flagsDone:
 	}
 	if mode != "" && mode != "shell" && mode != "prompt" && mode != "rysh" {
 		fmt.Fprintf(out, "\n[cron] invalid --mode %q (shell|prompt|rysh)\n", mode)
+		w.failRysh("invalid --mode %q (shell|prompt|rysh)", mode)
 		return
 	}
 	if err := cron.Validate(name, schedule, tz, input); err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "\n[cron] %v\n", err)
 		return
 	}
 	if w.findCronJob(name) != nil {
 		fmt.Fprintf(out, "\n[cron] a job named %q already exists — rm it first or pick another name\n", name)
+		w.failRysh("a job named %q already exists — rm it first or pick another name", name)
 		return
 	}
 	if len(w.cron.jobs) >= cron.MaxJobs {
@@ -421,6 +433,7 @@ func (w *WorkspaceActor) cronSetEnabled(out *strings.Builder, name string, enabl
 	if enabled {
 		if err := j.ComputeNext(time.Now()); err != nil {
 			fmt.Fprintf(out, "\n[cron] cannot enable %q: %v\n", name, err)
+			w.failRysh("cannot enable %q: %v", name, err)
 			j.Enabled = false
 			return
 		}

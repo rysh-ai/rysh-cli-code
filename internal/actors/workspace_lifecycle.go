@@ -62,7 +62,7 @@ func (w *WorkspaceActor) handleActivate(m *activateWorkspaceMsg) {
 		w.attachWS()
 	}
 	if m.replyTo != "" {
-		_ = w.pub.Send(m.replyTo, &msg.MsgWorkspaceSnapshotReply{Snapshot: w.collectSnapshot(false)})
+		_ = w.pub.Send(m.replyTo, &msg.MsgWorkspaceSnapshotReply{Snapshot: w.collectSnapshot(false, false)})
 	}
 }
 

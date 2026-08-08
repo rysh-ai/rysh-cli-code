@@ -65,6 +65,50 @@ type humanoidDefinition struct {
 	Contacts     map[string]msg.ChannelConfig
 }
 
+// contactHasExplicitKey reports whether the raw frontmatter's
+// contacts.<channelType> block carries the key at all. ChannelConfig.Relay is
+// a plain bool, so after unmarshaling `relay: false` and "key absent" look
+// identical — but conflict detection in normalizeWhatsAppRelayMode must
+// distinguish an explicit `relay: false` from mere omission.
+func contactHasExplicitKey(fmRaw, channelType, key string) bool {
+	var probe struct {
+		Contacts map[string]map[string]any `yaml:"contacts"`
+	}
+	if err := yaml.Unmarshal([]byte(fmRaw), &probe); err != nil {
+		return false
+	}
+	_, ok := probe.Contacts[channelType][key]
+	return ok
+}
+
+// normalizeWhatsAppRelayMode maps the documented `mode:` spelling onto the
+// canonical `relay:` switch for a whatsapp contact block. `relay: true` stays
+// canonical; `mode: relay` is an accepted alias and `mode: direct` an explicit
+// opt-in to the default. Anything else fails loudly — mirroring how agent
+// skill files reject an `isolation:` typo — because a mistyped mode silently
+// running DIRECT would pull the Graph token down to the laptop that relay mode
+// exists to protect. A conflict between the two spellings is an error too:
+// picking either side silently would honor a config the author never wrote.
+// relayExplicit reports whether the block spelled out a `relay:` key.
+func normalizeWhatsAppRelayMode(cc msg.ChannelConfig, relayExplicit bool) (msg.ChannelConfig, error) {
+	switch mode := strings.ToLower(strings.TrimSpace(cc.Mode)); mode {
+	case "":
+		// No mode key: `relay:` alone decides (absent = direct, the default).
+	case "relay":
+		if relayExplicit && !cc.Relay {
+			return cc, fmt.Errorf("whatsapp: conflicting relay settings: `mode: relay` with `relay: false` — remove one (canonical spelling is `relay: true`)")
+		}
+		cc.Relay = true
+	case "direct":
+		if cc.Relay {
+			return cc, fmt.Errorf("whatsapp: conflicting relay settings: `mode: direct` with `relay: true` — remove one")
+		}
+	default:
+		return cc, fmt.Errorf("whatsapp: unknown mode %q (use \"relay\" or \"direct\"; canonical relay spelling is `relay: true`)", cc.Mode)
+	}
+	return cc, nil
+}
+
 // envVarPattern matches ${VAR_NAME} references in config values.
 var envVarPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
@@ -216,6 +260,16 @@ func parseHumanoidFile(path string, expand func(string) string) (*humanoidDefini
 	resolved := make(map[string]msg.ChannelConfig, len(fm.Contacts))
 	for channelType, cc := range fm.Contacts {
 		cc = resolveChannelEnvVars(cc, expand)
+		// WhatsApp: fold the `mode:` alias into the canonical `relay:` switch
+		// (or fail loudly on a typo/conflict) — the adapter and the upstream
+		// credential fetch key exclusively off cc.Relay.
+		if channelType == "whatsapp" {
+			var err error
+			cc, err = normalizeWhatsAppRelayMode(cc, contactHasExplicitKey(fmRaw, channelType, "relay"))
+			if err != nil {
+				return nil, fmt.Errorf("humanoid %s: %w", path, err)
+			}
+		}
 		// Default Enabled to true if the block is present.
 		if !cc.Enabled {
 			cc.Enabled = true

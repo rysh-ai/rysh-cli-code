@@ -50,7 +50,7 @@ func TestSlackSendToolRequiresApproval(t *testing.T) {
 
 func TestSlackSendToolResolvesDraft(t *testing.T) {
 	drafts := channels.NewDraftStore()
-	id := drafts.Create("C0123ABC", "", "hello", "1720000000.000100")
+	id := drafts.Create("slack", "C0123ABC", "", "hello", "1720000000.000100")
 	// Adapter is not connected, so Send fails — but this proves the tool resolves
 	// the draft (gets past the lookup) and surfaces the adapter error cleanly.
 	tool := NewSlackSendTool(channels.NewSlackAdapter(msg.ChannelConfig{}), drafts, nil)

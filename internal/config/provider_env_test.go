@@ -1,16 +1,19 @@
 package config
 
-// Tests for the Gemini key sourcing in applyEnvOverrides (design 002 §3.4,
-// roadmap B6). The documented invocation is:
+// Tests for the per-provider key sourcing in applyEnvOverrides (design 002
+// §3.4, roadmap B6). The documented invocation is:
 //
-//	RYSH_PROVIDER=gemini GEMINI_API_KEY=... rysh
+//	RYSH_PROVIDER=<name> <NAME>_API_KEY=... rysh
 //
-// with GOOGLE_API_KEY as the fallback variable. The dangerous cases are key
-// CROSS-CONTAMINATION: an ambient ANTHROPIC_API_KEY must never be handed to
-// Gemini (a foreign key just yields a confusing upstream 401), and RYSH_API_KEY
-// stays the explicit override for every provider.
+// with GOOGLE_API_KEY as Gemini's fallback variable. The dangerous cases are
+// key CROSS-CONTAMINATION: an ambient ANTHROPIC_API_KEY must never be handed to
+// OpenAI or Gemini (a foreign key just yields a confusing upstream 401), and
+// RYSH_API_KEY stays the explicit override for every provider.
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 // clearProviderKeyEnv blanks every variable applyEnvOverrides consults for the
 // provider/key pair, so ambient developer environments can't skew the test.
@@ -18,9 +21,59 @@ func clearProviderKeyEnv(t *testing.T) {
 	t.Helper()
 	for _, v := range []string{
 		"RYSH_PROVIDER", "RYSH_API_KEY",
-		"ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
+		"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OLLAMA_API_KEY",
+		"GEMINI_API_KEY", "GOOGLE_API_KEY",
 	} {
 		t.Setenv(v, "")
+	}
+}
+
+// TestApplyEnvOverrides_KeyVarPerProvider walks the whole table: each family
+// takes its own conventional variable, and none of them inherits another
+// family's key.
+func TestApplyEnvOverrides_KeyVarPerProvider(t *testing.T) {
+	for _, tc := range []struct {
+		provider string
+		setVar   string
+		wantKey  string
+		// ownVars are every variable this family may legitimately read, so the
+		// cross-contamination case sets only the ones it must ignore.
+		ownVars []string
+	}{
+		{"openai", "OPENAI_API_KEY", "oai-key", []string{"OPENAI_API_KEY"}},
+		{"gemini", "GEMINI_API_KEY", "gem-key", []string{"GEMINI_API_KEY", "GOOGLE_API_KEY"}},
+		{"ollama", "OLLAMA_API_KEY", "olm-key", []string{"OLLAMA_API_KEY"}},
+		{"claude", "ANTHROPIC_API_KEY", "ant-key", []string{"ANTHROPIC_API_KEY"}},
+		// An unset provider is the Claude default.
+		{"", "ANTHROPIC_API_KEY", "ant-key", []string{"ANTHROPIC_API_KEY"}},
+	} {
+		name := tc.provider
+		if name == "" {
+			name = "(unset)"
+		}
+		t.Run(name, func(t *testing.T) {
+			clearProviderKeyEnv(t)
+			t.Setenv("RYSH_PROVIDER", tc.provider)
+			t.Setenv(tc.setVar, tc.wantKey)
+			if cfg := applyEnvOverrides(Config{}); cfg.APIKey != tc.wantKey {
+				t.Fatalf("APIKey = %q, want %q from %s", cfg.APIKey, tc.wantKey, tc.setVar)
+			}
+		})
+
+		t.Run(name+"/no foreign key", func(t *testing.T) {
+			clearProviderKeyEnv(t)
+			t.Setenv("RYSH_PROVIDER", tc.provider)
+			// Every OTHER family's variable is set; this provider must pick up
+			// none of them.
+			for _, other := range []string{"OPENAI_API_KEY", "OLLAMA_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY"} {
+				if !slices.Contains(tc.ownVars, other) {
+					t.Setenv(other, "foreign-"+other)
+				}
+			}
+			if cfg := applyEnvOverrides(Config{}); cfg.APIKey != "" {
+				t.Fatalf("APIKey = %q — a foreign key was handed to %q", cfg.APIKey, tc.provider)
+			}
+		})
 	}
 }
 

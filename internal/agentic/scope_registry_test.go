@@ -87,7 +87,8 @@ func TestScopeVisibility(t *testing.T) {
 func TestScopeRegistryForIdempotent(t *testing.T) {
 	svc := NewScopeRegistries(tools.NewToolRegistry())
 	ids := ScopeIDs{TabID: "t", LaneID: "l", GroupID: "g", PaneID: "p"}
-	if svc.RegistryFor(ScopeLane, ids) != svc.RegistryFor(ScopeLane, ids) {
+	first, second := svc.RegistryFor(ScopeLane, ids), svc.RegistryFor(ScopeLane, ids)
+	if first != second {
 		t.Fatalf("RegistryFor must return the same instance for the same scope id")
 	}
 	// A pane-scope enable must target the same instance PaneChain handed out.

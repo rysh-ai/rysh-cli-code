@@ -15,7 +15,14 @@ import "github.com/rysh-ai/rysh-cli-code/internal/agentic"
 // `##humanoid governance <name> ai|human` work in both directions at runtime
 // without respawning the actor.
 func (h *HumanoidActor) channelTools() agentic.HumanoidChannelTools {
-	ct := agentic.HumanoidChannelTools{SlackHumanGoverned: h.slackHumanGoverned}
+	// All three send gates are wired regardless of the spawn-time mode: they
+	// are read per call, so a runtime `##humanoid governance` flip gates (or
+	// un-gates) the very next send without a respawn.
+	ct := agentic.HumanoidChannelTools{
+		SlackHumanGoverned:    h.slackHumanGoverned,
+		EmailHumanGoverned:    h.emailHumanGoverned,
+		WhatsAppHumanGoverned: h.whatsappHumanGoverned,
+	}
 	if h.whatsappGovernance == "human" && h.whatsappAdapter != nil {
 		ct.WhatsApp = h.whatsappAdapter
 	}

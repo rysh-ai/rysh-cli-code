@@ -1,0 +1,54 @@
+#!/usr/bin/env -S rysh script
+#
+# A .rysh file is a bash script whose ##-prefixed lines are rysh commands.
+#
+#   rysh script deploy-check.rysh staging    # rysh lines run
+#   bash        deploy-check.rysh staging    # rysh lines are comments
+#
+# Both work. That is the point: the file is honest bash, so shellcheck, your
+# editor and every bash construct keep working, and a reader who has never seen
+# rysh can still follow it.
+#
+# Check both halves of that contract with:  rysh script deploy-check.rysh --check
+
+set -euo pipefail
+
+TARGET="${1:-staging}"
+echo "== preparing a workspace for $TARGET =="
+
+# A ## line in statement position is a rysh command. Its output is printed AND
+# captured into $RYSH_OUT; its exit status lands in $RYSH_STATUS and $?.
+##new tab
+##tab list
+
+# Branch on what a command printed. Use ${RYSH_OUT:-} so the script still runs
+# under plain bash with `set -u`, where the variable is never set.
+if [[ "${RYSH_OUT:-}" == *"tabs (1 total)"* ]]; then
+  # NOTE the leading ":" — bash needs a non-empty body for every block, and a
+  # ## line is a comment to bash. ":" is bash's no-op, so this stays valid bash
+  # AND runs as a rysh command. Use it whenever a ## line is a block's only
+  # statement; `--check` tells you exactly where.
+  : ##new tab
+fi
+
+# ## commands compose with bash's own plumbing — pipes, redirects, && and ||.
+##tab list | grep -c 'tab-'
+##pane info > "/tmp/rysh-$TARGET-panes.txt"
+
+# A failing command is a failing command: set -e would abort here, so catch it.
+: ##session switch definitely-not-a-session || echo "  (expected failure, status $RYSH_STATUS)"
+
+# Bash drives rysh, not the other way around: loops, functions, arrays, traps.
+for name in build test lint; do
+  : ##variable new "STAGE_$name" pending
+done
+##variable list
+
+# ##prompt sends a prompt to the pane and BLOCKS until the agentic turn ends,
+# leaving the agent's answer in $RYSH_OUT. It is a script command — at the
+# keyboard you would use prompt mode instead.
+#
+#   ##prompt summarise what changed in this repo today
+#   echo "$RYSH_OUT" > /tmp/summary.txt
+
+echo "== done for $TARGET =="

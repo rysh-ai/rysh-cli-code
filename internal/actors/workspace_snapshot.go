@@ -33,7 +33,7 @@ func (w *WorkspaceActor) cachedSnapshot() domain.WorkspaceSnapshot {
 	if w.snapCacheValid && time.Since(w.snapCacheTime) < snapshotCacheTTL {
 		return w.snapCache
 	}
-	snap := w.collectSnapshot(false)
+	snap := w.collectSnapshot(false, false)
 	w.snapCache = snap
 	w.snapCacheTime = time.Now()
 	w.snapCacheValid = true
@@ -41,17 +41,40 @@ func (w *WorkspaceActor) cachedSnapshot() domain.WorkspaceSnapshot {
 }
 
 // cachedLayoutSnapshot serves the TUI's event-driven layout fetch: the
-// structural snapshot with per-pane content (output/history/VT) omitted, so the
-// cascade carries almost nothing heavy. Cached separately from the full
-// snapshot and invalidated together by persistToKV.
+// structural snapshot with per-pane output/VT omitted, so the cascade carries
+// no display buffers. It still carries command history, which the TUI reads
+// from it for arrow-key recall. Cached separately from the full snapshot and
+// invalidated together by persistToKV.
 func (w *WorkspaceActor) cachedLayoutSnapshot() domain.WorkspaceSnapshot {
 	if w.snapLayoutCacheValid && time.Since(w.snapLayoutCacheTime) < snapshotCacheTTL {
 		return w.snapLayoutCache
 	}
-	snap := w.collectSnapshot(true)
+	snap := w.collectSnapshot(true, false)
 	w.snapLayoutCache = snap
 	w.snapLayoutCacheTime = time.Now()
 	w.snapLayoutCacheValid = true
+	return snap
+}
+
+// cachedStructuralSnapshot serves callers that need only the shape of the
+// workspace and the per-pane flags — no display buffers AND no command history.
+// The web server's streamPaneVT is the reason it exists: it polls at 10Hz and
+// reads nothing but pane ids and RawMode/RemoteInteractive, while the layout
+// snapshot it used to request carried a 28.9 KB shell_history per pane, 97.5% of
+// the reply, duplicated across every pane (F-7c).
+//
+// Cached separately from the layout snapshot rather than derived from it: the
+// cost being avoided is the per-pane cascade traffic itself, so the histories
+// have to be left out at the PaneActor, not stripped after they have already
+// crossed the bus.
+func (w *WorkspaceActor) cachedStructuralSnapshot() domain.WorkspaceSnapshot {
+	if w.snapStructCacheValid && time.Since(w.snapStructCacheTime) < snapshotCacheTTL {
+		return w.snapStructCache
+	}
+	snap := w.collectSnapshot(true, true)
+	w.snapStructCache = snap
+	w.snapStructCacheTime = time.Now()
+	w.snapStructCacheValid = true
 	return snap
 }
 
@@ -63,7 +86,7 @@ func (w *WorkspaceActor) cachedLayoutSnapshot() domain.WorkspaceSnapshot {
 // tabs. layoutOnly is propagated through Tab→Lane→Group→Pane so per-pane content
 // buffers are omitted (the layout fetch); mirror tabs are always rendered fully
 // since their content is assembled locally (no per-pane cascade).
-func (w *WorkspaceActor) collectSnapshot(layoutOnly bool) domain.WorkspaceSnapshot {
+func (w *WorkspaceActor) collectSnapshot(layoutOnly, noHistories bool) domain.WorkspaceSnapshot {
 	snap := domain.WorkspaceSnapshot{
 		Tabs:            make([]domain.TabSnapshot, 0, len(w.tabs)),
 		ActivePaneID:    w.activePaneID,
@@ -80,7 +103,7 @@ func (w *WorkspaceActor) collectSnapshot(layoutOnly bool) domain.WorkspaceSnapsh
 	fetch := func(i int, id, title string) {
 		reply, err := w.pub.Request(
 			msg.T("tab", id, "snapshot"),
-			&msg.MsgGetTabSnapshot{LayoutOnly: layoutOnly},
+			&msg.MsgGetTabSnapshot{LayoutOnly: layoutOnly, NoHistories: noHistories},
 			2*snapshotTimeout,
 		)
 		if err != nil {
@@ -232,6 +255,11 @@ func (w *WorkspaceActor) persistToKV() {
 	// reflects the change immediately, without a blind poll.
 	w.invalidateSnapshotCaches()
 	w.notifyLayoutDirty()
+	// A structural change can add panes under an already-bound scope, so the
+	// model hierarchy needs re-resolving. Flagged here and reconciled on the
+	// next snapshot tick rather than inline: resolution costs one request per
+	// tab, which does not belong on every focus/move.
+	w.modelFanoutDirty = true
 	if time.Since(w.lastKVWrite) < workspaceKVInterval {
 		return
 	}
@@ -271,6 +299,7 @@ func (w *WorkspaceActor) persistToKVDeferred() {
 func (w *WorkspaceActor) invalidateSnapshotCaches() {
 	w.snapCacheValid = false
 	w.snapLayoutCacheValid = false
+	w.snapStructCacheValid = false
 }
 
 // notifyLayoutDirty publishes a lightweight signal that the workspace layout
@@ -292,6 +321,22 @@ func (w *WorkspaceActor) maybeFlushKV() {
 	if w.kvDirty && time.Since(w.lastKVWrite) >= workspaceKVInterval {
 		w.persistToKVNow()
 	}
+	w.reconcileModelFanout()
+}
+
+// reconcileModelFanout re-resolves the model hierarchy after a structural
+// change, so a pane created under an already-bound tab/lane/stack inherits it
+// instead of silently running the session default. Free when nothing is bound,
+// which is the overwhelmingly common case.
+func (w *WorkspaceActor) reconcileModelFanout() {
+	if !w.modelFanoutDirty {
+		return
+	}
+	w.modelFanoutDirty = false
+	if len(w.modelBindings) == 0 && len(w.paneInheritedModel) == 0 {
+		return
+	}
+	w.applyInheritedModels()
 }
 
 // persistToKVNow writes workspace state to KV immediately, bypassing the
@@ -418,7 +463,7 @@ func (w *WorkspaceActor) restoreFromKV(ctx actor.Context) bool {
 			}
 		}
 
-		ta := NewTabActorFromKV(w.cfg, w.pub, w.nc, w.agSetup, w.paneKV, tkvCopy)
+		ta := NewTabActorFromKV(w.cfg, w.pub, w.nc, w.agSetup, w.paneKV, w.childSecretResolver(), tkvCopy)
 		tabProps := actor.PropsFromProducer(func() actor.Actor { return ta })
 		pid := ctx.Spawn(tabProps)
 

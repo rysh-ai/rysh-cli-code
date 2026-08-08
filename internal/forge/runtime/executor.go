@@ -178,7 +178,7 @@ func (e *HTTPExecutor) Call(ctx context.Context, op *ir.Operation, args map[stri
 			continue
 		}
 
-		text := string(data)
+		var text string
 		if jqFilter != "" {
 			if filtered, ferr := ApplyJQ(data, jqFilter); ferr == nil {
 				text = filtered

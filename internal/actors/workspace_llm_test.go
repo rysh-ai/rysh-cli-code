@@ -4,7 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/agentic"
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
+	"github.com/rysh-ai/rysh-cli-code/internal/provider"
 	"github.com/rysh-ai/rysh-cli-code/internal/webauto"
 )
 
@@ -13,7 +15,7 @@ import (
 func llmCmd(t *testing.T, w *WorkspaceActor, args ...string) string {
 	t.Helper()
 	var out strings.Builder
-	w.handleLLMCommand(&out, args)
+	w.handleLLMCommand(&out, "", args)
 	return out.String()
 }
 
@@ -44,10 +46,16 @@ func TestLLMCommand_Subcommands(t *testing.T) {
 		t.Errorf("list after add missing gpt55: %s", out)
 	}
 	out = llmCmd(t, w, "info", "openai/gpt55")
-	for _, want := range []string{"model id    : gpt55", "executable  : no", "file        :"} {
+	for _, want := range []string{"model id    : gpt55", "executable  : yes", "file        :"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("info output missing %q:\n%s", want, out)
 		}
+	}
+
+	// A provider rysh has no executor for reports so — grok is the only one
+	// left, now that the executor speaks the OpenAI-compatible dialects.
+	if out = llmCmd(t, w, "info", "grok/grok-4"); !strings.Contains(out, "executable  : no") {
+		t.Errorf("info on a non-executable provider:\n%s", out)
 	}
 
 	// model add stays as a back-compat alias.
@@ -63,15 +71,21 @@ func TestLLMCommand_Subcommands(t *testing.T) {
 		t.Errorf("info unknown output: %s", out)
 	}
 
-	// use on a non-anthropic model refuses activation but keeps the entry.
-	if out = llmCmd(t, w, "use", "openai/gpt55"); !strings.Contains(out, "NOT activatable") {
-		t.Errorf("use non-anthropic output: %s", out)
+	// use on a model whose provider has no executor refuses activation but
+	// keeps the entry. This used to be every non-anthropic model, which meant
+	// ##llm refused openai/gemini models that ##pane model would happily run.
+	if out = llmCmd(t, w, "use", "grok/grok-4"); !strings.Contains(out, "NOT activatable") {
+		t.Errorf("use on a non-executable provider: %s", out)
 	}
 
-	// use on an anthropic model without agSetup reports the setup gap
-	// (activation itself is exercised via the provider SessionDefaults tests).
-	if out = llmCmd(t, w, "use", "anthropic/fable5"); !strings.Contains(out, "agentic setup unavailable") {
-		t.Errorf("use without setup output: %s", out)
+	// Without an agentic setup there is nowhere to install a session default,
+	// and that must be said rather than silently swallowed — for a same-family
+	// and a cross-family selection alike. (The switch itself is exercised in
+	// TestLLMUse_CrossFamilySwitchesProvider below.)
+	for _, ref := range []string{"anthropic/fable5", "openai/gpt55"} {
+		if out = llmCmd(t, w, "use", ref); !strings.Contains(out, "agentic setup unavailable") {
+			t.Errorf("use %s without setup output: %s", ref, out)
+		}
 	}
 
 	// Unknown bare word → usage listing all subcommands.
@@ -114,5 +128,77 @@ func TestLLMCommand_Status(t *testing.T) {
 	w.cfg.DefaultModel = "claude-sonnet-5"
 	if out = llmCmd(t, w, "status"); !strings.Contains(out, "claude-sonnet-5 (rysh.config.yaml)") {
 		t.Errorf("status config-default label:\n%s", out)
+	}
+}
+
+// TestLLMCommand_EnableDisable pins the enable/disable surface: disabling
+// leaves the entry listed but marked and refuses activation, and re-enabling
+// restores it.
+func TestLLMCommand_EnableDisable(t *testing.T) {
+	w := newLLMTestWorkspace(t)
+	llmCmd(t, w) // seed
+
+	if out := llmCmd(t, w, "disable", "anthropic/fable5"); !strings.Contains(out, "anthropic/fable5 disabled") {
+		t.Errorf("disable output: %s", out)
+	}
+
+	// Still listed, now marked.
+	out := llmCmd(t, w, "list")
+	if !strings.Contains(out, "fable5") || !strings.Contains(out, "[disabled]") {
+		t.Errorf("list after disable:\n%s", out)
+	}
+	if out = llmCmd(t, w, "info", "anthropic/fable5"); !strings.Contains(out, "enabled     : no") {
+		t.Errorf("info after disable:\n%s", out)
+	}
+
+	// Activation is refused — and the refusal names the way back.
+	if out = llmCmd(t, w, "use", "anthropic/fable5"); !strings.Contains(out, "##llm enable anthropic/fable5") {
+		t.Errorf("use disabled output: %s", out)
+	}
+
+	// The flag survives a round-trip through the registry file: re-enabling
+	// restores activatability (here: the agSetup gap, not the disabled gate).
+	if out = llmCmd(t, w, "enable", "anthropic/fable5"); !strings.Contains(out, "anthropic/fable5 enabled") {
+		t.Errorf("enable output: %s", out)
+	}
+	if out = llmCmd(t, w, "use", "anthropic/fable5"); !strings.Contains(out, "agentic setup unavailable") {
+		t.Errorf("use after enable: %s", out)
+	}
+	if out = llmCmd(t, w, "list"); strings.Contains(out, "[disabled]") {
+		t.Errorf("list still marks disabled after enable:\n%s", out)
+	}
+
+	// Unknown ref points at add; a bare word without a slash reports usage.
+	if out = llmCmd(t, w, "disable", "anthropic/nope"); !strings.Contains(out, "##llm add anthropic/nope") {
+		t.Errorf("disable unknown output: %s", out)
+	}
+	if out = llmCmd(t, w, "disable"); !strings.Contains(out, "usage: ##llm disable") {
+		t.Errorf("disable without ref: %s", out)
+	}
+}
+
+// TestLLMCommand_DisableActiveDefault pins the safety rule: disabling the
+// model currently in effect must not leave the session running on it.
+func TestLLMCommand_DisableActiveDefault(t *testing.T) {
+	w := newLLMTestWorkspace(t)
+	w.agSetup = &agentic.Setup{SessionLLM: provider.NewSessionDefaults()}
+	llmCmd(t, w) // seed
+
+	if out := llmCmd(t, w, "use", "anthropic/fable5"); !strings.Contains(out, "session default set") {
+		t.Fatalf("use output: %s", out)
+	}
+	if model, _ := w.agSetup.SessionLLM.Get(); model != "claude-fable-5" {
+		t.Fatalf("session default not installed: %q", model)
+	}
+
+	out := llmCmd(t, w, "disable", "anthropic/fable5")
+	if !strings.Contains(out, "it was the session default") {
+		t.Errorf("disable active default output:\n%s", out)
+	}
+	if model, effort := w.agSetup.SessionLLM.Get(); model != "" || effort != "" {
+		t.Errorf("session default still installed after disabling it: %q/%q", model, effort)
+	}
+	if w.sessionLLMRef != "" {
+		t.Errorf("sessionLLMRef not cleared: %q", w.sessionLLMRef)
 	}
 }

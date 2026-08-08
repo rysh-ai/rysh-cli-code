@@ -5,6 +5,7 @@ import (
 
 	"github.com/asynkron/protoactor-go/actor"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 )
 
@@ -29,14 +30,8 @@ func (w *WorkspaceActor) handleCLIDeleteTab(ctx actor.Context, m *msg.MsgCLIDele
 
 	// Release all pane aliases belonging to this tab.
 	tabSnap := w.queryTabSnapshot(info.id)
-	if tabSnap != nil {
-		for _, lane := range tabSnap.Lanes {
-			for _, g := range lane.PaneGroups {
-				for _, ps := range g.Panes {
-					w.releaseAlias(ps.Title)
-				}
-			}
-		}
+	for p := range domain.PanesInTab(tabSnap) {
+		w.releaseAlias(p.Title)
 	}
 
 	ctx.Stop(info.pid)
@@ -85,16 +80,8 @@ func (w *WorkspaceActor) handleCLIDeleteLane(m *msg.MsgCLIDeleteLane) *msg.MsgCL
 	if tab == nil {
 		// Search all tabs for this lane.
 		for _, t := range w.tabs {
-			tabSnap := w.queryTabSnapshot(t.id)
-			if tabSnap != nil {
-				for _, lane := range tabSnap.Lanes {
-					if lane.ID == m.LaneID {
-						tab = t
-						break
-					}
-				}
-			}
-			if tab != nil {
+			if domain.FindLaneByID(w.queryTabSnapshot(t.id), m.LaneID) != nil {
+				tab = t
 				break
 			}
 		}
@@ -105,22 +92,13 @@ func (w *WorkspaceActor) handleCLIDeleteLane(m *msg.MsgCLIDeleteLane) *msg.MsgCL
 
 	// Release aliases for all panes in this lane and count resources for decrement.
 	worktreeReport := ""
-	tabSnap := w.queryTabSnapshot(tab.id)
-	if tabSnap != nil {
-		for li := range tabSnap.Lanes {
-			lane := &tabSnap.Lanes[li]
-			if lane.ID == m.LaneID {
-				for _, g := range lane.PaneGroups {
-					for _, ps := range g.Panes {
-						w.releaseAlias(ps.Title)
-					}
-					w.resCounts.panes -= len(g.Panes)
-				}
-				// Worktree cleanup-on-close (design 008) for the lane's groups.
-				worktreeReport = w.releaseWorktreesInLaneSnap(lane)
-				break
-			}
+	if lane := domain.FindLaneByID(w.queryTabSnapshot(tab.id), m.LaneID); lane != nil {
+		for p := range domain.PanesInLane(lane) {
+			w.releaseAlias(p.Title)
 		}
+		w.resCounts.panes -= domain.CountPanesInLane(lane)
+		// Worktree cleanup-on-close (design 008) for the lane's groups.
+		worktreeReport = w.releaseWorktreesInLaneSnap(lane)
 	}
 
 	_ = w.pub.Send(msg.T("tab", tab.id, "inbox"), &msg.MsgTabDeleteLane{LaneID: m.LaneID})
@@ -173,22 +151,18 @@ func (w *WorkspaceActor) handleCLIDeletePaneGroup(m *msg.MsgCLIDeletePaneGroup) 
 			if tabSnap == nil {
 				continue
 			}
-			for _, lane := range tabSnap.Lanes {
-				for _, g := range lane.PaneGroups {
-					if g.ID == m.PaneGroupID {
-						laneID = lane.ID
-						tabID = t.id
-						paneCount = len(g.Panes)
-						// Release aliases.
-						for _, ps := range g.Panes {
-							w.releaseAlias(ps.Title)
-						}
-						break
-					}
+			for lane, g := range domain.GroupsInTab(tabSnap) {
+				if g.ID != m.PaneGroupID {
+					continue
 				}
-				if laneID != "" {
-					break
+				laneID = lane.ID
+				tabID = t.id
+				paneCount = len(g.Panes)
+				// Release aliases.
+				for p := range domain.PanesInGroup(g) {
+					w.releaseAlias(p.Title)
 				}
+				break
 			}
 			if laneID != "" {
 				break
@@ -245,27 +219,23 @@ func (w *WorkspaceActor) handleCLIDeletePane(ctx actor.Context, m *msg.MsgCLIDel
 		if tabSnap == nil {
 			continue
 		}
-		for _, lane := range tabSnap.Lanes {
-			for _, g := range lane.PaneGroups {
-				for _, ps := range g.Panes {
-					if ps.ID == m.PaneID {
-						w.releaseAlias(ps.Title)
-						if len(g.Panes) <= 1 && len(lane.PaneGroups) <= 1 && len(tabSnap.Lanes) <= 1 {
-							// Last pane in last group in last lane: don't delete (would close entire tab)
-							if len(w.tabs) <= 1 {
-								return &msg.MsgCLIResponse{OK: false, Error: "cannot delete the last pane"}
-							}
-						}
-						_ = w.pub.Send(msg.T("pane-group", g.ID, "inbox"),
-							&msg.MsgPaneGroupDeletePane{PaneID: m.PaneID})
-						w.resCounts.panes--
-						w.syncActivePane()
-						w.persistToKV()
-						return &msg.MsgCLIResponse{OK: true}
-					}
-				}
+		site, ok := domain.LocatePaneInTab(tabSnap, m.PaneID)
+		if !ok {
+			continue
+		}
+		w.releaseAlias(site.Pane.Title)
+		if len(site.Group.Panes) <= 1 && len(site.Lane.PaneGroups) <= 1 && len(tabSnap.Lanes) <= 1 {
+			// Last pane in last group in last lane: don't delete (would close entire tab)
+			if len(w.tabs) <= 1 {
+				return &msg.MsgCLIResponse{OK: false, Error: "cannot delete the last pane"}
 			}
 		}
+		_ = w.pub.Send(msg.T("pane-group", site.Group.ID, "inbox"),
+			&msg.MsgPaneGroupDeletePane{PaneID: m.PaneID})
+		w.resCounts.panes--
+		w.syncActivePane()
+		w.persistToKV()
+		return &msg.MsgCLIResponse{OK: true}
 	}
 	return &msg.MsgCLIResponse{OK: false, Error: fmt.Sprintf("pane %q not found", m.PaneID)}
 }

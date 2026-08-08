@@ -68,3 +68,52 @@ func TestSelfHeal(t *testing.T) {
 		t.Errorf("wrong-port record not healed: changed=%v %+v", changed, healed)
 	}
 }
+
+// TestSelfHealPreservesProvenance pins the rule that makes cross-front-end
+// sessions work at all: Source records which front-end CREATED the session and
+// is stamped once. A terminal daemon serving an app-created session must not
+// relabel it "cli" on the next heal tick — that would erase the reason the
+// terminal degrades the session's web panes, and the notes would silently stop.
+func TestSelfHealPreservesProvenance(t *testing.T) {
+	livePID := os.Getpid()
+	// A CLI daemon (Source "cli") now serving a session the app created.
+	self := Record{Name: "s", Path: "/proj", State: "detached", PID: livePID, NATSPort: 4222, Source: SourceCLI}
+	existing := self
+	existing.State = "stopped" // forces a heal
+	existing.Source = SourceApp
+
+	healed, changed := SelfHeal(existing, true, self)
+	if !changed {
+		t.Fatal("stopped record should heal")
+	}
+	if healed.Source != SourceApp {
+		t.Errorf("Source = %q, want %q — heal must not rewrite provenance", healed.Source, SourceApp)
+	}
+
+	// A record with no source is legacy: the daemon's own value fills it in.
+	legacy := existing
+	legacy.Source = ""
+	if healed, _ := SelfHeal(legacy, true, self); healed.Source != SourceCLI {
+		t.Errorf("legacy Source = %q, want the daemon's %q", healed.Source, SourceCLI)
+	}
+}
+
+// TestSelfHealPreservesWebEndpoint keeps a connected desktop app attached
+// across a heal. The web endpoint is maintained live by the daemon
+// (UpdateWebEndpoint) rather than written at boot, so healing from the boot
+// record would drop it and strand the app on the next tick.
+func TestSelfHealPreservesWebEndpoint(t *testing.T) {
+	livePID := os.Getpid()
+	self := Record{Name: "s", Path: "/proj", State: "detached", PID: livePID, NATSPort: 4222, Source: SourceCLI}
+	existing := self
+	existing.State = "stopped" // forces a heal
+	existing.WebPort = 23232
+
+	healed, changed := SelfHeal(existing, true, self)
+	if !changed {
+		t.Fatal("stopped record should heal")
+	}
+	if healed.WebPort != 23232 {
+		t.Errorf("web endpoint = %d, want 23232", healed.WebPort)
+	}
+}

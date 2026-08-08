@@ -24,11 +24,6 @@ func writePersistedSecret(scope, name, value string) (string, error) {
 	return secretKind.writePersisted(scope, name, value)
 }
 
-// readPersistedSecret reads a persisted secret from the .rysh/secrets roots.
-func readPersistedSecret(scope, name string) (string, bool) {
-	return secretKind.readPersisted(scope, name)
-}
-
 // handleSecretSubcommand handles the ##secret (alias ##secrets) system command.
 // It delegates to the shared named-store handler, wiring in the secret store and
 // the SecretNAT known-tier sync (pushKnownSecrets) that runs after every mutation

@@ -562,7 +562,7 @@ func (m Model) buildEmailPanel(pane domain.PaneSnapshot, paneWidth, height int) 
 // emailFolderRows renders the (mostly static) folder rail. Only INBOX is live;
 // Drafts/Sent are shown dim as "coming soon", matching the desktop client.
 func (m Model) emailFolderRows(st *emailViewState, w int) []string {
-	inbox := "INBOX"
+	var inbox string
 	if st.focusCol == emailColFolders {
 		inbox = emailFocusStyle.Render(padTrunc("▸ INBOX", w))
 	} else {

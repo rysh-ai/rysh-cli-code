@@ -39,7 +39,7 @@ func (t *TabActor) createLane(ctx actor.Context, title string) {
 		}
 	}
 
-	la := NewLaneActor(laneID, t.id, flex, paneID, title, t.cfg, t.pub, t.nc, t.agSetup, t.kvStore)
+	la := NewLaneActor(laneID, t.id, flex, paneID, title, t.cfg, t.pub, t.nc, t.agSetup, t.kvStore, t.secrets)
 	laneProps := actor.PropsFromProducer(func() actor.Actor { return la })
 	pid := ctx.Spawn(laneProps)
 
@@ -83,7 +83,7 @@ func (t *TabActor) createLaneWithPanes(ctx actor.Context, paneTitles []string) {
 		paneIDs[i] = uuid.NewString()
 	}
 
-	la := NewLaneActor(laneID, t.id, 10, paneIDs[0], paneTitles[0], t.cfg, t.pub, t.nc, t.agSetup, t.kvStore)
+	la := NewLaneActor(laneID, t.id, 10, paneIDs[0], paneTitles[0], t.cfg, t.pub, t.nc, t.agSetup, t.kvStore, t.secrets)
 	for i := 1; i < len(paneIDs); i++ {
 		la.initialExtraPanes = append(la.initialExtraPanes, panePair{id: paneIDs[i], title: paneTitles[i]})
 	}

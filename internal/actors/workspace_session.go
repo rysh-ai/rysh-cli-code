@@ -20,7 +20,12 @@ import (
 //	##session list          list all known sessions (current marked with ">")
 //	##session switch <name> ensure another session's daemon is running + how to attach
 //	##session reload        flush this session's state to KV and refresh its record
-func (w *WorkspaceActor) handleSessionSubcommand(out *strings.Builder, args []string) {
+//	##session model [<p>/<n>] show/bind the session-wide LLM model (== ##llm use)
+//
+// The returned error is the command's failure for a non-interactive caller
+// (see ryshCommand.statusAware); the human-readable form is always written to
+// out as well, so the pane reads exactly as it did before.
+func (w *WorkspaceActor) handleSessionSubcommand(out *strings.Builder, paneID string, args []string) error {
 	sub := "info"
 	if len(args) > 0 {
 		sub = args[0]
@@ -28,6 +33,10 @@ func (w *WorkspaceActor) handleSessionSubcommand(out *strings.Builder, args []st
 	switch sub {
 	case "info":
 		w.cmdSessionInfo(out)
+	case "model", "llm":
+		// Broadest scope in the hierarchy: every workspace/tab/lane/stack/pane
+		// that binds nothing of its own runs this model.
+		w.handleScopeModelCommand(out, paneID, scopeSession, args[1:])
 	case "list", "ls":
 		w.cmdSessionList(out)
 	case "switch", "attach", "go":
@@ -35,12 +44,14 @@ func (w *WorkspaceActor) handleSessionSubcommand(out *strings.Builder, args []st
 		if len(args) > 1 {
 			name = args[1]
 		}
-		w.cmdSessionSwitch(out, name)
+		return w.cmdSessionSwitch(out, name)
 	case "reload", "refresh":
 		w.cmdSessionReload(out)
 	default:
 		w.sessionUsage(out)
+		return fmt.Errorf("unknown ##session subcommand: %q", sub)
 	}
+	return nil
 }
 
 // currentSessionName returns the name this daemon answers to (the NATS prefix),
@@ -61,7 +72,7 @@ func (w *WorkspaceActor) cmdSessionInfo(out *strings.Builder) {
 	fmt.Fprintf(out, "\n[rysh] session info\n")
 	fmt.Fprintf(out, "%s\n", strings.Repeat("-", 56))
 	fmt.Fprintf(out, "  name        : %s\n", name)
-	fmt.Fprintf(out, "  source      : %s\n", session.NormalizeSource(w.cfg.SessionSource))
+	fmt.Fprintf(out, "  front-end   : %s\n", session.FrontendName(w.cfg.SessionSource))
 
 	var rec session.Record
 	haveRec := false
@@ -71,12 +82,17 @@ func (w *WorkspaceActor) cmdSessionInfo(out *strings.Builder) {
 		}
 	}
 	if haveRec {
+		fmt.Fprintf(out, "  created by  : %s\n", session.FrontendName(rec.Source))
 		fmt.Fprintf(out, "  state       : %s\n", displaySessionState(rec))
 		fmt.Fprintf(out, "  working dir : %s\n", rec.Path)
 		fmt.Fprintf(out, "  daemon pid  : %d\n", rec.PID)
 		fmt.Fprintf(out, "  nats port   : %d\n", rec.NATSPort)
 		if rec.ProxyPort > 0 {
 			fmt.Fprintf(out, "  proxy port  : %d (http://127.0.0.1:%d)\n", rec.ProxyPort, rec.ProxyPort)
+		}
+		if rec.WebPort > 0 {
+			fmt.Fprintf(out, "  web port    : %d (http://127.0.0.1:%d — the desktop app adopts a session through this)\n",
+				rec.WebPort, rec.WebPort)
 		}
 		fmt.Fprintf(out, "  attached TUI: %d\n", len(rec.AliveTUIPIDs()))
 		if rec.AppClients > 0 {
@@ -109,16 +125,35 @@ func (w *WorkspaceActor) cmdSessionInfo(out *strings.Builder) {
 	if len(w.workspaceNames) > 1 {
 		fmt.Fprintf(out, "  workspaces  : %d (active: %s)\n", len(w.workspaceNames), w.workspaceName)
 	}
+
+	// When this front-end is opening a session the OTHER one created, list what
+	// renders differently. The pre-attach print on stderr scrolls away with the
+	// TUI's first repaint, so this is the durable copy: it stays available for
+	// as long as the session is open, in the command a user already runs to ask
+	// "what am I actually looking at".
+	if haveRec {
+		if notes, err := session.EnsureCanOpen(rec, w.cfg.SessionSource); err == nil && len(notes) > 0 {
+			fmt.Fprintf(out, "\n  rendered here with:\n")
+			for _, n := range notes {
+				fmt.Fprintf(out, "    - %s\n", n)
+			}
+		}
+	}
 	fmt.Fprintf(out, "%s\n", strings.Repeat("-", 56))
 }
 
 // displaySessionState renders a record's state for humans. The registry State
-// field tracks TUI attachment only, so a healthy app daemon reads "detached"
-// even while the desktop app is connected — surface the live WebSocket-client
+// field tracks TUI attachment only, so a healthy daemon reads "detached" even
+// while the desktop app is connected — surface the live WebSocket-client
 // presence (Record.AppClients) as "attached (app)" instead.
+//
+// Presence is keyed on AppClients alone, NOT on who created the session. It
+// used to also require Source == "app", which was sound only while the two
+// front-ends refused each other's sessions. Now that the app opens
+// command-line sessions too, that extra condition would report a session as
+// "detached" while the desktop app is visibly driving it.
 func displaySessionState(r session.Record) string {
-	if session.NormalizeSource(r.Source) == "app" && r.AppClients > 0 &&
-		r.PID > 0 && session.ProcessAlive(r.PID) {
+	if r.AppClients > 0 && r.PID > 0 && session.ProcessAlive(r.PID) {
 		return "attached (app)"
 	}
 	return r.State
@@ -130,11 +165,13 @@ func (w *WorkspaceActor) cmdSessionList(out *strings.Builder) {
 	store, err := session.NewStore(w.cfg)
 	if err != nil {
 		fmt.Fprintf(out, "\n[rysh] could not open session registry: %v\n", err)
+		w.failRysh("could not open session registry: %v", err)
 		return
 	}
 	records, err := store.List()
 	if err != nil {
 		fmt.Fprintf(out, "\n[rysh] could not list sessions: %v\n", err)
+		w.failRysh("could not list sessions: %v", err)
 		return
 	}
 	current := w.currentSessionName()
@@ -161,56 +198,73 @@ func (w *WorkspaceActor) cmdSessionList(out *strings.Builder) {
 // stopped) and prints how to attach to it. Switching the visible front-end is
 // the front-end's job (CLI: rysh attach; app: the session picker), so the daemon
 // only guarantees the target is up and reachable.
-func (w *WorkspaceActor) cmdSessionSwitch(out *strings.Builder, name string) {
+func (w *WorkspaceActor) cmdSessionSwitch(out *strings.Builder, name string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		fmt.Fprintf(out, "\n[rysh] usage: ##session switch <name>   (see ##session list)\n")
-		return
+		ryshWriter(out).UsageLine("##session switch <name>   (see ##session list)")
+		w.failRyshUsage("usage: %s", "##session switch <name>   (see ##session list)")
+		return errors.New("##session switch: missing session name")
 	}
 	current := w.currentSessionName()
 	if name == current {
 		fmt.Fprintf(out, "\n[rysh] already on session %q\n", name)
-		return
+		return nil
 	}
 	store, err := session.NewStore(w.cfg)
 	if err != nil {
 		fmt.Fprintf(out, "\n[rysh] could not open session registry: %v\n", err)
-		return
+		w.failRysh("could not open session registry: %v", err)
+		return fmt.Errorf("open session registry: %w", err)
 	}
 	rec, err := store.Get(name)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			fmt.Fprintf(out, "\n[rysh] session %q not found (see ##session list)\n", name)
+			w.failRysh("session %q not found (see ##session list)", name)
 			fmt.Fprintf(out, progname.Rewrite("  create it with:  rysh %s    (or: rysh create %s)\n"), name, name)
-		} else {
-			fmt.Fprintf(out, "\n[rysh] could not read session %q: %v\n", name, err)
+			return fmt.Errorf("session %q not found", name)
 		}
-		return
+		fmt.Fprintf(out, "\n[rysh] could not read session %q: %v\n", name, err)
+		w.failRysh("could not read session %q: %v", name, err)
+		return fmt.Errorf("read session %q: %w", name, err)
 	}
-	// Refuse to drive a session that belongs to the other front-end (the CLI and
-	// the desktop app never share saved layouts).
-	if mErr := session.EnsureSourceMatch(rec, w.cfg.SessionSource); mErr != nil {
+	// A session created by the other front-end is switchable — it is the same
+	// daemon behind it — but say up front which of its panes this front-end
+	// cannot paint, before the user moves over and wonders.
+	notes, mErr := session.EnsureCanOpen(rec, w.cfg.SessionSource)
+	if mErr != nil {
+		w.failRysh("%v", mErr)
 		fmt.Fprintf(out, "\n[rysh] %v\n", mErr)
-		return
+		return mErr
+	}
+	if len(notes) > 0 {
+		fmt.Fprintf(out, "\n[rysh] %s was created by the %s; here:\n", name, session.FrontendName(rec.Source))
+		for _, n := range notes {
+			fmt.Fprintf(out, "  - %s\n", n)
+		}
 	}
 
 	if !rec.DaemonAlive() {
 		fmt.Fprintf(out, "\n[rysh] starting session %q daemon...\n", name)
 		if err := session.SpawnDaemon(name, rec.Path, w.cfg.ConfigFile); err != nil {
 			fmt.Fprintf(out, "  failed to start daemon: %v\n", err)
-			return
+			w.failRysh("failed to start daemon: %v", err)
+			return fmt.Errorf("start daemon for session %q: %w", name, err)
 		}
 		ready, werr := session.WaitReady(store, name, 3*time.Second)
 		if werr != nil {
 			fmt.Fprintf(out, "  daemon is still starting (%v)\n", werr)
 			w.sessionAttachHelp(out, name, current)
-			return
+			// Not an error: the daemon was spawned and is coming up. A script
+			// that needs it ready should poll ##session list.
+			return nil
 		}
 		rec = ready
 	}
 
 	fmt.Fprintf(out, "\n[rysh] session %q daemon running (pid %d, port %d)\n", name, rec.PID, rec.NATSPort)
 	w.sessionAttachHelp(out, name, current)
+	return nil
 }
 
 // sessionAttachHelp prints the front-end-specific steps to actually move to a
@@ -249,10 +303,11 @@ func (w *WorkspaceActor) cmdSessionReload(out *strings.Builder) {
 
 // sessionUsage prints the ##session command help.
 func (w *WorkspaceActor) sessionUsage(out *strings.Builder) {
-	fmt.Fprintf(out, "\n[rysh] usage:\n")
-	fmt.Fprintf(out, "  ##session              show current session details (alias: ##session info)\n")
-	fmt.Fprintf(out, "  ##session list         list all known sessions (current marked with >)\n")
-	fmt.Fprintf(out, "  ##session switch <name>  start another session's daemon + how to attach\n")
-	fmt.Fprintf(out, "  ##session reload       flush this session's state to KV and refresh its record\n")
-	fmt.Fprintf(out, "  (set the working dir with ##workspace cwd <path>)\n\n")
+	ryshWriter(out).Usage(
+		"##session              show current session details (alias: ##session info)",
+		"##session list         list all known sessions (current marked with >)",
+		"##session switch <name>  start another session's daemon + how to attach",
+		"##session reload       flush this session's state to KV and refresh its record",
+		"(set the working dir with ##workspace cwd <path>)",
+	)
 }

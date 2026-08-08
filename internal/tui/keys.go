@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/rysh-ai/rysh-cli-code/internal/vterm"
 )
 
 // keyMsgToBytes converts a Bubble Tea KeyMsg to the raw byte sequence that
@@ -246,16 +248,35 @@ func keyMsgToBytes(msg tea.KeyMsg) []byte {
 	return data
 }
 
-// mouseToSGRBytes encodes a Bubble Tea MouseMsg as an SGR Extended Mouse Mode
-// (mode 1006) escape sequence. paneX and paneY are 1-based coordinates
-// relative to the pane's content area. Returns nil if the event type cannot
-// be mapped.
+// mouseToPTYBytes encodes a Bubble Tea MouseMsg the way the child program asked
+// for it. paneX and paneY are 1-based coordinates relative to the pane's content
+// area; proto is the child's tracking mode (a vterm.Mouse* constant) and sgr
+// reports whether it enabled SGR extended encoding (\x1b[?1006h).
 //
-// SGR format: \x1b[< Cb ; Cx ; Cy {M|m}
-//   - M = press/motion, m = release
-//   - Cb encodes button + modifier bits
-func mouseToSGRBytes(msg tea.MouseMsg, paneX, paneY int) []byte {
+// Returns nil when the event is not reportable under that protocol — the child
+// asked for fewer events than the terminal sends (X10 reports presses only,
+// \x1b[?1000h has no motion reports), or the coordinates do not fit the legacy
+// encoding.
+//
+// Encoding matters as much as the mode. A child that enabled \x1b[?1000h alone
+// expects the legacy X10 form and cannot parse an SGR report; handing it the
+// wrong one is how mouse events end up echoed as literal text in an input line.
+//
+//	SGR (\x1b[?1006h): \x1b[< Cb ; Cx ; Cy {M|m}   M = press/motion, m = release
+//	legacy (X10):      \x1b[M  Cb+32 Cx+32 Cy+32   release reported as button 3
+//
+// Cb encodes the button plus modifier bits, with bit 32 set for motion.
+func mouseToPTYBytes(msg tea.MouseMsg, paneX, paneY int, proto string, sgr bool) []byte {
+	if proto == vterm.MouseOff {
+		return nil
+	}
+
+	release := msg.Action == tea.MouseActionRelease
+	motion := msg.Action == tea.MouseActionMotion
+
 	var btn int
+	wheel := false
+	extended := false // buttons 8/9, which the legacy encoding cannot express
 	switch msg.Button {
 	case tea.MouseButtonLeft:
 		btn = 0
@@ -264,45 +285,75 @@ func mouseToSGRBytes(msg tea.MouseMsg, paneX, paneY int) []byte {
 	case tea.MouseButtonRight:
 		btn = 2
 	case tea.MouseButtonWheelUp:
-		btn = 64
+		btn, wheel = 64, true
 	case tea.MouseButtonWheelDown:
-		btn = 65
+		btn, wheel = 65, true
 	case tea.MouseButtonWheelLeft:
-		btn = 66
+		btn, wheel = 66, true
 	case tea.MouseButtonWheelRight:
-		btn = 67
+		btn, wheel = 67, true
 	case tea.MouseButtonBackward:
-		btn = 128
+		btn, extended = 128, true
 	case tea.MouseButtonForward:
-		btn = 129
+		btn, extended = 129, true
 	case tea.MouseButtonNone:
 		btn = 3 // used for release in some protocols
 	default:
 		return nil
 	}
 
-	// Modifier bits
-	if msg.Shift {
-		btn |= 4
-	}
-	if msg.Alt {
-		btn |= 8
-	}
-	if msg.Ctrl {
-		btn |= 16
+	// Report only what this tracking mode covers. Sending more than the child
+	// subscribed to is the same class of bug as sending the wrong encoding: it
+	// asked a specific question and gets answers it has no parser for.
+	switch proto {
+	case vterm.MouseX10:
+		// \x1b[?9h reports button presses of buttons 1-3 and nothing else.
+		if release || motion || wheel || extended {
+			return nil
+		}
+	case vterm.MouseNormal:
+		// \x1b[?1000h reports presses and releases, never motion.
+		if motion {
+			return nil
+		}
 	}
 
-	// Motion flag
-	if msg.Action == tea.MouseActionMotion {
+	// Modifier bits. X10 mode has no room for them.
+	if proto != vterm.MouseX10 {
+		if msg.Shift {
+			btn |= 4
+		}
+		if msg.Alt {
+			btn |= 8
+		}
+		if msg.Ctrl {
+			btn |= 16
+		}
+	}
+	if motion {
 		btn |= 32
 	}
 
-	// SGR suffix: M for press/motion, m for release.
-	suffix := 'M'
-	if msg.Action == tea.MouseActionRelease {
-		suffix = 'm'
+	if sgr {
+		suffix := 'M'
+		if release {
+			suffix = 'm'
+		}
+		return []byte(fmt.Sprintf("\x1b[<%d;%d;%d%c", btn, paneX, paneY, suffix))
 	}
 
-	seq := fmt.Sprintf("\x1b[<%d;%d;%d%c", btn, paneX, paneY, suffix)
-	return []byte(seq)
+	// Legacy X10 encoding. Every field is a single byte biased by 32, so a
+	// release cannot name its button (button 3 means "some button came up") and
+	// nothing past column/row 223 or button code 223 is expressible. Drop what
+	// does not fit rather than emit a report that decodes to the wrong cell.
+	if extended {
+		return nil
+	}
+	if release {
+		btn = 3 | (btn &^ 0x03) // keep the modifier/motion bits, replace the button
+	}
+	if btn > 223 || paneX > 223 || paneY > 223 {
+		return nil
+	}
+	return []byte{0x1b, '[', 'M', byte(32 + btn), byte(32 + paneX), byte(32 + paneY)}
 }

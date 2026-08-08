@@ -37,6 +37,7 @@ type PaneGroupActor struct {
 	agSetup *agentic.Setup
 	nc      *nats.Conn
 	kvStore nats.KeyValue // rysh-panes bucket
+	secrets *secretResolver // workspace-scoped ##secret lookup, threaded to panes
 	br      *bridge.NATSBridge
 
 	// Unguarded state.
@@ -71,6 +72,7 @@ func NewPaneGroupActor(
 	nc *nats.Conn,
 	agSetup *agentic.Setup,
 	kvStore nats.KeyValue,
+	secrets *secretResolver,
 ) *PaneGroupActor {
 	return &PaneGroupActor{
 		id:                 id,
@@ -83,6 +85,7 @@ func NewPaneGroupActor(
 		agSetup:            agSetup,
 		nc:                 nc,
 		kvStore:            kvStore,
+		secrets:            secrets,
 		paneSubjects:       make(map[string]string),
 		panePIDs:           make(map[string]*actor.PID),
 		paneActors:         make(map[string]*PaneActor),
@@ -99,6 +102,7 @@ func NewPaneGroupActorFromKV(
 	nc *nats.Conn,
 	agSetup *agentic.Setup,
 	kvStore nats.KeyValue,
+	secrets *secretResolver,
 	kv paneGroupKV,
 ) *PaneGroupActor {
 	return &PaneGroupActor{
@@ -110,6 +114,7 @@ func NewPaneGroupActorFromKV(
 		agSetup:            agSetup,
 		nc:                 nc,
 		kvStore:            kvStore,
+		secrets:            secrets,
 		paneSubjects:       make(map[string]string),
 		panePIDs:           make(map[string]*actor.PID),
 		paneActors:         make(map[string]*PaneActor),
@@ -203,7 +208,7 @@ func (g *PaneGroupActor) Receive(ctx actor.Context) {
 	case *msg.RequestEnvelope:
 		switch inner := m.Inner.(type) {
 		case *msg.MsgGetPaneGroupSnapshot:
-			snap := g.collectSnapshot(inner.LayoutOnly)
+			snap := g.collectSnapshot(inner.LayoutOnly, inner.NoHistories)
 			_ = m.Reply(&msg.MsgPaneGroupSnapshotReply{Snapshot: snap})
 		case *msg.MsgGetPaneGroupActivePane:
 			paneID := ""
@@ -228,7 +233,7 @@ func (g *PaneGroupActor) createPane(ctx actor.Context, paneID, title string) {
 // content is exclusively the output published to its subjects, making it
 // read-only by construction.
 func (g *PaneGroupActor) createPaneTyped(ctx actor.Context, paneID, title, paneType string) {
-	pa := NewPaneActor(paneID, title, g.tabID, g.laneID, g.id, g.cfg, g.pub, g.nc, g.agSetup, g.kvStore)
+	pa := NewPaneActor(paneID, title, g.tabID, g.laneID, g.id, g.cfg, g.pub, g.nc, g.agSetup, g.kvStore, g.secrets)
 	pa.paneType = paneType
 	paneProps := actor.PropsFromProducer(func() actor.Actor { return pa })
 	pid := ctx.Spawn(paneProps)
@@ -250,7 +255,7 @@ func (g *PaneGroupActor) createPaneTyped(ctx actor.Context, paneID, title, paneT
 // paneType keeps the pane variant across restarts — a restored "replay" pane
 // must stay shell-less rather than silently growing a PTY.
 func (g *PaneGroupActor) spawnRestoredPane(ctx actor.Context, paneID, paneTitle, paneType string, snap *domain.PaneSnapshot) {
-	pa := NewPaneActor(paneID, paneTitle, g.tabID, g.laneID, g.id, g.cfg, g.pub, g.nc, g.agSetup, g.kvStore)
+	pa := NewPaneActor(paneID, paneTitle, g.tabID, g.laneID, g.id, g.cfg, g.pub, g.nc, g.agSetup, g.kvStore, g.secrets)
 	pa.paneType = paneType
 	if snap != nil {
 		pa.RestoreState(*snap)
@@ -445,7 +450,7 @@ func (g *PaneGroupActor) moveStackedPaneDown() {
 // Snapshot
 // ---------------------------------------------------------------------------
 
-func (g *PaneGroupActor) collectSnapshot(layoutOnly bool) domain.PaneGroupSnapshot {
+func (g *PaneGroupActor) collectSnapshot(layoutOnly, noHistories bool) domain.PaneGroupSnapshot {
 	snap := domain.PaneGroupSnapshot{
 		ID: g.id,
 	}
@@ -463,7 +468,7 @@ func (g *PaneGroupActor) collectSnapshot(layoutOnly bool) domain.PaneGroupSnapsh
 	fetch := func(i int, id, title string) {
 		reply, err := g.pub.Request(
 			msg.T("pane", id, "snapshot"),
-			&msg.MsgGetPaneSnapshot{LayoutOnly: layoutOnly},
+			&msg.MsgGetPaneSnapshot{LayoutOnly: layoutOnly, NoHistories: noHistories},
 			time.Second,
 		)
 		if err != nil {
@@ -569,7 +574,7 @@ func (g *PaneGroupActor) PaneSnapshot(paneID string) *domain.PaneSnapshot {
 	if !ok {
 		return nil
 	}
-	snap := pa.buildSnapshot(true, true)
+	snap := pa.buildSnapshot(true, true, true)
 	return &snap
 }
 

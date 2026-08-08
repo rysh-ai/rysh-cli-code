@@ -74,7 +74,7 @@ func TestUTF8SurvivesControlFilter(t *testing.T) {
 		}
 	}
 	// A real C1 control (U+0085 NEL) is still dropped.
-	if got := stripAnsiEscapes("ab"); strings.ContainsRune(got, 0x85) {
+	if got := stripAnsiEscapes("a\u0085b"); strings.ContainsRune(got, 0x85) {
 		t.Errorf("C1 control survived: %q", got)
 	}
 }

@@ -287,19 +287,6 @@ func stripShellPrompts(output string) string {
 	return output
 }
 
-// stripCommandEcho removes the PTY echo of `cmd` from the output string.
-// The PTY line discipline echoes back everything written to it; since rysh
-// writes the command programmatically, this echo is a duplicate of the
-// "$ <cmd>" line that executeShell already generated.
-func stripCommandEcho(output, cmd string) string {
-	// The echo may appear with \r\n or \n depending on PTY state.
-	output = strings.Replace(output, cmd+"\r\n", "", 1)
-	output = strings.Replace(output, cmd+"\n", "", 1)
-	// Also strip if the command is the entire chunk (no trailing newline yet).
-	output = strings.TrimPrefix(output, cmd)
-	return output
-}
-
 // maxPaneBuffer is the default maximum number of bytes retained in a pane
 // output buffer when no `[ui] shell_buffer_bytes` is configured (the config
 // default is 256 KiB; this constant is the last-resort fallback for a zero

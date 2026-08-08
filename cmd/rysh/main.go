@@ -52,6 +52,8 @@ func main() {
 	rawArgs, configPath := extractStringFlag(rawArgs, "--config")
 	rawArgs, shared := extractBoolFlag(rawArgs, "--shared")
 	rawArgs, upgrade := extractBoolFlag(rawArgs, "--upgrade")
+	// --force answers the upgrade guard's question up front (see upgrade_guard.go).
+	rawArgs, force := extractBoolFlag(rawArgs, "--force")
 	args, logLevel := extractLogLevel(rawArgs)
 
 	// Resolve --config to an absolute path and validate it exists. Making it
@@ -80,13 +82,13 @@ func main() {
 
 	logger := logging.Setup(cfg.LogLevel, cfg.SessionName)
 
-	if err := run(cfg, logger, args, configPath, shared, upgrade); err != nil {
+	if err := run(cfg, logger, args, configPath, shared, upgrade, force); err != nil {
 		fmt.Fprintf(os.Stderr, progname.Rewrite("rysh: %v\n"), err)
 		os.Exit(1)
 	}
 }
 
-func run(cfg config.Config, logger *slog.Logger, args []string, configPath string, shared, upgrade bool) error {
+func run(cfg config.Config, logger *slog.Logger, args []string, configPath string, shared, upgrade, force bool) error {
 	// Sweep the registry for orphaned daemons before handling any command, so a
 	// dead-PID record or a wedged daemon (alive but no longer serving NATS, e.g.
 	// the one that lingered for 8 days holding the NATS port) is cleaned up
@@ -113,13 +115,16 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 			sessionName = "default"
 		}
 		cfg.SessionName = sessionName
-		// Refuse to open a session that belongs to the other front-end (e.g. the
-		// CLI opening a session the desktop app created). Checked before both the
-		// attach-to-live and spawn-fresh paths.
+		// Opening a session the OTHER front-end created is allowed — both drive
+		// the same daemon — but the terminal cannot paint every surface the
+		// desktop app can, so say what will look different before attaching.
+		// Checked before both the attach-to-live and spawn-fresh paths.
 		if rec, err := store.Get(sessionName); err == nil {
-			if serr := session.EnsureSourceMatch(rec, session.NormalizeSource(cfg.SessionSource)); serr != nil {
+			notes, serr := session.EnsureCanOpen(rec, session.NormalizeSource(cfg.SessionSource))
+			if serr != nil {
 				return serr
 			}
+			printDegradations(rec, notes)
 		}
 		if rec, err := store.Get(sessionName); err == nil &&
 			rec.PID > 0 && session.ProcessAlive(rec.PID) && rec.NATSPort > 0 {
@@ -129,7 +134,9 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 				return derr
 			}
 			if restart {
-				if err := upgradeDaemon(sessionName, rec); err != nil {
+				// Ask before killing live work — a restart takes every pane's
+				// PTY with it (see upgrade_guard.go).
+				if err := upgradeDaemon(sessionName, rec, force); err != nil {
 					return fmt.Errorf("upgrade: %w", err)
 				}
 				// fall through to spawn a fresh daemon below
@@ -192,10 +199,13 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 			}
 			return err
 		}
-		// Refuse to attach to a session that belongs to the other front-end.
-		if serr := session.EnsureSourceMatch(rec, session.NormalizeSource(cfg.SessionSource)); serr != nil {
+		// Attaching to the other front-end's session is allowed; report the
+		// surfaces this front-end will render differently.
+		notes, serr := session.EnsureCanOpen(rec, session.NormalizeSource(cfg.SessionSource))
+		if serr != nil {
 			return serr
 		}
+		printDegradations(rec, notes)
 		// If the daemon is still alive, attach a TUI client to its NATS server.
 		if rec.PID > 0 && session.ProcessAlive(rec.PID) && rec.NATSPort > 0 {
 			// Decide whether to restart the daemon: the explicit --upgrade flag
@@ -206,7 +216,7 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 				return derr
 			}
 			if restart {
-				if err := upgradeDaemon(args[1], rec); err != nil {
+				if err := upgradeDaemon(args[1], rec, force); err != nil {
 					return fmt.Errorf("upgrade: %w", err)
 				}
 				// fall through to spawn a fresh daemon below
@@ -315,6 +325,22 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 		paneID := flagVal(args[3:], "--pane")
 		mode := flagVal(args[3:], "--mode")
 		return cli.PaneSendInput(store, sessName, paneID, inputText, mode)
+
+	case "exec":
+		// rysh exec [flags] -- '##<command>' — the generic door into the ##
+		// language, replacing the hand-maintained --<name> allowlist. See
+		// exec_cmd.go (design 021 §3.3).
+		return runExecCmd(cfg, args)
+
+	case "script":
+		// rysh script <file.rysh> [args...] — run a bash script in which ##
+		// lines are rysh commands. See script_cmd.go (design 021).
+		return runScriptCmd(cfg, args)
+
+	case "prompt":
+		// rysh prompt -- '<text>' — submit a prompt to a RUNNING session's pane
+		// and block until the turn ends. See prompt_cmd.go (design 021 §3.7).
+		return runPromptCmd(cfg, args)
 
 	case "web":
 		// rysh web start|stop <session> — design 007's top-level entry to the
@@ -491,14 +517,20 @@ func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error 
 		return err
 	}
 
-	// Refuse to (re)open a stopped session that belongs to the other front-end.
-	// Backstop for the friendly CLI guard / the app's picker filtering: the
-	// daemon owns the session record and the KV state, so this is the last line
-	// of defense before they would be reused by the wrong front-end.
-	desiredSource := session.NormalizeSource(cfg.SessionSource)
+	// Either front-end may serve either kind of session — the daemon is the
+	// same either way — so this is no longer a refusal. What it still owns is
+	// PROVENANCE: Source records which front-end created the session, is stamped
+	// once, and must survive every later daemon. Restamping it with the current
+	// invocation's front-end would relabel an app-created session "cli" the
+	// first time the terminal restarted it, and the terminal would then stop
+	// explaining why its web panes are placeholders.
+	recordSource := session.NormalizeSource(cfg.SessionSource)
 	if existing, gerr := store.Get(sessionName); gerr == nil {
-		if serr := session.EnsureSourceMatch(existing, desiredSource); serr != nil {
+		if _, serr := session.EnsureCanOpen(existing, recordSource); serr != nil {
 			return serr
+		}
+		if existing.Source != "" {
+			recordSource = existing.Source
 		}
 	}
 
@@ -529,7 +561,7 @@ func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error 
 		BinHash:    daemonHash,
 		ConfigFile: cfg.ConfigFile,
 		RyshDir:    cfg.RyshDir,
-		Source:     desiredSource,
+		Source:     recordSource,
 	}
 	if _, err := store.Upsert(record); err != nil {
 		return err
@@ -674,7 +706,7 @@ func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error 
 		configPath,
 	)
 	farmProps := actor.PropsFromProducer(func() actor.Actor { return farmActor })
-	_, err = b.ActorSystem().Root.SpawnNamed(farmProps, "workspace-farm")
+	farmPID, err := b.ActorSystem().Root.SpawnNamed(farmProps, "workspace-farm")
 	if err != nil {
 		return fmt.Errorf("spawn workspace farm actor: %w", err)
 	}
@@ -715,6 +747,25 @@ func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error 
 	shutdownCh := make(chan os.Signal, 1)
 	signal.Notify(shutdownCh, syscall.SIGTERM, syscall.SIGINT)
 	<-shutdownCh
+
+	// Stop the actor tree before returning, and WAIT for it. Pane state is
+	// written to KV either by the 2s-gated maybePersist — which only runs when
+	// a client requests a snapshot — or by each actor's *actor.Stopping
+	// handler. A detached session with no TUI attached gets no snapshot
+	// requests at all, so Stopping is its ONLY chance to persist: returning
+	// straight from the signal silently dropped every pending write, which is
+	// how `##pane model` and `##pane name` came back empty after a restart
+	// despite both being marked persistent.
+	//
+	// StopFuture cascades through the tree (farm → workspaces → tabs → lanes →
+	// groups → panes), so each pane's flushKV runs. The timeout bounds a wedged
+	// actor: `rysh stop` SIGKILLs after ~1s anyway, so waiting longer here would
+	// only trade a clean flush for a hard kill.
+	if farmPID != nil {
+		if err := b.ActorSystem().Root.StopFuture(farmPID).Wait(); err != nil {
+			slog.Warn(progname.Rewrite("rysh: actor tree did not stop cleanly; some pane state may not be persisted"), "err", err)
+		}
+	}
 
 	return nil
 }
@@ -836,9 +887,8 @@ func startSessionRecordGuard(store *session.Store, self session.Record, interval
 // child process terminates; errLog is a temp file capturing whatever the child
 // wrote to stderr before goHeadless() redirected its stdio to /dev/null.
 //
-// That capture matters because every startup refusal — a session owned by the
-// other front-end, an unparsable config, a NATS port already held — is printed
-// on stderr and nowhere else. Without it a daemon that died in 20ms is
+// That capture matters because every startup refusal — an unparsable config, a
+// NATS port already held — is printed on stderr and nowhere else. Without it a daemon that died in 20ms is
 // indistinguishable from one that is merely slow, and the caller can only
 // report a 10-second timeout.
 type daemonHandle struct {
@@ -1178,7 +1228,16 @@ func promptYesNo(prompt string) bool {
 // binary) can replace it. It first warns about any other attached TUIs, which
 // will lose their connection when the daemon exits (they do not auto-reconnect),
 // then stops the daemon and waits for it to flush state to KV and exit.
-func upgradeDaemon(sessionName string, rec session.Record) error {
+func upgradeDaemon(sessionName string, rec session.Record, force bool) error {
+	// Before anything is stopped: a restart takes every pane's PTY with it.
+	// Checked HERE rather than at the call sites because there are two of them —
+	// `rysh <session>` and `rysh attach <session>` — and guarding only the first
+	// is exactly the bug this catches (the explicit attach path, the one people
+	// actually type, went straight through).
+	if err := confirmUpgradeKills(sessionName, panesRunningPrograms(rec),
+		force, isInteractiveTerminal()); err != nil {
+		return err
+	}
 	if others := rec.AliveTUIPIDs(); len(others) > 0 {
 		// Exclude this process if it somehow appears (it shouldn't pre-attach).
 		me := os.Getpid()
@@ -1211,49 +1270,48 @@ func daemonStartError(sessionName string, err error) error {
 		progname.Rewrite("fix the binary and run \"rysh attach %s\" again (use --log-level debug to see daemon logs)"), err, sessionName)
 }
 
-// ownableSessionName returns a session name the given front-end is allowed to
-// open, plus a note when it had to move off the requested one.
+// sessionOpenNote describes what will render differently when the given
+// front-end opens session `name`, or "" when there is nothing to say.
 //
-// The CLI and the desktop app refuse to drive each other's sessions
-// (session.EnsureSourceMatch) because they would otherwise share saved layout
-// and KV state. Both first-run commands — `rysh onboard` and `rysh assistant` —
-// default to the session name "default", which is exactly the name the desktop
-// app claims first. A record left behind by the app (even a stopped one, since
-// its KV state is still the app's) therefore made the whole first run
-// unrecoverable: the spawned daemon hit the guard and exited, and the caller saw
-// only "timed out waiting for session ... daemon to start".
+// Both first-run commands — `rysh onboard` and `rysh assistant` — default to
+// the session name "default", which is also the name the desktop app claims
+// first. That used to dead-end the whole first run: the front-ends refused each
+// other's sessions, so the spawned daemon hit the guard and exited and the
+// caller saw only "timed out waiting for session ... daemon to start". The
+// workaround was to silently rename the session to "default-cli".
 //
-// Onboarding must not dead-end on that, so fall back to "<name>-cli"
-// ("<name>-cli-2", …) — a name this front-end can own — and say so, rather than
-// spawning a daemon that is guaranteed to refuse.
-func ownableSessionName(store *session.Store, name, source string) (string, string) {
+// Now the terminal simply opens the app's session — same daemon, same layout —
+// so there is no name to negotiate. What is left is telling the user which
+// panes will look different, which is what this returns. Callers show it before
+// asking for consent, so the consent covers the session actually being opened.
+func sessionOpenNote(store *session.Store, name, source string) string {
 	if store == nil {
-		return name, ""
+		return ""
 	}
 	rec, err := store.Get(name)
-	if err != nil || session.EnsureSourceMatch(rec, source) == nil {
-		return name, ""
+	if err != nil {
+		return ""
 	}
-	owner := session.FrontendName(rec.Source)
-	base := name + "-" + session.NormalizeSource(source)
-	for i := 1; i <= ownableSessionNameTries; i++ {
-		candidate := base
-		if i > 1 {
-			candidate = fmt.Sprintf("%s-%d", base, i)
-		}
-		next, gerr := store.Get(candidate)
-		if gerr != nil || session.EnsureSourceMatch(next, source) == nil {
-			return candidate, fmt.Sprintf("session %q belongs to the %s and cannot be opened here; using %q instead", name, owner, candidate)
-		}
+	notes, cerr := session.EnsureCanOpen(rec, source)
+	if cerr != nil {
+		return cerr.Error()
 	}
-	// Every candidate is spoken for — keep the requested name so the caller
-	// fails with the ownership error rather than looping.
-	return name, ""
+	return strings.TrimRight(session.DegradationSummary(rec, notes), "\n")
 }
 
-// ownableSessionNameTries bounds the "-cli", "-cli-2", … search in
-// ownableSessionName.
-const ownableSessionNameTries = 20
+// printDegradations writes EnsureCanOpen's notes to stderr before a session is
+// opened. stderr because stdout belongs to the TUI that is about to take over
+// the screen, and because a script piping stdout should not have to parse them.
+//
+// This is the pre-attach heads-up only. The durable copies live where the user
+// will actually look for them: `##session info` repeats the summary for as long
+// as the session is open, and each degraded pane says so on its own face
+// (internal/tui/model_input.go).
+func printDegradations(rec session.Record, notes []string) {
+	if summary := session.DegradationSummary(rec, notes); summary != "" {
+		fmt.Fprintf(os.Stderr, "\n%s\n", summary)
+	}
+}
 
 // stopDaemonAndWait stops a live session daemon and blocks until it has fully
 // exited. It is used by --upgrade so that a fresh daemon built from the current
@@ -1334,13 +1392,16 @@ func listSessions(store *session.Store) error {
 			}
 		}
 		src := session.NormalizeSource(record.Source) // blank legacy records show as "cli"
-		// The State field tracks TUI attachment only, so a healthy app daemon
-		// reads "detached" even while the desktop app is connected. Render the
-		// live app connection (Record.AppClients, maintained by the daemon's
-		// web hub) as an attachment instead.
+		// The State field tracks TUI attachment only, so a healthy daemon reads
+		// "detached" even while the desktop app is connected. Render the live
+		// app connection (Record.AppClients, maintained by the daemon's web
+		// hub) as an attachment instead.
+		//
+		// Keyed on AppClients alone, NOT on who created the session: the app
+		// opens command-line sessions too, and requiring src == "app" here
+		// would print "detached" for a session the app is visibly driving.
 		state := record.State
-		if src == "app" && record.AppClients > 0 &&
-			record.PID > 0 && session.ProcessAlive(record.PID) {
+		if record.AppClients > 0 && record.PID > 0 && session.ProcessAlive(record.PID) {
 			state = "attached (app)"
 		}
 		tuiCount := len(record.TUIPIDs)
@@ -1368,11 +1429,11 @@ func printUsage() {
 	usageLine("                    Fail-closed exits: 0 done, 1 error, 2 approval requested")
 	usageLine("                    (no human to approve), 3 timeout (default 10m). --keep")
 	usageLine("                    leaves the session running; --json prints a final result line.")
-	usageLine("       rysh web start <session-name> [--control] [--port <n>] [--host <h>] [--no-token]")
+	usageLine("       rysh web start <session-name> [--control] [--port <n>] [--host <h>] [--username <u> --password <p>]")
 	usageLine("       rysh web stop <session-name>")
-	usageLine("                    start/stop the session's web viewer and print the full")
-	usageLine("                    ?token= URL (the token is generated client-side, so it")
-	usageLine("                    works for detached sessions whose pane output is unseen).")
+	usageLine("                    start/stop the session's web viewer and print its URL. The UI")
+	usageLine("                    needs a login: pass one here to store it, or set it beforehand")
+	usageLine("                    with `##rysh web auth username=<u> password=<p>`.")
 	usageLine("       rysh install <@ns/name[@version]|dir|tarball|url> [--yes] [--force]")
 	usageLine("       rysh search [query]        find packages in the registry index")
 	usageLine("       rysh update [@ns/name]     reinstall packages the index has newer versions of")
@@ -1388,6 +1449,20 @@ func printUsage() {
 	usageLine("                    assistant that can operate the session. Fail-closed by default.")
 	usageLine("       rysh doctor  diagnostics: provider, channels, daemon/NATS, config checks,")
 	usageLine("                    each PASS/WARN/FAIL with a one-line fix.")
+	usageLine("       rysh exec [--session <n>] [--tab-id <t>] [--pane-id <p>] [--json] -- '##<cmd>'")
+	usageLine("                    run any ## command against a running session and print its")
+	usageLine("                    output. Exits non-zero when the command reports failure.")
+	usageLine("       rysh prompt [--session <n>] [--pane-id <p>] [--timeout <d>] [--json] -- '<text>'")
+	usageLine("                    send a prompt to a RUNNING session's pane and block until the")
+	usageLine("                    agentic turn ends. Same exit codes as `rysh run` (0 done,")
+	usageLine("                    1 error, 2 partial, 3 gate-blocked, 4 budget, 5 timeout).")
+	usageLine("                    Unlike `rysh send` (fire-and-forget) it waits; unlike")
+	usageLine("                    `rysh run` it drives the session you already have.")
+	usageLine("       rysh script <file.rysh> [--print|--check] [--session <n>] [args...]")
+	usageLine("                    run a bash script whose ##-prefixed lines are rysh commands.")
+	usageLine("                    The same file also runs under plain bash, where those lines")
+	usageLine("                    are comments. --print shows the transpiled bash; --check")
+	usageLine("                    verifies both halves of that contract.")
 	fmt.Println()
 	usageLine("global flags:")
 	usageLine("  --config <path>      Load configuration from <path> instead of searching")
@@ -1465,6 +1540,10 @@ func printUsage() {
 	usageLine("                         | activate | deactivate")
 	usageLine("                         | channels | channel start|stop | register-output | unregister-output")
 	usageLine("       rysh --rysh       new ... | tab name <n> | lane name <n> | web start|stop|status")
+	fmt.Println()
+	usageLine("       every ## command is also reachable generically, including the ones with")
+	usageLine("       no --flag form (##secret, ##var, ##mode, ##policy, ##worktree, ...):")
+	usageLine("         rysh exec -- '##secret list'")
 	fmt.Println()
 	usageLine("       examples:")
 	usageLine("         rysh --cmd --tab-id <t> --pane-id <p> \"echo hailo\"  (== ##cmd echo hailo)")
@@ -1558,38 +1637,42 @@ func positionalArgs(args []string) []string {
 // Rysh "##" command flags
 // ---------------------------------------------------------------------------
 
-// ryshCmdNames is the set of top-level "##" system commands that have a
-// command-line equivalent flag. Each maps "rysh --<name> ..." to "##<name> ...".
-// (--help is intentionally excluded so it keeps showing the rysh usage text.)
-var ryshCmdNames = map[string]bool{
-	"tab":       true,
-	"pane":      true,
-	"lane":      true,
-	"panegroup": true,
-	"pg":        true,
-	"public":    true,
-	"private":   true,
-	"history":   true,
-	"pipe":      true,
-	"pipeline":  true,
-	"share":     true,
-	"unshare":   true,
-	"upstream":  true,
-	"snap":      true,
-	"workspace": true,
-	"ws":        true,
-	"new":       true,
-	"cmd":       true,
-	"rysh":      true,
-	"hop":       true,
-	"grounding": true,
-	"cron":      true,
-	"web":       true,
-	"auto":      true,
-	"agent":     true,
-	"humanoid":  true,
-	"snat":      true,
-	"rst":       true,
+// ryshFlagExclusions lists command words that must NOT get a "--<name>" form,
+// with the reason. Both are still reachable through `rysh exec`.
+//
+//   - help: "--help" has to keep printing the rysh usage text.
+//   - session: "--session <name>" is the targeting flag every rysh-command
+//     invocation uses to pick a session. Making it a command selector too
+//     would mean `rysh --session --session s list` — and parseRyshArgs, which
+//     strips every occurrence of the selector, could not tell the two apart.
+var ryshFlagExclusions = map[string]string{
+	"help":    "--help prints the rysh usage text",
+	"session": "--session is the session targeting flag",
+	// ##prompt is a `rysh script` builtin that compiles to `rysh prompt`; a
+	// --prompt selector would shadow both that verb and `rysh run --prompt`.
+	"prompt": "`rysh prompt` is the real verb; --prompt would shadow it",
+}
+
+// ryshCmdNames is the set of "##" command words that have a command-line
+// equivalent flag, mapping "rysh --<name> ..." to "##<name> ...".
+//
+// It is DERIVED from the dispatch table (actors.RyshCommandWords), not written
+// out by hand. The hand-written version listed 31 words while the table
+// answered to 52, so ##secret, ##var, ##mode, ##image, ##cost, ##policy,
+// ##proxy, ##replay, ##worktree, ##mcp, ##forge, ##integration, ##native and
+// ##webai had no CLI form at all — invisible drift that grew every time a
+// command was added. Deriving it means the two cannot disagree again.
+var ryshCmdNames = buildRyshCmdNames()
+
+func buildRyshCmdNames() map[string]bool {
+	names := make(map[string]bool)
+	for _, w := range actors.RyshCommandWords() {
+		if _, excluded := ryshFlagExclusions[w]; excluded {
+			continue
+		}
+		names[w] = true
+	}
+	return names
 }
 
 // detectRyshCmd scans args for the first rysh-command flag (e.g. --cmd, --pane)

@@ -17,14 +17,7 @@ func (m Model) activeTab() *domain.TabSnapshot {
 // snapshot. Returns false for headless actor IDs (agents, humanoids) that
 // use name-based pane IDs instead of real UUIDs.
 func (m Model) isSnapshotPane(paneID string) bool {
-	for _, tab := range m.snapshot.Tabs {
-		for _, pane := range tab.FlatPanes() {
-			if pane.ID == paneID {
-				return true
-			}
-		}
-	}
-	return false
+	return domain.FindPaneInWorkspace(&m.snapshot, paneID) != nil
 }
 
 // findPaneInSnapshot returns a pointer to a PaneSnapshot by ID, or nil.
@@ -46,18 +39,7 @@ func (m Model) findPaneInSnapshot(paneID string) *domain.PaneSnapshot {
 // paneExistsInSnapshot returns true if a pane with the given ID is present in
 // any tab of the current snapshot (including stacked background panes).
 func (m Model) paneExistsInSnapshot(paneID string) bool {
-	for _, tab := range m.snapshot.Tabs {
-		for _, lane := range tab.Lanes {
-			for _, g := range lane.PaneGroups {
-				for _, pane := range g.Panes {
-					if pane.ID == paneID {
-						return true
-					}
-				}
-			}
-		}
-	}
-	return false
+	return domain.FindPaneInWorkspace(&m.snapshot, paneID) != nil
 }
 
 // paneAvailWidth returns the total width budget for lipgloss Width() values

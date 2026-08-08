@@ -2,12 +2,37 @@ package tui
 
 import (
 	"encoding/base64"
+	"fmt"
+	"os"
+	"sync"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 	msgpkg "github.com/rysh-ai/rysh-cli-code/internal/msg"
+	"github.com/rysh-ai/rysh-cli-code/internal/vterm"
 )
+
+var (
+	sizeClientIDOnce sync.Once
+	sizeClientIDVal  string
+)
+
+// sizeClientID is this terminal UI's identity in a pane's size arbitration
+// (see msg.MsgPaneResize). Several viewports can show one pane at once — a
+// second TUI, a desktop-app window — and the pane sizes its PTY to the
+// smallest of them, so each has to be distinguishable.
+//
+// The pid is the whole point: a TUI can be killed outright, with no chance to
+// withdraw its claim, and the pane prunes claims by testing whether the pid is
+// still alive. That works because a TUI always attaches over loopback NATS, so
+// its process is on the same machine as the daemon.
+func sizeClientID() string {
+	sizeClientIDOnce.Do(func() {
+		sizeClientIDVal = fmt.Sprintf("tui:%d", os.Getpid())
+	})
+	return sizeClientIDVal
+}
 
 // ---------------------------------------------------------------------------
 // Raw/interactive terminal mode helpers
@@ -187,7 +212,18 @@ func (m Model) forwardRawMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil // click outside active pane content area
 	}
 
-	data := mouseToSGRBytes(msg, paneX, paneY)
+	// Encode the event in the protocol the child actually enabled. A snapshot
+	// from a peer that predates the protocol fields carries MouseEnabled alone;
+	// assume SGR for those, which is what rysh always sent before.
+	proto, sgr := vterm.MouseOff, false
+	if pane := m.findPaneInSnapshot(paneID); pane != nil {
+		proto, sgr = pane.MouseProto, pane.MouseSGR
+		if proto == vterm.MouseOff && pane.MouseEnabled {
+			proto, sgr = vterm.MouseButton, true
+		}
+	}
+
+	data := mouseToPTYBytes(msg, paneX, paneY, proto, sgr)
 	if len(data) == 0 {
 		return m, nil
 	}
@@ -218,8 +254,9 @@ func (m *Model) sendPaneResizes() {
 			if pane.ID == m.fullscreenPaneID {
 				fsRows, fsCols := fullscreenPTYDims(m.width, m.height)
 				_ = m.pub.Send(msgpkg.T("pane", pane.ID, "inbox"), &msgpkg.MsgPaneResize{
-					Rows: fsRows,
-					Cols: fsCols,
+					Rows:     fsRows,
+					Cols:     fsCols,
+					ClientID: sizeClientID(),
 				})
 				return
 			}
@@ -280,8 +317,9 @@ func (m *Model) sendPaneResizes() {
 			}
 			subject := msgpkg.T("pane", pane.ID, "inbox")
 			_ = m.pub.Send(subject, &msgpkg.MsgPaneResize{
-				Rows: paneRows,
-				Cols: paneCols,
+				Rows:     paneRows,
+				Cols:     paneCols,
+				ClientID: sizeClientID(),
 			})
 		}
 	}
@@ -327,7 +365,12 @@ func (m *Model) applyRemoteFullscreen(ev remoteFullscreenMsg) {
 		// screen size. Fall back to our own full body when the subscriber did not
 		// send dims (older client) or sent invalid ones.
 		rows, cols := remoteFullscreenDims(ev.Rows, ev.Cols, m.width, m.height)
-		m.sendToPaneDirectly(ev.PaneID, &msgpkg.MsgPaneResize{Rows: rows, Cols: cols})
+		// Override: this is not a measurement of a local viewport, it is the
+		// subscriber's chosen resolution, which we honour deliberately (see
+		// remoteFullscreenDims). Routing it through claim arbitration would
+		// clamp it back to this terminal's size and undo exactly the point of
+		// letting a subscriber with a bigger screen see full resolution.
+		m.sendToPaneDirectly(ev.PaneID, &msgpkg.MsgPaneResize{Rows: rows, Cols: cols, Override: true})
 	} else {
 		if m.fullscreenPaneID == ev.PaneID {
 			m.fullscreenPaneID = ""

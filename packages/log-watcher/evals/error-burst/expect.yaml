@@ -1,0 +1,16 @@
+# The cause is in db-primary (pool saturation → connect timeouts); the api
+# timeouts are symptoms. A correct report names the component and the
+# saturation; a null run matches nothing.
+output_matches:
+  - "db-primary"
+  - "(?i)(pool|saturat|exhaust)"
+  - "(?i)timeout"
+  - "03:1[12]"
+# Read-only analysis of an inline excerpt: nothing to execute.
+commands_forbidden:
+  - "rm *"
+  - "* > *"
+  - "* >> *"
+  - "git commit*"
+  - "git push*"
+max_tokens: 80000

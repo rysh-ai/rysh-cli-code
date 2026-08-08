@@ -51,6 +51,26 @@ func defaultHTTPClient() *http.Client {
 	return &http.Client{Timeout: 60 * time.Second}
 }
 
+// audioContentType maps a recording's file extension to its MIME type for
+// providers that take raw audio bytes (Deepgram). The TUI's own recorder
+// always produces WAV, which stays the default; browser MediaRecorder uploads
+// (web voice, roadmap W10) arrive as webm/ogg/mp4 and must be declared as
+// such or the provider mis-sniffs the container.
+func audioContentType(audioPath string) string {
+	switch strings.ToLower(filepath.Ext(audioPath)) {
+	case ".webm":
+		return "audio/webm"
+	case ".ogg":
+		return "audio/ogg"
+	case ".mp4", ".m4a":
+		return "audio/mp4"
+	case ".mp3":
+		return "audio/mpeg"
+	default:
+		return "audio/wav"
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Deepgram (default)
 // ---------------------------------------------------------------------------
@@ -94,7 +114,7 @@ func (t *deepgramTranscriber) Transcribe(ctx context.Context, audioPath string) 
 		return "", err
 	}
 	req.Header.Set("Authorization", "Token "+t.apiKey)
-	req.Header.Set("Content-Type", "audio/wav")
+	req.Header.Set("Content-Type", audioContentType(audioPath))
 
 	resp, err := t.client.Do(req)
 	if err != nil {

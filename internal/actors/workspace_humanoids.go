@@ -124,6 +124,7 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 
 	if w.humanoidRegistryPID == nil {
 		fmt.Fprintf(out, "\n[humanoids] humanoid registry not available (agentic mode disabled?)\n")
+		w.failRysh("humanoid registry not available (agentic mode disabled?)")
 		return
 	}
 
@@ -131,10 +132,11 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 	switch sub {
 	case "spawn":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[humanoids] usage:\n")
-			fmt.Fprintf(out, "  ##humanoid spawn <name>                   load .rysh/humanoids/<name>/SKILL.md\n")
-			fmt.Fprintf(out, "  ##humanoid spawn <path-to-file.md>        load explicit skill file\n")
-			fmt.Fprintf(out, "  ##humanoid spawn <name> <system-prompt>   create humanoid inline\n")
+			ryshWriter(out).UsageIn("humanoids",
+				"##humanoid spawn <name>                   load .rysh/humanoids/<name>/SKILL.md",
+				"##humanoid spawn <path-to-file.md>        load explicit skill file",
+				"##humanoid spawn <name> <system-prompt>   create humanoid inline",
+			)
 			return
 		}
 		// Single arg: skill lookup (bare name or explicit .md/path).
@@ -161,7 +163,8 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 
 	case "register-output":
 		if len(args) < 3 {
-			fmt.Fprintf(out, "\n[humanoids] usage: ##humanoid register-output <humanoid-name> <pane-name>\n")
+			ryshWriter(out).UsageLineIn("humanoids", "##humanoid register-output <humanoid-name> <pane-name>")
+			w.failRyshUsage("usage: %s", "##humanoid register-output <humanoid-name> <pane-name>")
 			return
 		}
 		humanoidName := args[1]
@@ -169,6 +172,7 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 		targetPaneID := w.resolvePaneID(paneName)
 		if targetPaneID == "" {
 			fmt.Fprintf(out, "\n[humanoids] pane not found: %s\n", paneName)
+			w.failRysh("pane not found: %s", paneName)
 			return
 		}
 		groupID := w.findPaneGroupID(targetPaneID)
@@ -182,7 +186,8 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 
 	case "unregister-output":
 		if len(args) < 3 {
-			fmt.Fprintf(out, "\n[humanoids] usage: ##humanoid unregister-output <humanoid-name> <pane-name>\n")
+			ryshWriter(out).UsageLineIn("humanoids", "##humanoid unregister-output <humanoid-name> <pane-name>")
+			w.failRyshUsage("usage: %s", "##humanoid unregister-output <humanoid-name> <pane-name>")
 			return
 		}
 		humanoidName := args[1]
@@ -190,6 +195,7 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 		targetPaneID := w.resolvePaneID(paneName)
 		if targetPaneID == "" {
 			fmt.Fprintf(out, "\n[humanoids] pane not found: %s\n", paneName)
+			w.failRysh("pane not found: %s", paneName)
 			return
 		}
 		w.actorSystem.Root.Send(w.humanoidRegistryPID, &msg.MsgHumanoidUnregisterPane{
@@ -215,7 +221,8 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 		case "artefacts", "artifacts", "artefact", "artifact", "files", "disk":
 			w.humanoidListArtefacts(out)
 		default:
-			fmt.Fprintf(out, "\n[humanoids] usage: ##humanoid list [all|instances|artefacts]\n")
+			ryshWriter(out).UsageLineIn("humanoids", "##humanoid list [all|instances|artefacts]")
+			w.failRyshUsage("usage: %s", "##humanoid list [all|instances|artefacts]")
 			fmt.Fprintf(out, "  all        running humanoids + unspawned skill files (default)\n")
 			fmt.Fprintf(out, "  instances  only the humanoids loaded in this workspace\n")
 			fmt.Fprintf(out, "  artefacts  only the skill files under .rysh/humanoids\n")
@@ -223,7 +230,8 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 
 	case "show":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[humanoids] usage: ##humanoid show <name>\n")
+			ryshWriter(out).UsageLineIn("humanoids", "##humanoid show <name>")
+			w.failRyshUsage("usage: %s", "##humanoid show <name>")
 			return
 		}
 		w.humanoidShow(out, args[1])
@@ -237,7 +245,8 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 		// Not to be confused with `@@<name> stop`, which only interrupts the
 		// in-flight run and keeps the humanoid alive (`@@<name> continue`).
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[humanoids] usage: ##humanoid stop <name>\n")
+			ryshWriter(out).UsageLineIn("humanoids", "##humanoid stop <name>")
+			w.failRyshUsage("usage: %s", "##humanoid stop <name>")
 			return
 		}
 		name := args[1]
@@ -253,7 +262,8 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 
 	case "activate":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[humanoids] usage: ##humanoid activate <name>\n")
+			ryshWriter(out).UsageLineIn("humanoids", "##humanoid activate <name>")
+			w.failRyshUsage("usage: %s", "##humanoid activate <name>")
 			return
 		}
 		w.actorSystem.Root.Send(w.humanoidRegistryPID, &msg.MsgHumanoidActivate{Name: args[1]})
@@ -261,7 +271,8 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 
 	case "deactivate":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[humanoids] usage: ##humanoid deactivate <name>\n")
+			ryshWriter(out).UsageLineIn("humanoids", "##humanoid deactivate <name>")
+			w.failRyshUsage("usage: %s", "##humanoid deactivate <name>")
 			return
 		}
 		w.actorSystem.Root.Send(w.humanoidRegistryPID, &msg.MsgHumanoidDeactivate{Name: args[1]})
@@ -269,21 +280,24 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 
 	case "channels":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[humanoids] usage: ##humanoid channels <name>\n")
+			ryshWriter(out).UsageLineIn("humanoids", "##humanoid channels <name>")
+			w.failRyshUsage("usage: %s", "##humanoid channels <name>")
 			return
 		}
 		w.humanoidChannels(out, args[1])
 
 	case "channel":
 		if len(args) < 3 {
-			fmt.Fprintf(out, "\n[humanoids] usage:\n")
-			fmt.Fprintf(out, "  ##humanoid channel start <name> <channel-type>\n")
-			fmt.Fprintf(out, "  ##humanoid channel stop <name> <channel-type>\n")
+			ryshWriter(out).UsageIn("humanoids",
+				"##humanoid channel start <name> <channel-type>",
+				"##humanoid channel stop <name> <channel-type>",
+			)
 			return
 		}
 		action := args[1]
 		if len(args) < 4 {
-			fmt.Fprintf(out, "\n[humanoids] usage: ##humanoid channel %s <name> <channel-type>\n", action)
+			ryshWriter(out).UsageLineIn("humanoids", fmt.Sprintf("##humanoid channel %s <name> <channel-type>", action))
+			w.failRyshUsage("usage: %s", fmt.Sprintf("##humanoid channel %s <name> <channel-type>", action))
 			return
 		}
 		humanoidName := args[2]
@@ -301,19 +315,22 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 				channelType, humanoidName)
 		default:
 			fmt.Fprintf(out, "\n[humanoids] unknown channel action: %q (use start or stop)\n", action)
+			w.failRysh("unknown channel action: %q (use start or stop)", action)
 		}
 
 	case "reply-to":
 		// ##humanoid reply-to <name> messages
 		// ##humanoid reply-to <name> mentions
 		if len(args) < 3 {
-			fmt.Fprintf(out, "\n[humanoids] usage: ##humanoid reply-to <name> messages|mentions\n")
+			ryshWriter(out).UsageLineIn("humanoids", "##humanoid reply-to <name> messages|mentions")
+			w.failRyshUsage("usage: %s", "##humanoid reply-to <name> messages|mentions")
 			return
 		}
 		humanoidName := args[1]
 		mode := args[2]
 		if mode != "messages" && mode != "mentions" {
 			fmt.Fprintf(out, "\n[humanoids] invalid reply mode %q — use \"messages\" or \"mentions\"\n", mode)
+			w.failRysh("invalid reply mode %q — use \"messages\" or \"mentions\"", mode)
 			return
 		}
 		// Default channel type to "slack" — this is the only channel where
@@ -326,13 +343,15 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 	case "governance":
 		// ##humanoid governance <name> ai|human
 		if len(args) < 3 {
-			fmt.Fprintf(out, "\n[humanoids] usage: ##humanoid governance <name> ai|human\n")
+			ryshWriter(out).UsageLineIn("humanoids", "##humanoid governance <name> ai|human")
+			w.failRyshUsage("usage: %s", "##humanoid governance <name> ai|human")
 			return
 		}
 		humanoidName := args[1]
 		mode := args[2]
 		if mode != "ai" && mode != "human" {
 			fmt.Fprintf(out, "\n[humanoids] invalid governance mode %q — use \"ai\" or \"human\"\n", mode)
+			w.failRysh("invalid governance mode %q — use \"ai\" or \"human\"", mode)
 			return
 		}
 		_ = w.pub.Send(msg.T("humanoid", humanoidName, "inbox"),
@@ -345,8 +364,9 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 		// ##humanoid provider <name> <provider> [model]
 		// design 006 §4.3 step 2 (R4). Valid providers: provider.KnownProviderNames.
 		if len(args) < 3 {
-			fmt.Fprintf(out, "\n[humanoids] usage: ##humanoid provider <name> <%s> [model]\n",
-				strings.Join(provider.KnownProviderNames(), "|"))
+			ryshWriter(out).UsageLineIn("humanoids", fmt.Sprintf(
+				"##humanoid provider <name> <%s> [model]",
+				strings.Join(provider.KnownProviderNames(), "|")))
 			return
 		}
 		humanoidName := args[1]
@@ -358,6 +378,7 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 		if !provider.IsKnownProviderName(providerName) {
 			fmt.Fprintf(out, "\n[humanoids] unknown provider %q — use %s\n",
 				providerName, strings.Join(provider.KnownProviderNames(), ", "))
+			w.failRyshUsage("unknown provider %q", providerName)
 			return
 		}
 		_ = w.pub.Send(msg.T("humanoid", humanoidName, "inbox"),
@@ -377,10 +398,11 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 		// dashboard drives, so terminal and web share one code path (WS3,
 		// design 003 §4.4).
 		if len(args) < 3 {
-			fmt.Fprintf(out, "\n[humanoids] usage:\n")
-			fmt.Fprintf(out, "  ##humanoid pair list <name> [channel]\n")
-			fmt.Fprintf(out, "  ##humanoid pair approve <name> <code>\n")
-			fmt.Fprintf(out, "  ##humanoid pair link <name> <channel> [force]\n")
+			ryshWriter(out).UsageIn("humanoids",
+				"##humanoid pair list <name> [channel]",
+				"##humanoid pair approve <name> <code>",
+				"##humanoid pair link <name> <channel> [force]",
+			)
 			return
 		}
 		action := args[1]
@@ -394,7 +416,8 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 			w.humanoidPairList(out, humanoidName, channel)
 		case "approve":
 			if len(args) < 4 {
-				fmt.Fprintf(out, "\n[humanoids] usage: ##humanoid pair approve <name> <code>\n")
+				ryshWriter(out).UsageLineIn("humanoids", "##humanoid pair approve <name> <code>")
+				w.failRyshUsage("usage: %s", "##humanoid pair approve <name> <code>")
 				return
 			}
 			code := args[3]
@@ -407,7 +430,8 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 			// implicitly — re-provisioning a linked number is the §6 hazard.
 			// "force" overrides the adapter's re-link guard.
 			if len(args) < 4 {
-				fmt.Fprintf(out, "\n[humanoids] usage: ##humanoid pair link <name> <channel> [force]\n")
+				ryshWriter(out).UsageLineIn("humanoids", "##humanoid pair link <name> <channel> [force]")
+				w.failRyshUsage("usage: %s", "##humanoid pair link <name> <channel> [force]")
 				return
 			}
 			channel := args[3]
@@ -421,13 +445,15 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 			fmt.Fprintf(out, "\n[humanoids] the QR renders in the humanoid's chat pane when ready\n")
 		default:
 			fmt.Fprintf(out, "\n[humanoids] unknown pair action: %q (use list, approve or link)\n", action)
+			w.failRysh("unknown pair action: %q (use list, approve or link)", action)
 		}
 
 	case "allow":
 		// ##humanoid allow <name> <sender> [channel] — allowlist a sender
 		// directly, skipping the pairing-code flow.
 		if len(args) < 3 {
-			fmt.Fprintf(out, "\n[humanoids] usage: ##humanoid allow <name> <sender> [channel]\n")
+			ryshWriter(out).UsageLineIn("humanoids", "##humanoid allow <name> <sender> [channel]")
+			w.failRyshUsage("usage: %s", "##humanoid allow <name> <sender> [channel]")
 			return
 		}
 		humanoidName := args[1]
@@ -447,9 +473,10 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 
 	case "attention":
 		if len(args) < 3 {
-			fmt.Fprintf(out, "\n[humanoids] usage:\n")
-			fmt.Fprintf(out, "  ##humanoid attention enable <name>\n")
-			fmt.Fprintf(out, "  ##humanoid attention disable <name>\n")
+			ryshWriter(out).UsageIn("humanoids",
+				"##humanoid attention enable <name>",
+				"##humanoid attention disable <name>",
+			)
 			return
 		}
 		action := args[1]
@@ -465,10 +492,12 @@ func (w *WorkspaceActor) handleHumanoidSubcommand(out *strings.Builder, paneID s
 			fmt.Fprintf(out, "\n[humanoids] attention disabled for %s\n", humanoidName)
 		default:
 			fmt.Fprintf(out, "\n[humanoids] unknown action: %s (use enable or disable)\n", action)
+			w.failRysh("unknown action: %s (use enable or disable)", action)
 		}
 
 	default:
-		fmt.Fprintf(out, "\n[humanoids] unknown subcommand: %q\n", sub)
+		ryshWriter(out).UnknownIn("humanoids", sub)
+		w.failRyshUsage("unknown %s subcommand: %q", "humanoids", sub)
 		w.humanoidHelp(out)
 	}
 }
@@ -481,6 +510,7 @@ func (w *WorkspaceActor) humanoidPairList(out *strings.Builder, humanoidName, ch
 		&msg.MsgChannelPairList{HumanoidName: humanoidName, Channel: channel},
 		2*time.Second)
 	if err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "\n[humanoids] no pairing reply from %q (is the humanoid spawned?): %v\n",
 			humanoidName, err)
 		return
@@ -545,6 +575,7 @@ func (w *WorkspaceActor) humanoidShow(out *strings.Builder, name string) {
 	}
 	fmt.Fprintf(out, "\n[humanoids] no recipe for %q: no skill file at %s, and no humanoid by that name is loaded\n",
 		name, path)
+	w.failRysh("no recipe for %q", name)
 }
 
 // loadedHumanoid returns the loaded instance with this name, if any.
@@ -575,6 +606,7 @@ func (w *WorkspaceActor) humanoidChannels(out *strings.Builder, name string) {
 	result, err := future.Result()
 	if err != nil {
 		fmt.Fprintf(out, "\n[humanoids] failed to query humanoids: %v\n", err)
+		w.failRysh("failed to query humanoids: %v", err)
 		return
 	}
 	reply, ok := result.(*msg.MsgHumanoidListReply)
@@ -609,6 +641,7 @@ func (w *WorkspaceActor) humanoidChannels(out *strings.Builder, name string) {
 		}
 	}
 	fmt.Fprintf(out, "\n[humanoids] humanoid not found: %q\n", name)
+	w.failRysh("humanoid not found: %q", name)
 }
 
 // queryHumanoids fetches the humanoids currently loaded into the workspace from
@@ -839,6 +872,7 @@ func (w *WorkspaceActor) humanoidListInstances(out *strings.Builder) {
 	humanoids, err := w.queryHumanoids()
 	if err != nil {
 		fmt.Fprintf(out, "\n[humanoids] failed to list humanoids: %v\n", err)
+		w.failRysh("failed to list humanoids: %v", err)
 		return
 	}
 	if len(humanoids) == 0 {
@@ -893,6 +927,7 @@ func (w *WorkspaceActor) humanoidListArtefacts(out *strings.Builder) {
 	// from the environment only (no secret-store lookups, no values shown).
 	defs, err := parseHumanoidDir("", envOnlyExpand)
 	if err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "\n[humanoids] no artefacts under %s (%v)\n", dir, err)
 		return
 	}
@@ -952,6 +987,7 @@ func (w *WorkspaceActor) createHumanoidFromFile(out *strings.Builder, paneID, pa
 	def, err := parseHumanoidFile(path, w.namedExpandFunc(paneID))
 	if err != nil {
 		fmt.Fprintf(out, "\n[humanoids] failed to parse skill file %q: %v\n", path, err)
+		w.failRysh("failed to parse skill file %q: %v", path, err)
 		return
 	}
 	if def.Name == "" {
@@ -983,6 +1019,7 @@ func (w *WorkspaceActor) createHumanoidsFromDir(out *strings.Builder, paneID, di
 	defs, err := parseHumanoidDir(dirPath, w.namedExpandFunc(paneID))
 	if err != nil {
 		fmt.Fprintf(out, "\n[humanoids] failed to read directory %q: %v\n", dirPath, err)
+		w.failRysh("failed to read directory %q: %v", dirPath, err)
 		return
 	}
 	if len(defs) == 0 {
@@ -993,6 +1030,7 @@ func (w *WorkspaceActor) createHumanoidsFromDir(out *strings.Builder, paneID, di
 	for _, def := range defs {
 		if def.Name == "" || def.SystemPrompt == "" {
 			fmt.Fprintf(out, "\n[humanoids] skipping invalid definition in %q\n", dirPath)
+			w.failRysh("skipping invalid definition in %q", dirPath)
 			continue
 		}
 		w.actorSystem.Root.Send(w.humanoidRegistryPID, &msg.MsgHumanoidCreate{
@@ -1012,44 +1050,45 @@ func (w *WorkspaceActor) createHumanoidsFromDir(out *strings.Builder, paneID, di
 
 // humanoidHelp writes humanoid command help text.
 func (w *WorkspaceActor) humanoidHelp(out *strings.Builder) {
-	fmt.Fprintf(out, "\n[humanoids] usage:\n")
-	fmt.Fprintf(out, "  ##humanoid spawn <name>                              load .rysh/humanoids/<name>/SKILL.md\n")
-	fmt.Fprintf(out, "  ##humanoid spawn <path-to-file.md>                   load explicit skill file\n")
-	fmt.Fprintf(out, "  ##humanoid spawn <name> <system-prompt>              create humanoid inline\n")
-	fmt.Fprintf(out, "  ##humanoid spawn-all [directory]                     spawn all (default: .rysh/humanoids)\n")
-	fmt.Fprintf(out, "  ##humanoid stop <name>                                stop a running humanoid (skill file kept; re-spawn by name)\n")
-	fmt.Fprintf(out, "  ##humanoid list [all]                                 running + paused + stopped (unspawned skill files) (default)\n")
-	fmt.Fprintf(out, "  ##humanoid list instances                             only the humanoids spawned in this workspace\n")
-	fmt.Fprintf(out, "  ##humanoid list artefacts                             only the skill files under .rysh/humanoids\n")
-	fmt.Fprintf(out, "  ##humanoid show <name>                                print a humanoid's recipe (skill file: frontmatter + prompt)\n")
-	fmt.Fprintf(out, "  ##humanoid activate <name>                            activate a humanoid\n")
-	fmt.Fprintf(out, "  ##humanoid deactivate <name>                          deactivate a humanoid\n")
-	fmt.Fprintf(out, "  ##humanoid register-output <humanoid> <pane>          route output to pane chat\n")
-	fmt.Fprintf(out, "  ##humanoid unregister-output <humanoid> <pane>        stop routing output to pane\n")
-	fmt.Fprintf(out, "  ##humanoid channels <name>                            show channel details\n")
-	fmt.Fprintf(out, "  ##humanoid channel start <name> <type>                start a channel\n")
-	fmt.Fprintf(out, "  ##humanoid channel stop <name> <type>                 stop a channel\n")
-	fmt.Fprintf(out, "  ##humanoid reply-to <name> messages                   reply to all messages\n")
-	fmt.Fprintf(out, "  ##humanoid reply-to <name> mentions                   reply only to @mentions\n")
-	fmt.Fprintf(out, "  ##humanoid governance <name> ai|human                 ai: auto-reply · human: draft-and-confirm\n")
-	fmt.Fprintf(out, "  ##humanoid provider <name> <provider> [model]         override the model provider (until restart)\n")
-	fmt.Fprintf(out, "  ##humanoid pair list <name> [channel]                 show pending pairings + allowlist\n")
-	fmt.Fprintf(out, "  ##humanoid pair approve <name> <code>                 approve a pending contact\n")
-	fmt.Fprintf(out, "  ##humanoid pair link <name> <channel> [force]         run a device-link (QR) flow now\n")
-	fmt.Fprintf(out, "  ##humanoid allow <name> <sender> [channel]            allowlist a sender directly\n")
-	fmt.Fprintf(out, "  ##humanoid attention enable <name>                   enable attention alerts\n")
-	fmt.Fprintf(out, "  ##humanoid attention disable <name>                  disable attention alerts\n")
-	fmt.Fprintf(out, "\n")
-	fmt.Fprintf(out, "  channel types: whatsapp, slack, email, phone, chatbot\n")
-	fmt.Fprintf(out, "\n")
-	fmt.Fprintf(out, "  skill lookup: bare names resolve to <base>/humanoids/<name>/SKILL.md, where\n")
-	fmt.Fprintf(out, "    <base> is ./.rysh if a project .rysh exists, else $HOME/.rysh.\n")
-	fmt.Fprintf(out, "    Use ./, ../, /, ~/ for explicit paths (legacy *.md files supported).\n")
-	fmt.Fprintf(out, "\n")
-	fmt.Fprintf(out, "  @humanoid-name <prompt>                               send prompt to humanoid\n")
-	fmt.Fprintf(out, "  @@humanoid-name stop                                  interrupt the current run only (@@name continue resumes)\n")
-	fmt.Fprintf(out, "                                                        — to end the humanoid itself use ##humanoid stop <name>\n")
-	fmt.Fprintf(out, "  @@humanoid-name activate                              activate humanoid\n")
-	fmt.Fprintf(out, "  @@humanoid-name deactivate                            deactivate humanoid\n")
-	fmt.Fprintf(out, "\n")
+	ryshWriter(out).UsageIn("humanoids",
+		"##humanoid spawn <name>                              load .rysh/humanoids/<name>/SKILL.md",
+		"##humanoid spawn <path-to-file.md>                   load explicit skill file",
+		"##humanoid spawn <name> <system-prompt>              create humanoid inline",
+		"##humanoid spawn-all [directory]                     spawn all (default: .rysh/humanoids)",
+		"##humanoid stop <name>                                stop a running humanoid (skill file kept; re-spawn by name)",
+		"##humanoid list [all]                                 running + paused + stopped (unspawned skill files) (default)",
+		"##humanoid list instances                             only the humanoids spawned in this workspace",
+		"##humanoid list artefacts                             only the skill files under .rysh/humanoids",
+		"##humanoid show <name>                                print a humanoid's recipe (skill file: frontmatter + prompt)",
+		"##humanoid activate <name>                            activate a humanoid",
+		"##humanoid deactivate <name>                          deactivate a humanoid",
+		"##humanoid register-output <humanoid> <pane>          route output to pane chat",
+		"##humanoid unregister-output <humanoid> <pane>        stop routing output to pane",
+		"##humanoid channels <name>                            show channel details",
+		"##humanoid channel start <name> <type>                start a channel",
+		"##humanoid channel stop <name> <type>                 stop a channel",
+		"##humanoid reply-to <name> messages                   reply to all messages",
+		"##humanoid reply-to <name> mentions                   reply only to @mentions",
+		"##humanoid governance <name> ai|human                 ai: auto-reply · human: draft-and-confirm",
+		"##humanoid provider <name> <provider> [model]         override the model provider (until restart)",
+		"##humanoid pair list <name> [channel]                 show pending pairings + allowlist",
+		"##humanoid pair approve <name> <code>                 approve a pending contact",
+		"##humanoid pair link <name> <channel> [force]         run a device-link (QR) flow now",
+		"##humanoid allow <name> <sender> [channel]            allowlist a sender directly",
+		"##humanoid attention enable <name>                   enable attention alerts",
+		"##humanoid attention disable <name>                  disable attention alerts",
+		"",
+		"channel types: whatsapp, slack, email, phone, chatbot",
+		"",
+		"skill lookup: bare names resolve to <base>/humanoids/<name>/SKILL.md, where",
+		"  <base> is ./.rysh if a project .rysh exists, else $HOME/.rysh.",
+		"  Use ./, ../, /, ~/ for explicit paths (legacy *.md files supported).",
+		"",
+		"@humanoid-name <prompt>                               send prompt to humanoid",
+		"@@humanoid-name stop                                  interrupt the current run only (@@name continue resumes)",
+		"                                                      — to end the humanoid itself use ##humanoid stop <name>",
+		"@@humanoid-name activate                              activate humanoid",
+		"@@humanoid-name deactivate                            deactivate humanoid",
+		"",
+	)
 }

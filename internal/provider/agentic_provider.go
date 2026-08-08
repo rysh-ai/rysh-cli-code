@@ -33,11 +33,14 @@ const (
 func NewClaudeAgenticProvider(cfg config.Config) *ClaudeAgenticProvider {
 	apiURL := cfg.APIURL
 	if apiURL == "" {
-		apiURL = "https://api.anthropic.com"
+		apiURL = config.DefaultAnthropicAPIURL
 	}
 	model := cfg.DefaultModel
 	if model == "" {
-		model = "claude-opus-4-8"
+		// Track the engine's default rather than keeping a local copy of the
+		// id: rysh-server's copy of this same string silently rotted two
+		// releases behind before anyone noticed.
+		model = sharedprovider.DefaultClaudeModel
 	}
 	// maxTokens <= 0 lets the shared constructor pick the per-model default
 	// (DefaultMaxTokensForModel), so we don't hard-code a budget here.
@@ -65,9 +68,29 @@ const geminiDefaultModel = "gemini-2.5-flash"
 // (via its OpenAI-compat endpoint); the dialect is translated at the edge so
 // the agentic loop stays neutral.
 func NewOpenAIAgenticProvider(cfg config.Config) AgenticProvider {
-	name := strings.ToLower(strings.TrimSpace(cfg.ProviderName))
-	apiURL := cfg.APIURL
-	model := cfg.DefaultModel
+	name, apiURL, model := openAIFamilyDefaults(cfg.ProviderName, cfg.APIURL, cfg.DefaultModel)
+	return sharedprovider.NewOpenAIAgenticProvider(name, cfg.APIKey, apiURL, model, cfg.MaxTokens)
+}
+
+// openAIFamilyDefaults resolves the (family, endpoint, model) triple for an
+// OpenAI-compatible selection, filling in each family's own defaults for
+// whatever the config did not choose.
+//
+// The subtle part is what counts as "did not choose" for the endpoint. Every
+// Config starts with Anthropic's host in api_url, because the default provider
+// is Claude — so an EMPTY api_url is not the only unset state, and treating the
+// inherited Anthropic default as a deliberate override is what sent
+// `provider.name: openai` to api.anthropic.com and killed every turn on a bare
+// 404. That host answers, so the failure read as a broken model rather than a
+// misrouted request. The ##pane / ##humanoid override paths dodge it by
+// blanking APIURL before they construct; a config-level selection has no such
+// step, which is why the check belongs here.
+func openAIFamilyDefaults(providerName, configuredURL, configuredModel string) (name, apiURL, model string) {
+	name = strings.ToLower(strings.TrimSpace(providerName))
+	apiURL, model = configuredURL, configuredModel
+	if apiURL == config.DefaultAnthropicAPIURL {
+		apiURL = ""
+	}
 	switch name {
 	case "ollama":
 		if apiURL == "" {
@@ -92,7 +115,7 @@ func NewOpenAIAgenticProvider(cfg config.Config) AgenticProvider {
 			model = "gpt-4o"
 		}
 	}
-	return sharedprovider.NewOpenAIAgenticProvider(name, cfg.APIKey, apiURL, model, cfg.MaxTokens)
+	return name, apiURL, model
 }
 
 // RequiresAPIKey reports whether the named provider needs an API key before it

@@ -2,6 +2,8 @@ package actors
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -19,6 +21,16 @@ type cmdSelectors struct {
 	lane string
 	pg   string
 	pane string
+	// running narrows the resolved scope to panes whose FOREGROUND program is
+	// this executable ("claude", "vim"). It is a filter, not a target: the scope
+	// still says where to look, this says which of those panes to touch. Sending
+	// a shell command to a pane running a full-screen program types into that
+	// program, so being able to say "only the ones at a shell" — or "only the
+	// ones running claude" — is the difference between a broadcast and a mess.
+	running string
+	// capture redirects each pane's output to a file instead of leaving it on
+	// the pane's screen, and reports where. See captureCommand.
+	capture bool
 }
 
 // parseCmdArgs parses the arguments of `##cmd`:
@@ -52,6 +64,13 @@ func parseCmdArgs(args []string) (scope string, sel cmdSelectors, command string
 		if !strings.HasPrefix(tok, "--") {
 			break // first non-flag token: the command starts here
 		}
+		// Boolean flags take no value; checked before the pair parsing below so
+		// "--capture pwd" does not swallow the command as --capture's argument.
+		if tok == "--capture" {
+			sel.capture = true
+			i++
+			continue
+		}
 		if i+1 >= len(rest) {
 			return "", sel, "", fmt.Errorf("flag %s requires a value", tok)
 		}
@@ -67,6 +86,8 @@ func parseCmdArgs(args []string) (scope string, sel cmdSelectors, command string
 			sel.pg = val
 		case "pane":
 			sel.pane = val
+		case "running":
+			sel.running = val
 		default:
 			return "", sel, "", fmt.Errorf("unknown flag %s", tok)
 		}
@@ -88,192 +109,35 @@ func parseCmdArgs(args []string) (scope string, sel cmdSelectors, command string
 }
 
 // ---------------------------------------------------------------------------
-// Snapshot-based scope resolution (pure helpers, unit-tested)
+// Broadcast scope policy
+//
+// The generic tree navigation that used to live here — selector resolution,
+// containment checks, pane collection and counting — has moved to
+// internal/domain/navigate.go, where the ~18 other files that hand-roll the
+// same walks can actually reach it. It was always general-purpose code; it was
+// just parked in the one file that happened to need it first.
+//
+// What stays here is the part that is about ##cmd rather than about the tree:
+// which panes a broadcast refuses to target.
 // ---------------------------------------------------------------------------
 
-func resolveTabInSnapshot(snap *domain.WorkspaceSnapshot, arg string) *domain.TabSnapshot {
-	if len(snap.Tabs) == 0 {
-		return nil
-	}
-	if arg == "" {
-		for i := range snap.Tabs {
-			if snap.Tabs[i].ID == snap.ActiveTabID {
-				return &snap.Tabs[i]
-			}
-		}
-		return &snap.Tabs[0]
-	}
-	for i := range snap.Tabs {
-		if snap.Tabs[i].ID == arg {
-			return &snap.Tabs[i]
-		}
-	}
-	if n, e := strconv.Atoi(arg); e == nil && n >= 1 && n <= len(snap.Tabs) {
-		return &snap.Tabs[n-1]
-	}
-	for i := range snap.Tabs {
-		if snap.Tabs[i].Title == arg {
-			return &snap.Tabs[i]
-		}
-	}
-	return nil
-}
+// notShared rejects panes that are shared upstream with remote users. A
+// broadcast never targets them — the command would execute in a pane a remote
+// user is watching, and possibly driving.
+func notShared(p *domain.PaneSnapshot) bool { return !p.Sharing }
 
-func laneContainsPane(lane *domain.LaneSnapshot, paneID string) bool {
-	for gi := range lane.PaneGroups {
-		if groupContainsPane(&lane.PaneGroups[gi], paneID) {
-			return true
-		}
-	}
-	return false
-}
-
-func resolveLaneInTabSnapshot(tab *domain.TabSnapshot, arg string) *domain.LaneSnapshot {
-	if len(tab.Lanes) == 0 {
-		return nil
-	}
-	if arg == "" {
-		if tab.ActivePaneID != "" {
-			for i := range tab.Lanes {
-				if laneContainsPane(&tab.Lanes[i], tab.ActivePaneID) {
-					return &tab.Lanes[i]
-				}
-			}
-		}
-		return &tab.Lanes[0]
-	}
-	for i := range tab.Lanes {
-		if tab.Lanes[i].ID == arg {
-			return &tab.Lanes[i]
-		}
-	}
-	if n, e := strconv.Atoi(arg); e == nil && n >= 1 && n <= len(tab.Lanes) {
-		return &tab.Lanes[n-1]
-	}
-	for i := range tab.Lanes {
-		if tab.Lanes[i].Name == arg {
-			return &tab.Lanes[i]
-		}
-	}
-	return nil
-}
-
-func groupContainsPane(g *domain.PaneGroupSnapshot, paneID string) bool {
-	for i := range g.Panes {
-		if g.Panes[i].ID == paneID {
-			return true
-		}
-	}
-	return false
-}
-
-func resolveGroupInLaneSnapshot(lane *domain.LaneSnapshot, arg string) *domain.PaneGroupSnapshot {
-	if len(lane.PaneGroups) == 0 {
-		return nil
-	}
-	if arg == "" {
-		if lane.ActivePaneID != "" {
-			for i := range lane.PaneGroups {
-				if groupContainsPane(&lane.PaneGroups[i], lane.ActivePaneID) {
-					return &lane.PaneGroups[i]
-				}
-			}
-		}
-		return &lane.PaneGroups[0]
-	}
-	for i := range lane.PaneGroups {
-		if lane.PaneGroups[i].ID == arg {
-			return &lane.PaneGroups[i]
-		}
-	}
-	if n, e := strconv.Atoi(arg); e == nil && n >= 1 && n <= len(lane.PaneGroups) {
-		return &lane.PaneGroups[n-1]
-	}
-	return nil
-}
-
-func resolvePaneInGroupSnapshot(g *domain.PaneGroupSnapshot, arg string) *domain.PaneSnapshot {
-	if len(g.Panes) == 0 {
-		return nil
-	}
-	if arg == "" {
-		if g.ActivePaneID != "" {
-			for i := range g.Panes {
-				if g.Panes[i].ID == g.ActivePaneID {
-					return &g.Panes[i]
-				}
-			}
-		}
-		return &g.Panes[0]
-	}
-	for i := range g.Panes {
-		p := &g.Panes[i]
-		if p.ID == arg || p.Title == arg || p.GivenName == arg {
-			return p
-		}
-	}
-	return nil
-}
-
-// paneIDsInGroup returns the IDs of every pane in the group, excluding panes
-// that are currently shared upstream with remote users (Sharing == true). The
-// number of excluded panes is returned as skipped.
+// paneIDsInGroup/Lane/Tab return the IDs of every pane in the scope that a
+// broadcast may target, along with the number excluded for being shared.
 func paneIDsInGroup(g *domain.PaneGroupSnapshot) (ids []string, skipped int) {
-	for i := range g.Panes {
-		if g.Panes[i].Sharing {
-			skipped++
-			continue
-		}
-		ids = append(ids, g.Panes[i].ID)
-	}
-	return ids, skipped
+	return domain.PaneIDsInGroupWhere(g, notShared)
 }
 
 func paneIDsInLane(l *domain.LaneSnapshot) (ids []string, skipped int) {
-	for i := range l.PaneGroups {
-		gi, gs := paneIDsInGroup(&l.PaneGroups[i])
-		ids = append(ids, gi...)
-		skipped += gs
-	}
-	return ids, skipped
+	return domain.PaneIDsInLaneWhere(l, notShared)
 }
 
 func paneIDsInTab(t *domain.TabSnapshot) (ids []string, skipped int) {
-	for i := range t.Lanes {
-		li, ls := paneIDsInLane(&t.Lanes[i])
-		ids = append(ids, li...)
-		skipped += ls
-	}
-	return ids, skipped
-}
-
-func paneIDsInWorkspace(snap *domain.WorkspaceSnapshot) (ids []string, skipped int) {
-	for i := range snap.Tabs {
-		ti, ts := paneIDsInTab(&snap.Tabs[i])
-		ids = append(ids, ti...)
-		skipped += ts
-	}
-	return ids, skipped
-}
-
-// countPanesInGroup/Lane/Tab count every pane (including shared ones). Used to
-// report how many panes were excluded because their tab is a pipeline.
-func countPanesInGroup(g *domain.PaneGroupSnapshot) int { return len(g.Panes) }
-
-func countPanesInLane(l *domain.LaneSnapshot) int {
-	n := 0
-	for i := range l.PaneGroups {
-		n += countPanesInGroup(&l.PaneGroups[i])
-	}
-	return n
-}
-
-func countPanesInTab(t *domain.TabSnapshot) int {
-	n := 0
-	for i := range t.Lanes {
-		n += countPanesInLane(&t.Lanes[i])
-	}
-	return n
+	return domain.PaneIDsInTabWhere(t, notShared)
 }
 
 // collectScopePaneIDs resolves the target pane IDs for a scope within snap,
@@ -289,7 +153,7 @@ func collectScopePaneIDs(snap *domain.WorkspaceSnapshot, scope string, sel cmdSe
 		for i := range snap.Tabs {
 			t := &snap.Tabs[i]
 			if t.PipelineEnabled {
-				skippedPipeline += countPanesInTab(t)
+				skippedPipeline += domain.CountPanesInTab(t)
 				continue
 			}
 			ti, ts := paneIDsInTab(t)
@@ -298,19 +162,19 @@ func collectScopePaneIDs(snap *domain.WorkspaceSnapshot, scope string, sel cmdSe
 		}
 		return ids, skippedShared, skippedPipeline, "the workspace", nil
 	}
-	tab := resolveTabInSnapshot(snap, sel.tab)
+	tab := domain.ResolveTab(snap, sel.tab)
 	if tab == nil {
 		return nil, 0, 0, "", fmt.Errorf("tab not found: %q", sel.tab)
 	}
 	tabLabel := fmt.Sprintf("tab %q", tab.Title)
 	if scope == "tab" {
 		if tab.PipelineEnabled {
-			return nil, 0, countPanesInTab(tab), tabLabel, nil
+			return nil, 0, domain.CountPanesInTab(tab), tabLabel, nil
 		}
 		ids, skippedShared = paneIDsInTab(tab)
 		return ids, skippedShared, 0, tabLabel, nil
 	}
-	lane := resolveLaneInTabSnapshot(tab, sel.lane)
+	lane := domain.ResolveLane(tab, sel.lane)
 	if lane == nil {
 		return nil, 0, 0, "", fmt.Errorf("lane not found: %q", sel.lane)
 	}
@@ -320,25 +184,25 @@ func collectScopePaneIDs(snap *domain.WorkspaceSnapshot, scope string, sel cmdSe
 	}
 	if scope == "lane" {
 		if tab.PipelineEnabled {
-			return nil, 0, countPanesInLane(lane), laneLabel, nil
+			return nil, 0, domain.CountPanesInLane(lane), laneLabel, nil
 		}
 		ids, skippedShared = paneIDsInLane(lane)
 		return ids, skippedShared, 0, laneLabel, nil
 	}
-	group := resolveGroupInLaneSnapshot(lane, sel.pg)
+	group := domain.ResolveGroup(lane, sel.pg)
 	if group == nil {
 		return nil, 0, 0, "", fmt.Errorf("pane group not found: %q", sel.pg)
 	}
 	groupLabel := fmt.Sprintf("pane group %.8s of %s", group.ID, laneLabel)
 	if scope == "panegroup" {
 		if tab.PipelineEnabled {
-			return nil, 0, countPanesInGroup(group), groupLabel, nil
+			return nil, 0, domain.CountPanesInGroup(group), groupLabel, nil
 		}
 		ids, skippedShared = paneIDsInGroup(group)
 		return ids, skippedShared, 0, groupLabel, nil
 	}
 	// scope == "pane"
-	pane := resolvePaneInGroupSnapshot(group, sel.pane)
+	pane := domain.ResolvePane(group, sel.pane)
 	if pane == nil {
 		return nil, 0, 0, "", fmt.Errorf("pane not found: %q", sel.pane)
 	}
@@ -375,7 +239,7 @@ func anchorSnapshotToPane(snap *domain.WorkspaceSnapshot, paneID string) {
 			l := &t.Lanes[li]
 			for gi := range l.PaneGroups {
 				g := &l.PaneGroups[gi]
-				if groupContainsPane(g, paneID) {
+				if domain.GroupContainsPane(g, paneID) {
 					snap.ActiveTabID = t.ID
 					t.ActivePaneID = paneID
 					l.ActivePaneID = paneID
@@ -398,17 +262,100 @@ func anchorSnapshotToPane(snap *domain.WorkspaceSnapshot, paneID string) {
 // the active-entity default, resolution is anchored to that pane's tab/lane/group
 // rather than the (possibly stale) active-tab index. Empty for cross-workspace
 // broadcasts.
-func (w *WorkspaceActor) broadcastCmd(scope string, sel cmdSelectors, command, anchorPaneID string) (count, skippedShared, skippedPipeline int, label string, err error) {
-	snap := w.collectSnapshot(false)
+func (w *WorkspaceActor) broadcastCmd(scope string, sel cmdSelectors, command, anchorPaneID string) (targets []string, skippedShared, skippedPipeline int, label string, err error) {
+	snap := w.collectSnapshot(false, false)
 	anchorSnapshotToPane(&snap, anchorPaneID)
 	ids, skippedShared, skippedPipeline, label, err := collectScopePaneIDs(&snap, scope, sel)
 	if err != nil {
-		return 0, 0, 0, "", err
+		return nil, 0, 0, "", err
+	}
+	ids = filterPanesByProgram(&snap, ids, sel.running)
+	if sel.capture {
+		ensureCaptureDir(w.baseDir())
 	}
 	for _, id := range ids {
-		_ = w.pub.Send(msg.T("pane", id, "inbox"), &msg.MsgPaneExecShell{Command: command})
+		sent := command
+		if sel.capture {
+			sent = captureCommand(w.baseDir(), id, command)
+		}
+		_ = w.pub.Send(msg.T("pane", id, "inbox"), &msg.MsgPaneExecShell{Command: sent})
 	}
-	return len(ids), skippedShared, skippedPipeline, label, nil
+	return ids, skippedShared, skippedPipeline, label, nil
+}
+
+// filterPanesByProgram narrows ids to panes whose foreground program matches.
+// The empty filter matches everything; "shell" is spelled as the empty program,
+// which is what a pane at its prompt reports, so `--running shell` means "the
+// panes not busy with anything".
+func filterPanesByProgram(snap *domain.WorkspaceSnapshot, ids []string, want string) []string {
+	if want == "" {
+		return ids
+	}
+	if want == "shell" {
+		want = ""
+	}
+	byID := map[string]string{}
+	for _, tab := range snap.Tabs {
+		for p := range domain.PanesInTab(&tab) {
+			byID[p.ID] = p.Program
+		}
+	}
+	out := ids[:0:0]
+	for _, id := range ids {
+		if byID[id] == want {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// captureCommand rewrites a command so its output lands in a file instead of
+// only on the pane's screen, and appends a sentinel line carrying the exit
+// status so a reader can tell "still running" from "finished, no output".
+//
+// Why a file at all: a pane's output is a rendered terminal, not a stream. Once
+// a full-screen program has drawn over it there is nothing to read back, and
+// even at a shell prompt the text is wrapped to the pane's width. The file is
+// the only faithful copy.
+//
+// The wait happens in the CALLER, deliberately. A ## command runs on the
+// workspace's mailbox goroutine, which every other pane's commands queue behind
+// — blocking it until N shells finish would freeze the session, which is
+// exactly the defect an audit of `##proxy check` found in this codebase.
+func captureCommand(baseDir, paneID, command string) string {
+	path := capturePath(baseDir, paneID)
+	// { … ; } groups without a subshell, so `cd` and exports behave as they
+	// would unredirected. $? is read immediately after, before anything else
+	// can overwrite it.
+	return fmt.Sprintf("mkdir -p %s && { %s ; } > %s 2>&1; echo \"%s$?\" >> %s",
+		filepath.Dir(path), command, path, captureSentinel, path)
+}
+
+// captureSentinel ends a captured run. The exit status follows it on the same
+// line.
+const captureSentinel = "__rysh_capture_done:"
+
+func capturePath(baseDir, paneID string) string {
+	return filepath.Join(baseDir, ".rysh", "captures", paneID+".out")
+}
+
+// ensureCaptureDir creates the capture directory and makes it invisible to git.
+//
+// Captures are transient output that lands inside the user's project, because
+// that is where rysh keeps its state. Without this they show up as untracked
+// files and ride along in the next `git add -A` — someone's build log committed
+// as source. A directory that ignores itself is the smallest fix that survives
+// being copied, moved or recreated.
+func ensureCaptureDir(baseDir string) {
+	dir := filepath.Join(baseDir, ".rysh", "captures")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return
+	}
+	ignore := filepath.Join(dir, ".gitignore")
+	if _, err := os.Stat(ignore); err == nil {
+		return
+	}
+	_ = os.WriteFile(ignore, []byte("# rysh capture output — transient\n*\n"), 0o600)
 }
 
 // resolveCmdWorkspace interprets the --ws selector against the session's
@@ -445,6 +392,7 @@ func (w *WorkspaceActor) resolveCmdWorkspace(arg string) (string, bool, error) {
 func (w *WorkspaceActor) handleCmdBroadcast(ctx actor.Context, out *strings.Builder, originPaneID string, args []string) {
 	scope, sel, command, err := parseCmdArgs(args)
 	if err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "\n[rysh] %v\n", err)
 		w.cmdUsage(out)
 		return
@@ -453,6 +401,7 @@ func (w *WorkspaceActor) handleCmdBroadcast(ctx actor.Context, out *strings.Buil
 	// Cross-workspace: route to a sibling workspace (same session) via the Farm.
 	target, isSibling, rerr := w.resolveCmdWorkspace(sel.ws)
 	if rerr != nil {
+		w.failRysh("%v", rerr)
 		fmt.Fprintf(out, "\n[rysh] %v\n", rerr)
 		return
 	}
@@ -471,16 +420,35 @@ func (w *WorkspaceActor) handleCmdBroadcast(ctx actor.Context, out *strings.Buil
 	// Local (active) workspace. Anchor active-entity defaults to the originating
 	// pane so the command targets the tab/lane/group the user is actually in,
 	// not the (possibly stale) active tab.
-	count, skippedShared, skippedPipeline, label, err := w.broadcastCmd(scope, sel, command, originPaneID)
+	targets, skippedShared, skippedPipeline, label, err := w.broadcastCmd(scope, sel, command, originPaneID)
+	count := len(targets)
 	if err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "\n[rysh] %v\n", err)
 		return
+	}
+	if count == 0 {
+		// The selector resolved but matched nothing, so the command ran
+		// nowhere. A fan-out that silently hits zero panes is the worst
+		// possible answer for a script: it looks like success.
+		w.failRysh("##cmd matched no panes in %s", label)
 	}
 	fmt.Fprintf(out, "\n[rysh] ##cmd: ran %q in %d pane(s) of %s", command, count, label)
 	if skip := skipNote(skippedShared, skippedPipeline); skip != "" {
 		fmt.Fprintf(out, " %s", skip)
 	}
 	fmt.Fprintf(out, "\n")
+	if sel.capture {
+		// The manifest, not the output: the commands are still running. A
+		// reader polls each file for the sentinel — which is also how it learns
+		// the exit status. Waiting here would block every other pane's commands
+		// behind this one.
+		fmt.Fprintf(out, "  capture: each pane writes to its own file; done when the last line is %s<status>\n",
+			captureSentinel)
+		for _, id := range targets {
+			fmt.Fprintf(out, "  %s  %s\n", id, capturePath(w.baseDir(), id))
+		}
+	}
 }
 
 // skipNote formats the "(skipped …)" suffix for the ##cmd summary, listing only
@@ -504,5 +472,7 @@ func (w *WorkspaceActor) cmdUsage(out *strings.Builder) {
 	fmt.Fprintf(out, "  ##cmd <scope> [selectors] <bash command>\n")
 	fmt.Fprintf(out, "    scope:     pane | pg/stack | lane | tab | ws\n")
 	fmt.Fprintf(out, "    selectors: --ws --tab --lane --pg --pane <id|name|index>\n")
+	fmt.Fprintf(out, "    filters:   --running <program|shell>   only panes running that program\n")
+	fmt.Fprintf(out, "    capture:   --capture                   each pane's output to a file (prints where)\n")
 	fmt.Fprintf(out, "    examples:  ##cmd stack pwd   |   ##cmd tab --tab 2 git status   |   ##cmd ws --ws build make\n\n")
 }

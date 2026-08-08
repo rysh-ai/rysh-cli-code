@@ -54,19 +54,22 @@ func TestListenAddrHost(t *testing.T) {
 	}
 }
 
-// TestServerBindsHostAndPortWithToken is the end-to-end proof that the three
+// TestServerBindsHostAndPortWithLogin is the end-to-end proof that the
 // `##rysh web start` parameters reach the socket: the server listens on the
-// requested bind address and port, and the token gates access.
-func TestServerBindsHostAndPortWithToken(t *testing.T) {
+// requested bind address and port, and the login gates access.
+func TestServerBindsHostAndPortWithLogin(t *testing.T) {
 	nc := startInProcessNATS(t)
 	pub := msg.NewNATSPublisher(nc, msg.DefaultCodecRegistry())
 
 	port := freePort(t)
-	const token = "test-token-abc"
+	creds, err := SaveCredentials(t.TempDir(), "halil", "s3cret")
+	if err != nil {
+		t.Fatalf("SaveCredentials: %v", err)
+	}
 
 	s := NewServer(port, "test-session", pub, nc, pub.Codecs())
 	s.SetHost("127.0.0.1")
-	s.SetAuthToken(token)
+	s.SetCredentials(creds)
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -75,7 +78,6 @@ func TestServerBindsHostAndPortWithToken(t *testing.T) {
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 	waitForHTTP(t, base+"/health")
 
-	// Do not follow the post-auth redirect — we want to observe it.
 	client := &http.Client{
 		Timeout: 3 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -93,34 +95,40 @@ func TestServerBindsHostAndPortWithToken(t *testing.T) {
 		t.Fatalf("GET /health = %d, want 200", resp.StatusCode)
 	}
 
-	// Token is enforced: no token ⇒ 401.
+	// The login is enforced on session data: no credential ⇒ 401.
+	resp, err = client.Get(base + "/api/env")
+	if err != nil {
+		t.Fatalf("GET /api/env : %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /api/env without a login = %d, want 401", resp.StatusCode)
+	}
+
+	// A signed-in browser gets through with its JWT.
+	tok, err := signJWT(creds.SigningKey(), creds.Username, time.Now(), AccessTokenTTL)
+	if err != nil {
+		t.Fatalf("signJWT: %v", err)
+	}
+	req, _ := http.NewRequest(http.MethodGet, base+"/api/env", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/env with bearer: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/env with a login = %d, want 200", resp.StatusCode)
+	}
+
+	// The login page itself must load, or nobody could ever sign in.
 	resp, err = client.Get(base + "/")
 	if err != nil {
 		t.Fatalf("GET / : %v", err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("GET / without token = %d, want 401", resp.StatusCode)
-	}
-
-	// Correct token ⇒ accepted (redirected to a clean URL with the cookie set).
-	resp, err = client.Get(base + "/?token=" + token)
-	if err != nil {
-		t.Fatalf("GET /?token= : %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusFound {
-		t.Fatalf("GET /?token= = %d, want 302", resp.StatusCode)
-	}
-
-	// Wrong token stays rejected.
-	resp, err = client.Get(base + "/?token=wrong")
-	if err != nil {
-		t.Fatalf("GET /?token=wrong : %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("GET /?token=wrong = %d, want 401", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET / = %d, want 200 (the login form lives here)", resp.StatusCode)
 	}
 }
 

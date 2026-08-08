@@ -70,16 +70,8 @@ func findWorkspacePane(pub *msg.NATSPublisher, paneID string) (domain.PaneSnapsh
 	if !ok {
 		return domain.PaneSnapshot{}, false
 	}
-	for _, tab := range snapReply.Snapshot.Tabs {
-		for _, lane := range tab.Lanes {
-			for _, g := range lane.PaneGroups {
-				for _, p := range g.Panes {
-					if p.ID == paneID {
-						return p, true
-					}
-				}
-			}
-		}
+	if p := domain.FindPaneInWorkspace(&snapReply.Snapshot, paneID); p != nil {
+		return *p, true
 	}
 	return domain.PaneSnapshot{}, false
 }

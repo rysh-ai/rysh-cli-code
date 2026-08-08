@@ -184,10 +184,10 @@ func parseSSE(body []byte, wantID string) (*jsonrpcMessage, error) {
 		switch {
 		case line == "":
 			flush()
+		// Any other line — including SSE ":" comments and keep-alives — is
+		// ignored; only blank lines and data: lines are meaningful here.
 		case strings.HasPrefix(line, "data:"):
 			data.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
-		case strings.HasPrefix(line, ":"):
-			// SSE comment / keep-alive; ignore.
 		}
 	}
 	flush()

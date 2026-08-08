@@ -184,6 +184,7 @@ func agentAutoSpec() autoKindSpec {
 			}
 			agents, err := w.queryAgents()
 			if err != nil {
+				w.failRysh("%v", err)
 				fmt.Fprintf(out, "\n[agent] failed to list agents: %v\n", err)
 				return false
 			}
@@ -228,6 +229,7 @@ func humanoidAutoSpec() autoKindSpec {
 			}
 			humanoids, err := w.queryHumanoids()
 			if err != nil {
+				w.failRysh("%v", err)
 				fmt.Fprintf(out, "\n[humanoid] failed to list humanoids: %v\n", err)
 				return false
 			}
@@ -281,13 +283,15 @@ func (w *WorkspaceActor) handleAutoKind(out *strings.Builder, paneID string, spe
 		w.cmdAutoList(out, spec)
 	case "show":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[%s] usage: ##auto %s show <name>\n", spec.label, spec.label)
+			ryshWriter(out).UsageLineIn(spec.label, fmt.Sprintf("##auto %s show <name>", spec.label))
+			w.failRyshUsage("usage: %s", fmt.Sprintf("##auto %s show <name>", spec.label))
 			return
 		}
 		w.cmdAutoShow(out, spec, args[1])
 	case "save":
 		if len(args) < 3 {
-			fmt.Fprintf(out, "\n[%s] usage: ##auto %s save <name> <prompt...>\n", spec.label, spec.label)
+			ryshWriter(out).UsageLineIn(spec.label, fmt.Sprintf("##auto %s save <name> <prompt...>", spec.label))
+			w.failRyshUsage("usage: %s", fmt.Sprintf("##auto %s save <name> <prompt...>", spec.label))
 			return
 		}
 		w.cmdAutoSave(out, spec, args[1], strings.Join(args[2:], " "))
@@ -301,20 +305,23 @@ func (w *WorkspaceActor) handleAutoKind(out *strings.Builder, paneID string, spe
 	case "resume":
 		name, runArgs, _, target, ov := parseAutoRunFlags(args[1:], spec.flagName(), false)
 		if name == "" {
-			fmt.Fprintf(out, "\n[%s] usage: ##auto %s resume [flags] <name> [args...]  (fresh budget + loads the latest result into context)\n", spec.label, spec.label)
+			ryshWriter(out).UsageLineIn(spec.label, fmt.Sprintf("##auto %s resume [flags] <name> [args...]  (fresh budget + loads the latest result into context)", spec.label))
+			w.failRyshUsage("usage: %s", fmt.Sprintf("##auto %s resume [flags] <name> [args...]  (fresh budget + loads the latest result into context)", spec.label))
 			return
 		}
 		w.cmdAutoResume(out, paneID, spec, name, runArgs, target, ov)
 	case "continue":
 		name, runArgs, _, target, ov := parseAutoRunFlags(args[1:], spec.flagName(), false)
 		if name == "" {
-			fmt.Fprintf(out, "\n[%s] usage: ##auto %s continue [flags] <name> [args...]  (resume a cancelled/stopped run from its last checkpoint)\n", spec.label, spec.label)
+			ryshWriter(out).UsageLineIn(spec.label, fmt.Sprintf("##auto %s continue [flags] <name> [args...]  (resume a cancelled/stopped run from its last checkpoint)", spec.label))
+			w.failRyshUsage("usage: %s", fmt.Sprintf("##auto %s continue [flags] <name> [args...]  (resume a cancelled/stopped run from its last checkpoint)", spec.label))
 			return
 		}
 		w.cmdAutoContinue(out, paneID, spec, name, runArgs, target, ov)
 	case "check":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[%s] usage: ##auto %s check <name>\n", spec.label, spec.label)
+			ryshWriter(out).UsageLineIn(spec.label, fmt.Sprintf("##auto %s check <name>", spec.label))
+			w.failRyshUsage("usage: %s", fmt.Sprintf("##auto %s check <name>", spec.label))
 			return
 		}
 		w.cmdAutoCheck(out, spec, args[1])
@@ -330,19 +337,22 @@ func (w *WorkspaceActor) handleAutoKind(out *strings.Builder, paneID string, spe
 		w.cmdAutoLoopStop(out, spec, name, paneID)
 	case "schedule":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[%s] usage: ##auto %s schedule <name> [args...]  (uses the recipe's schedule: key)\n", spec.label, spec.label)
+			ryshWriter(out).UsageLineIn(spec.label, fmt.Sprintf("##auto %s schedule <name> [args...]  (uses the recipe's schedule: key)", spec.label))
+			w.failRyshUsage("usage: %s", fmt.Sprintf("##auto %s schedule <name> [args...]  (uses the recipe's schedule: key)", spec.label))
 			return
 		}
 		w.cmdAutoSchedule(out, spec, args[1], args[2:])
 	case "unschedule":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[%s] usage: ##auto %s unschedule <name>\n", spec.label, spec.label)
+			ryshWriter(out).UsageLineIn(spec.label, fmt.Sprintf("##auto %s unschedule <name>", spec.label))
+			w.failRyshUsage("usage: %s", fmt.Sprintf("##auto %s unschedule <name>", spec.label))
 			return
 		}
 		w.cmdAutoUnschedule(out, spec, args[1])
 	case "results":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[%s] usage: ##auto %s results <name> [file]\n", spec.label, spec.label)
+			ryshWriter(out).UsageLineIn(spec.label, fmt.Sprintf("##auto %s results <name> [file]", spec.label))
+			w.failRyshUsage("usage: %s", fmt.Sprintf("##auto %s results <name> [file]", spec.label))
 			return
 		}
 		file := ""
@@ -352,16 +362,19 @@ func (w *WorkspaceActor) handleAutoKind(out *strings.Builder, paneID string, spe
 		renderAutoResults(out, spec.label, w.autoStore(spec.kind), args[1], file)
 	case "delete":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[%s] usage: ##auto %s delete <name>\n", spec.label, spec.label)
+			ryshWriter(out).UsageLineIn(spec.label, fmt.Sprintf("##auto %s delete <name>", spec.label))
+			w.failRyshUsage("usage: %s", fmt.Sprintf("##auto %s delete <name>", spec.label))
 			return
 		}
 		if err := w.autoStore(spec.kind).Delete(args[1]); err != nil {
 			fmt.Fprintf(out, "\n[%s] delete failed: %v\n", spec.label, err)
+			w.failRysh("delete failed: %v", err)
 			return
 		}
 		fmt.Fprintf(out, "\n[%s] deleted automation %q\n", spec.label, args[1])
 	default:
 		w.autoKindUsage(out, spec)
+		w.failRyshUsage("unknown ##auto %s subcommand: %q", spec.label, sub)
 	}
 }
 
@@ -374,54 +387,56 @@ func (w *WorkspaceActor) autoKindRunUsage(out *strings.Builder, spec autoKindSpe
 	case spec.workdirAware:
 		targetPart = "[--workdir <dir>] "
 	}
-	fmt.Fprintf(out, "\n[%s] usage: ##auto %s %s %s[--step-interval N] [--max-iterations N] [--max-duration D] [--budget-size Np|Nb|Ns] [--takeover-when P] <name> [args...]\n",
-		spec.label, spec.label, verb, targetPart)
+	ryshWriter(out).UsageLineIn(spec.label, fmt.Sprintf(
+		"##auto %s %s %s[--step-interval N] [--max-iterations N] [--max-duration D] [--budget-size Np|Nb|Ns] [--takeover-when P] <name> [args...]",
+		spec.label, verb, targetPart))
 }
 
 // autoKindUsage prints the full ##auto <kind> usage, mirroring autoWebUsage.
 func (w *WorkspaceActor) autoKindUsage(out *strings.Builder, spec autoKindSpec) {
 	l := spec.label
-	fmt.Fprintf(out, "\n[rysh] usage:\n")
-	fmt.Fprintf(out, "  ##auto %s list                      list saved %s automations\n", l, l)
-	fmt.Fprintf(out, "  ##auto %s show <name>               show a recipe\n", l)
-	fmt.Fprintf(out, "  ##auto %s save <name> <prompt...>   save a prompt as a recipe\n", l)
+	forms := []string{}
+	forms = append(forms, fmt.Sprintf("##auto %s list                      list saved %s automations", l, l))
+	forms = append(forms, fmt.Sprintf("##auto %s show <name>               show a recipe", l))
+	forms = append(forms, fmt.Sprintf("##auto %s save <name> <prompt...>   save a prompt as a recipe", l))
 	switch {
 	case spec.targeted():
-		fmt.Fprintf(out, "  ##auto %s run [%s <name>] [--step-interval N] [--max-iterations N] [--max-duration D] [--budget-size Np|Nb|Ns] [--takeover-when P] <name> [args...]\n", l, spec.targetFlag())
+		forms = append(forms, fmt.Sprintf("##auto %s run [%s <name>] [--step-interval N] [--max-iterations N] [--max-duration D] [--budget-size Np|Nb|Ns] [--takeover-when P] <name> [args...]", l, spec.targetFlag()))
 	case spec.workdirAware:
-		fmt.Fprintf(out, "  ##auto %s run [--workdir <dir>] [--step-interval N] [--max-iterations N] [--max-duration D] [--budget-size Np|Nb|Ns] [--takeover-when P] <name> [args...]\n", l)
+		forms = append(forms, fmt.Sprintf("##auto %s run [--workdir <dir>] [--step-interval N] [--max-iterations N] [--max-duration D] [--budget-size Np|Nb|Ns] [--takeover-when P] <name> [args...]", l))
 	default:
-		fmt.Fprintf(out, "  ##auto %s run [--step-interval N] [--max-iterations N] [--max-duration D] [--budget-size Np|Nb|Ns] [--takeover-when P] <name> [args...]\n", l)
+		forms = append(forms, fmt.Sprintf("##auto %s run [--step-interval N] [--max-iterations N] [--max-duration D] [--budget-size Np|Nb|Ns] [--takeover-when P] <name> [args...]", l))
 	}
-	fmt.Fprintf(out, "        run a recipe ({{args}}/{{arg1}}/{{output_dir}} substituted); flags override the recipe budget\n")
-	fmt.Fprintf(out, "  ##auto %s resume [flags] <name> [args...]    fresh budget + load the latest result into context, then rerun\n", l)
-	fmt.Fprintf(out, "  ##auto %s continue [flags] <name> [args...]  resume a cancelled/stopped run from its last checkpoint (budget re-armed)\n", l)
-	fmt.Fprintf(out, "  ##auto %s results <name> [file]     list the recipe's saved results (or print one file)\n", l)
-	fmt.Fprintf(out, "  ##auto %s check <name>              lint a recipe (placeholders, loop, targets, schedule)\n", l)
-	fmt.Fprintf(out, "  ##auto %s status | stop [name]      inspect / gracefully stop this kind's active loops\n", l)
-	fmt.Fprintf(out, "  ##auto %s runs [list]               list runs still executing (time consumed, loop pass, tokens consumed)\n", l)
-	fmt.Fprintf(out, "  ##auto %s schedule|unschedule <name> [args...]  register the recipe's schedule: key as a ##cron job\n", l)
-	fmt.Fprintf(out, "  ##auto %s delete <name>             delete a recipe\n", l)
-	fmt.Fprintf(out, "  --dry-run on run/resume prints the resolved plan (prompt, budget, loop) without dispatching\n")
-	fmt.Fprintf(out, "  loop flags on run/resume: --no-loop (run once) --passes N --while-duration D --while-budget Np|Nb|Ns (flags > recipe > config)\n")
-	fmt.Fprintf(out, "  --each \"a,b,c\" fans the recipe out over the items, one sequential run each ({{args}} = the item)\n")
-	fmt.Fprintf(out, "  on_success: [<kind>:]<name> chains the next recipe when a run completes; notify: {humanoid, channel, to} pings a channel on run end\n")
-	fmt.Fprintf(out, "  model/effort seats: do.model/effort (executor), do.budget.watch.model/effort (finalizer leg), while.model/effort (judge)\n")
-	fmt.Fprintf(out, "  recipes live in .rysh/automations/%s/<name>.md (top-level: description, args, output_dir;\n", spec.kind.Subdir())
-	fmt.Fprintf(out, "        step: {interval, max_iterations, max_duration, auto_continue, auto_approve, budget: {size, watch: {takeover_when, takeover_prompt}}})\n")
+	forms = append(forms, "      run a recipe ({{args}}/{{arg1}}/{{output_dir}} substituted); flags override the recipe budget")
+	forms = append(forms, fmt.Sprintf("##auto %s resume [flags] <name> [args...]    fresh budget + load the latest result into context, then rerun", l))
+	forms = append(forms, fmt.Sprintf("##auto %s continue [flags] <name> [args...]  resume a cancelled/stopped run from its last checkpoint (budget re-armed)", l))
+	forms = append(forms, fmt.Sprintf("##auto %s results <name> [file]     list the recipe's saved results (or print one file)", l))
+	forms = append(forms, fmt.Sprintf("##auto %s check <name>              lint a recipe (placeholders, loop, targets, schedule)", l))
+	forms = append(forms, fmt.Sprintf("##auto %s status | stop [name]      inspect / gracefully stop this kind's active loops", l))
+	forms = append(forms, fmt.Sprintf("##auto %s runs [list]               list runs still executing (time consumed, loop pass, tokens consumed)", l))
+	forms = append(forms, fmt.Sprintf("##auto %s schedule|unschedule <name> [args...]  register the recipe's schedule: key as a ##cron job", l))
+	forms = append(forms, fmt.Sprintf("##auto %s delete <name>             delete a recipe", l))
+	forms = append(forms, "--dry-run on run/resume prints the resolved plan (prompt, budget, loop) without dispatching")
+	forms = append(forms, "loop flags on run/resume: --no-loop (run once) --passes N --while-duration D --while-budget Np|Nb|Ns (flags > recipe > config)")
+	forms = append(forms, "--each \"a,b,c\" fans the recipe out over the items, one sequential run each ({{args}} = the item)")
+	forms = append(forms, "on_success: [<kind>:]<name> chains the next recipe when a run completes; notify: {humanoid, channel, to} pings a channel on run end")
+	forms = append(forms, "model/effort seats: do.model/effort (executor), do.budget.watch.model/effort (finalizer leg), while.model/effort (judge)")
+	forms = append(forms, fmt.Sprintf("recipes live in .rysh/automations/%s/<name>.md (top-level: description, args, output_dir;", spec.kind.Subdir()))
+	forms = append(forms, "      step: {interval, max_iterations, max_duration, auto_continue, auto_approve, budget: {size, watch: {takeover_when, takeover_prompt}}})")
 	if spec.targeted() {
-		fmt.Fprintf(out, "  `%s: <name>` frontmatter names the target %s (required unless %s <name> is passed at run time)\n", l, l, spec.targetFlag())
+		forms = append(forms, fmt.Sprintf("`%s: <name>` frontmatter names the target %s (required unless %s <name> is passed at run time)", l, l, spec.targetFlag()))
 	}
 	if spec.workdirAware {
-		fmt.Fprintf(out, "  `workdir: <dir>` frontmatter anchors the task to a project directory ({{workdir}} substituted, work-in-dir header prepended; --workdir <dir> overrides)\n")
+		forms = append(forms, "`workdir: <dir>` frontmatter anchors the task to a project directory ({{workdir}} substituted, work-in-dir header prepended; --workdir <dir> overrides)")
 	}
-	fmt.Fprintf(out, "  loop: {do, while} is the loop-engineering layout: `do` = the per-pass budget (same fields as `step`; loop.do wins over step),\n")
-	fmt.Fprintf(out, "        `while` {enabled, max_iterations, max_duration, budget, prompts: {until, iterate_with}} repeats the pass until an LLM judge\n")
-	fmt.Fprintf(out, "        deems `until` fulfilled (default %d passes). while.max_duration/budget are TOTALS: bigger than the per-pass value → split\n", webauto.DefaultLoopIterations)
-	fmt.Fprintf(out, "        evenly across passes (do.X = while.X / max_iterations); smaller → ignored. enabled:false runs the pass once, loop off\n")
-	fmt.Fprintf(out, "  config-level defaults: automation.%s.step in rysh.config.yaml (same shape as the recipe step block);\n", l)
-	fmt.Fprintf(out, "        precedence: run flags > recipe > config > built-ins\n")
-	fmt.Fprintf(out, "  results save to output_dir (default .rysh/automations/%s/<name>/results)\n\n", spec.kind.Subdir())
+	forms = append(forms, "loop: {do, while} is the loop-engineering layout: `do` = the per-pass budget (same fields as `step`; loop.do wins over step),")
+	forms = append(forms, "      `while` {enabled, max_iterations, max_duration, budget, prompts: {until, iterate_with}} repeats the pass until an LLM judge")
+	forms = append(forms, fmt.Sprintf("      deems `until` fulfilled (default %d passes). while.max_duration/budget are TOTALS: bigger than the per-pass value → split", webauto.DefaultLoopIterations))
+	forms = append(forms, "      evenly across passes (do.X = while.X / max_iterations); smaller → ignored. enabled:false runs the pass once, loop off")
+	forms = append(forms, fmt.Sprintf("config-level defaults: automation.%s.step in rysh.config.yaml (same shape as the recipe step block);", l))
+	forms = append(forms, "      precedence: run flags > recipe > config > built-ins")
+	forms = append(forms, fmt.Sprintf("results save to output_dir (default .rysh/automations/%s/<name>/results)", spec.kind.Subdir()))
+	ryshWriter(out).Usage(forms...)
 }
 
 // cmdAutoList lists the kind's saved recipes (mirrors cmdWebAutoList; the
@@ -459,6 +474,7 @@ func (w *WorkspaceActor) cmdAutoShow(out *strings.Builder, spec autoKindSpec, na
 	a, err := store.Load(name)
 	if err != nil {
 		fmt.Fprintf(out, "\n[%s] automation %q not found\n", spec.label, name)
+		w.failRysh("automation %q not found", name)
 		return
 	}
 	fmt.Fprintf(out, "\n[%s] automation %q\n", spec.label, a.Name)
@@ -522,6 +538,7 @@ func (w *WorkspaceActor) cmdAutoSave(out *strings.Builder, spec autoKindSpec, na
 	a := &webauto.Automation{Name: name, Prompt: prompt}
 	if err := store.Save(a); err != nil {
 		fmt.Fprintf(out, "\n[%s] save failed: %v\n", spec.label, err)
+		w.failRysh("save failed: %v", err)
 		return
 	}
 	san := webauto.SanitizeName(name)
@@ -572,6 +589,7 @@ func (w *WorkspaceActor) cmdAutoRun(out *strings.Builder, paneID string, spec au
 	a, err := store.Load(name)
 	if err != nil {
 		fmt.Fprintf(out, "\n[%s] automation %q not found — ##auto %s list\n", spec.label, name, spec.label)
+		w.failRysh("automation %q not found — ##auto %s list", name, spec.label)
 		return
 	}
 
@@ -631,6 +649,7 @@ func (w *WorkspaceActor) cmdAutoRun(out *strings.Builder, paneID string, spec au
 	// via the {{output_dir}} placeholder without a mkdir round-trip.
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		fmt.Fprintf(out, "\n[%s] could not prepare results dir %q: %v\n", spec.label, outputDir, err)
+		w.failRysh("could not prepare results dir %q: %v", outputDir, err)
 		return
 	}
 
@@ -685,6 +704,7 @@ func (w *WorkspaceActor) cmdAutoResume(out *strings.Builder, paneID string, spec
 	a, err := store.Load(name)
 	if err != nil {
 		fmt.Fprintf(out, "\n[%s] automation %q not found — ##auto %s list\n", spec.label, name, spec.label)
+		w.failRysh("automation %q not found — ##auto %s list", name, spec.label)
 		return
 	}
 	dir := store.ResolveOutputDir(a)
@@ -712,6 +732,7 @@ func (w *WorkspaceActor) cmdAutoContinue(out *strings.Builder, paneID string, sp
 	a, err := store.Load(name)
 	if err != nil {
 		fmt.Fprintf(out, "\n[%s] automation %q not found — ##auto %s list\n", spec.label, name, spec.label)
+		w.failRysh("automation %q not found — ##auto %s list", name, spec.label)
 		return
 	}
 	target, ok := w.resolveAutoTarget(out, spec, a, targetOverride)

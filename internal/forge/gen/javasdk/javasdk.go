@@ -42,7 +42,7 @@ func (g *generator) Generate(api *ir.API, opts gen.Options) (*gen.FileSet, error
 
 	fs.AddString("pom.xml", javaPom(artifact, api))
 	fs.AddString(srcDir+"/Client.java", javaClient(api))
-	fs.AddString(srcDir+"/ApiException.java", javaApiException())
+	fs.AddString(srcDir+"/ApiException.java", javaAPIException())
 	fs.AddString(srcDir+"/Json.java", javaJSON())
 
 	// One model class per named component schema.
@@ -99,7 +99,7 @@ func javaReadme(artifact string, api *ir.API) string {
 	return b.String()
 }
 
-func javaApiException() string {
+func javaAPIException() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "package %s;\n\n", basePackage)
 	b.WriteString("/** Thrown when the API returns a non-2xx HTTP status. */\n")

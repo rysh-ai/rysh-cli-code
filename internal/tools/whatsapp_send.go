@@ -12,6 +12,11 @@ import (
 type WhatsAppSendTool struct {
 	adapter *channels.WhatsAppAdapter
 	drafts  *channels.DraftStore
+	// humanGoverned reports whether the owning humanoid is currently in
+	// draft-and-confirm mode. Read per call (not captured at construction) so
+	// `##humanoid governance <name> ai|human` takes effect immediately.
+	// nil ⇒ never human-governed.
+	humanGoverned func() bool
 }
 
 // WhatsAppSendParams holds the parameters for the whatsapp_send tool.
@@ -23,8 +28,15 @@ type WhatsAppSendParams struct {
 }
 
 // NewWhatsAppSendTool creates a new WhatsAppSendTool.
-func NewWhatsAppSendTool(adapter *channels.WhatsAppAdapter, drafts *channels.DraftStore) *WhatsAppSendTool {
-	return &WhatsAppSendTool{adapter: adapter, drafts: drafts}
+//
+// humanGoverned may be nil (never gated). When it reports true, Execute
+// refuses anything but an owner-approved draft — see requireApprovedDraft.
+func NewWhatsAppSendTool(
+	adapter *channels.WhatsAppAdapter,
+	drafts *channels.DraftStore,
+	humanGoverned func() bool,
+) *WhatsAppSendTool {
+	return &WhatsAppSendTool{adapter: adapter, drafts: drafts, humanGoverned: humanGoverned}
 }
 
 // Spec returns the tool specification.
@@ -53,6 +65,13 @@ func (t *WhatsAppSendTool) Execute(ctx context.Context, params json.RawMessage) 
 	var p WhatsAppSendParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, fmt.Errorf("invalid whatsapp_send params: %w", err)
+	}
+
+	// The draft-and-confirm gate, shared by all tool-governed channels — see
+	// requireApprovedDraft (draft_gate.go). Under human governance nothing
+	// reaches WhatsApp except a draft the owner explicitly confirmed.
+	if out := requireApprovedDraft(t.humanGoverned, t.drafts, p.DraftID, "whatsapp_send", "whatsapp_draft"); out != nil {
+		return out, nil
 	}
 
 	var to, body string

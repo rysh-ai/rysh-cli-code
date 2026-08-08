@@ -1031,16 +1031,7 @@ func (u *UpstreamShareActor) paneBelongsToEntity(paneID string) bool {
 	if tab == nil {
 		return false
 	}
-	for _, lane := range tab.Lanes {
-		for _, g := range lane.PaneGroups {
-			for _, p := range g.Panes {
-				if p.ID == paneID {
-					return true
-				}
-			}
-		}
-	}
-	return false
+	return domain.TabContainsPane(tab, paneID)
 }
 
 // forwardToRemote publishes pane output text to the remote upstream server.
@@ -1306,10 +1297,8 @@ func (u *UpstreamShareActor) collectEntityPanes(snap domain.WorkspaceSnapshot) [
 		return nil
 	}
 	var panes []domain.PaneSnapshot
-	for _, lane := range tab.Lanes {
-		for _, g := range lane.PaneGroups {
-			panes = append(panes, g.Panes...)
-		}
+	for p := range domain.PanesInTab(tab) {
+		panes = append(panes, *p)
 	}
 	return panes
 }
@@ -1815,9 +1804,14 @@ func (u *UpstreamShareActor) handleRemoteResize(cmd *msg.MsgUpstreamCommand) {
 		"shareID", u.shareID, "pane", targetPaneID,
 		"rows", dims.Rows, "cols", dims.Cols)
 
+	// Override: a controlling subscriber is asking the source to render at ITS
+	// resolution. That is a deliberate request the source honours, not a local
+	// viewport measurement to intersect with the others — passing it through
+	// claim arbitration would clamp a subscriber with a large terminal down to
+	// the source's own window size, which is the opposite of what it asked for.
 	_ = u.pub.Send(
 		msg.T("pane", targetPaneID, "inbox"),
-		&msg.MsgPaneResize{Rows: dims.Rows, Cols: dims.Cols},
+		&msg.MsgPaneResize{Rows: dims.Rows, Cols: dims.Cols, Override: true},
 	)
 
 	u.sendCommandAck(cmd.CommandID, true, "")

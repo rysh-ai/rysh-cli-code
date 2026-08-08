@@ -5,18 +5,17 @@ import (
 	"testing"
 )
 
-// TestParseWebStartArgs covers the three `##rysh web start` parameters — bind
-// address, port and token — across flag, bare-positional and config-default
-// forms.
+// TestParseWebStartArgs covers the `##rysh web start` parameters — bind
+// address, port and the username/password login — across flag, bare-positional
+// and config-default forms.
 func TestParseWebStartArgs(t *testing.T) {
 	cases := []struct {
-		name     string
-		args     string
-		defHost  string
-		defPort  int
-		defToken string
-		want     webStartOpts
-		warns    int
+		name    string
+		args    string
+		defHost string
+		defPort int
+		want    webStartOpts
+		warns   int
 	}{
 		// --- defaults ---
 		{
@@ -24,110 +23,128 @@ func TestParseWebStartArgs(t *testing.T) {
 			want: webStartOpts{Host: "", Port: 23232},
 		},
 		{
-			name: "config defaults apply", defHost: "127.0.0.1", defPort: 9000, defToken: "cfg-tok",
-			want: webStartOpts{Host: "127.0.0.1", Port: 9000, Token: "cfg-tok"},
+			name: "config defaults apply", defHost: "127.0.0.1", defPort: 9000,
+			want: webStartOpts{Host: "127.0.0.1", Port: 9000},
 		},
 
 		// --- bind address ---
 		{
 			name: "bind flag", args: "--bind 127.0.0.1",
-			want: webStartOpts{Host: "127.0.0.1", Port: 23232},
+			want: webStartOpts{Host: "127.0.0.1", Port: 23232, Explicit: true},
 		},
 		{
 			name: "bind equals form", args: "--bind=0.0.0.0",
-			want: webStartOpts{Host: "0.0.0.0", Port: 23232},
+			want: webStartOpts{Host: "0.0.0.0", Port: 23232, Explicit: true},
 		},
 		{
 			name: "host alias", args: "--host 192.168.1.10",
-			want: webStartOpts{Host: "192.168.1.10", Port: 23232},
+			want: webStartOpts{Host: "192.168.1.10", Port: 23232, Explicit: true},
 		},
 		{
 			name: "bind with port sets both", args: "--bind 127.0.0.1:8080",
-			want: webStartOpts{Host: "127.0.0.1", Port: 8080},
+			want: webStartOpts{Host: "127.0.0.1", Port: 8080, Explicit: true},
 		},
 		{
 			name: "bare host:port positional", args: "0.0.0.0:8080",
-			want: webStartOpts{Host: "0.0.0.0", Port: 8080},
+			want: webStartOpts{Host: "0.0.0.0", Port: 8080, Explicit: true},
 		},
 		{
 			name: "bare host positional", args: "localhost",
-			want: webStartOpts{Host: "localhost", Port: 23232},
+			want: webStartOpts{Host: "localhost", Port: 23232, Explicit: true},
 		},
 		{
 			name: "colon-port only sets port, keeps default host", args: "--bind :8080",
-			want: webStartOpts{Host: "", Port: 8080},
+			want: webStartOpts{Host: "", Port: 8080, Explicit: true},
 		},
 		{
 			name: "ipv6 bracketed with port", args: "--bind [::1]:8080",
-			want: webStartOpts{Host: "::1", Port: 8080},
+			want: webStartOpts{Host: "::1", Port: 8080, Explicit: true},
 		},
 		{
 			name: "ipv6 bare", args: "--bind ::1",
-			want: webStartOpts{Host: "::1", Port: 23232},
+			want: webStartOpts{Host: "::1", Port: 23232, Explicit: true},
 		},
 		{
 			name: "bind flag overrides config host", args: "--bind 0.0.0.0", defHost: "127.0.0.1",
-			want: webStartOpts{Host: "0.0.0.0", Port: 23232},
+			want: webStartOpts{Host: "0.0.0.0", Port: 23232, Explicit: true},
 		},
 
 		// --- port ---
 		{
 			name: "bare port stays backward compatible", args: "8080",
-			want: webStartOpts{Host: "", Port: 8080},
+			want: webStartOpts{Host: "", Port: 8080, Explicit: true},
 		},
 		{
 			name: "port flag", args: "--port 8080",
-			want: webStartOpts{Host: "", Port: 8080},
+			want: webStartOpts{Host: "", Port: 8080, Explicit: true},
 		},
 		{
 			name: "port equals form", args: "--port=8080",
-			want: webStartOpts{Host: "", Port: 8080},
+			want: webStartOpts{Host: "", Port: 8080, Explicit: true},
 		},
 		{
 			name: "explicit port after bind wins", args: "--bind 127.0.0.1:8080 --port 9999",
-			want: webStartOpts{Host: "127.0.0.1", Port: 9999},
+			want: webStartOpts{Host: "127.0.0.1", Port: 9999, Explicit: true},
 		},
 
-		// --- token ---
+		// --- login ---
 		{
-			name: "token flag", args: "--token s3cret",
-			want: webStartOpts{Host: "", Port: 23232, Token: "s3cret"},
+			name: "username and password flags", args: "--username halil --password s3cret",
+			want: webStartOpts{Host: "", Port: 23232, Username: "halil", Password: "s3cret"},
 		},
 		{
-			name: "token equals form", args: "--token=s3cret",
-			want: webStartOpts{Host: "", Port: 23232, Token: "s3cret"},
+			name: "equals form", args: "--username=halil --password=s3cret",
+			want: webStartOpts{Host: "", Port: 23232, Username: "halil", Password: "s3cret"},
 		},
 		{
-			name: "no-token clears config token", args: "--no-token", defToken: "cfg-tok",
-			want: webStartOpts{Host: "", Port: 23232, Token: "", NoToken: true},
+			name: "short aliases", args: "--user halil --pass s3cret",
+			want: webStartOpts{Host: "", Port: 23232, Username: "halil", Password: "s3cret"},
 		},
 		{
-			name: "token flag overrides config token", args: "--token cli", defToken: "cfg",
-			want: webStartOpts{Host: "", Port: 23232, Token: "cli"},
+			name: "key=value form matches ##rysh web auth", args: "username=halil password=s3cret",
+			want: webStartOpts{Host: "", Port: 23232, Username: "halil", Password: "s3cret"},
 		},
 		{
-			name: "auth flag is a no-op", args: "--auth",
-			want: webStartOpts{Host: "", Port: 23232},
+			name: "a password may contain anything but whitespace", args: "--password =p@ss=w0rd!",
+			want: webStartOpts{Host: "", Port: 23232, Password: "=p@ss=w0rd!"},
 		},
 
-		// --- all three together, in either order ---
+		// --- retired token flags: warned about by name, never applied ---
 		{
-			name: "all three flags", args: "--bind 127.0.0.1 --port 8080 --token s3cret",
-			want: webStartOpts{Host: "127.0.0.1", Port: 8080, Token: "s3cret"},
+			name: "token flag warns", args: "--token s3cret",
+			want: webStartOpts{Host: "", Port: 23232}, warns: 1,
 		},
 		{
-			name: "all three, reordered", args: "--token s3cret --port 8080 --bind 127.0.0.1",
-			want: webStartOpts{Host: "127.0.0.1", Port: 8080, Token: "s3cret"},
+			name: "token equals form warns", args: "--token=s3cret",
+			want: webStartOpts{Host: "", Port: 23232}, warns: 1,
+		},
+		{
+			name: "no-token warns", args: "--no-token",
+			want: webStartOpts{Host: "", Port: 23232}, warns: 1,
+		},
+		{
+			name: "token value is not re-read as a bind address", args: "--token 0.0.0.0",
+			want: webStartOpts{Host: "", Port: 23232}, warns: 1,
+		},
+
+		// --- everything together, in either order ---
+		{
+			name: "all flags", args: "--bind 127.0.0.1 --port 8080 --username halil --password s3cret",
+			want: webStartOpts{Host: "127.0.0.1", Port: 8080, Username: "halil", Password: "s3cret", Explicit: true},
+		},
+		{
+			name: "all flags, reordered", args: "--password s3cret --username halil --port 8080 --bind 127.0.0.1",
+			want: webStartOpts{Host: "127.0.0.1", Port: 8080, Username: "halil", Password: "s3cret", Explicit: true},
 		},
 		{
 			name: "positional bind plus positional port", args: "127.0.0.1 8080",
-			want: webStartOpts{Host: "127.0.0.1", Port: 8080},
+			want: webStartOpts{Host: "127.0.0.1", Port: 8080, Explicit: true},
 		},
 
 		// --- warnings (never fatal) ---
 		{
 			name: "unknown flag warns and is ignored", args: "--nope 8080",
-			want: webStartOpts{Host: "", Port: 8080}, warns: 1,
+			want: webStartOpts{Host: "", Port: 8080, Explicit: true}, warns: 1,
 		},
 		{
 			name: "out-of-range port warns and keeps default", args: "70000",
@@ -138,8 +155,8 @@ func TestParseWebStartArgs(t *testing.T) {
 			want: webStartOpts{Host: "", Port: 23232}, warns: 1,
 		},
 		{
-			name: "missing flag value warns", args: "--bind --token t",
-			want: webStartOpts{Host: "", Port: 23232, Token: "t"}, warns: 1,
+			name: "missing flag value warns", args: "--bind --username halil",
+			want: webStartOpts{Host: "", Port: 23232, Username: "halil"}, warns: 1,
 		},
 		{
 			name: "garbage host warns", args: "--bind foo/bar",
@@ -153,7 +170,7 @@ func TestParseWebStartArgs(t *testing.T) {
 			if tc.args != "" {
 				args = strings.Fields(tc.args)
 			}
-			got, warns := parseWebStartArgs(args, tc.defHost, tc.defPort, tc.defToken)
+			got, warns := parseWebStartArgs(args, tc.defHost, tc.defPort)
 			if got != tc.want {
 				t.Fatalf("parseWebStartArgs(%q) = %+v, want %+v", tc.args, got, tc.want)
 			}
@@ -267,27 +284,28 @@ func TestWebURLAndLabel(t *testing.T) {
 	}
 }
 
-// Auto-start token resolution: configured token wins; no token → generated
-// (never an unprotected auto-started UI); control mode (Electron sidecar,
-// loopback-forced) stays token-less.
-func TestAutoStartWebToken(t *testing.T) {
-	if got := autoStartWebToken("s3cret", false); got != "s3cret" {
-		t.Errorf("configured token: got %q, want s3cret", got)
+// A login is required everywhere except control mode, which is the desktop
+// app's own loopback-forced sidecar — demanding a password there would lock the
+// app out of the daemon it just spawned.
+func TestWebLoginRequired(t *testing.T) {
+	if !webLoginRequired(false) {
+		t.Error("a normal web start must require a login")
 	}
-	if got := autoStartWebToken("s3cret", true); got != "s3cret" {
-		t.Errorf("configured token in control mode: got %q, want s3cret", got)
+	if webLoginRequired(true) {
+		t.Error("control mode must not require a login")
 	}
-	if got := autoStartWebToken("", true); got != "" {
-		t.Errorf("control mode without token: got %q, want empty (sidecar connects token-less)", got)
+}
+
+// --force is the opt-out for stopping the desktop app's own web server.
+func TestHasWebForce(t *testing.T) {
+	for _, args := range [][]string{{"--force"}, {"-f"}, {"--force", "extra"}} {
+		if !hasWebForce(args) {
+			t.Errorf("hasWebForce(%v) = false, want true", args)
+		}
 	}
-	gen := autoStartWebToken("", false)
-	if gen == "" {
-		t.Fatal("no token + no control: expected a generated token, got empty")
-	}
-	if gen2 := autoStartWebToken("", false); gen2 == gen {
-		t.Errorf("generated tokens should be random, got %q twice", gen)
-	}
-	if got := autoStartWebToken("  \t ", false); got == "" || strings.TrimSpace(got) != got {
-		t.Errorf("whitespace-only config should generate a clean token, got %q", got)
+	for _, args := range [][]string{nil, {}, {"--forced"}, {"force"}} {
+		if hasWebForce(args) {
+			t.Errorf("hasWebForce(%v) = true, want false", args)
+		}
 	}
 }

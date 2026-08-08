@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 	"github.com/rysh-ai/rysh-cli-code/internal/proxy"
+	"github.com/rysh-ai/rysh-cli-code/internal/session"
 	"github.com/rysh-ai/rysh-cli-code/internal/vterm"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
@@ -63,6 +65,67 @@ func earliestDeadline(a, b time.Time) (time.Time, bool) {
 // Shell management
 // ---------------------------------------------------------------------------
 
+// paneShellEnv is the daemon's environment minus the RYSH_WEB_* variables that
+// configured THIS daemon's web server.
+//
+// A pane shell inherits the daemon's environment so the user's tools behave as
+// they would in any terminal — but the desktop app spawns its daemon with
+// RYSH_WEB_CONTROL / RYSH_WEB_AUTO_START / RYSH_WEB_PORT, and those describe one
+// specific server, not a preference to pass on. Left in place, a `rysh create`
+// typed into a pane inherits them and the new, entirely unrelated daemon comes
+// up in control mode, auto-starting a web server aimed at the port the app is
+// already listening on. These variables configure a daemon; they have no
+// business crossing into the shells that daemon hosts.
+func paneShellEnv() []string {
+	env := os.Environ()
+	kept := env[:0]
+	for _, kv := range env {
+		switch {
+		case strings.HasPrefix(kv, "RYSH_WEB_CONTROL="),
+			strings.HasPrefix(kv, "RYSH_WEB_AUTO_START="),
+			strings.HasPrefix(kv, "RYSH_WEB_PORT="),
+			strings.HasPrefix(kv, "RYSH_WEB_HOST="):
+			continue
+		}
+		kept = append(kept, kv)
+	}
+	return kept
+}
+
+// paneIdentityEnv is what a program running INSIDE a pane needs in order to
+// address the pane it is in.
+//
+// Without it, such a program can only ask the daemon which pane is ACTIVE — and
+// that is wherever the user's focus happens to be, not where the program lives.
+// An agent driving its sibling panes therefore followed the user around the
+// screen instead of anchoring on itself, and a script could not reliably send
+// anything to its own pane.
+//
+// RYSH_SESSION / RYSH_TAB / RYSH_PANE are the names `rysh script` already
+// exports and the prelude already consumes, so `##` routing behaves the same
+// whether a script was launched by `rysh script` or typed into a pane.
+// RYSH_LANE and RYSH_STACK complete the path, because a selector is only
+// unambiguous when it is fully qualified: `--pane` alone is resolved within the
+// ACTIVE pane's group, so a program addressing a pane outside that group needs
+// every level. Every value is an id, and --tab/--lane/--pg/--pane all resolve an
+// id before an index or a name.
+//
+// "stack" rather than "group" or "pg" for the pane group: it is the word the
+// commands use (`##new stack`, `##cmd stack`), and a pane group is exactly a
+// stack of panes.
+//
+// All five are fixed for the pane's lifetime — a pane keeps its id and is
+// created inside one tab, lane and stack rather than migrating between them.
+func paneIdentityEnv(session, tabID, laneID, stackID, paneID string) []string {
+	return []string{
+		"RYSH_SESSION=" + session,
+		"RYSH_TAB=" + tabID,
+		"RYSH_LANE=" + laneID,
+		"RYSH_STACK=" + stackID,
+		"RYSH_PANE=" + paneID,
+	}
+}
+
 func (p *PaneActor) startShell() {
 	// In interactive mode the shell is launched with -i so it sources the
 	// user's rc files (~/.bashrc, ~/.zshrc) — making aliases, functions, shell
@@ -75,16 +138,27 @@ func (p *PaneActor) startShell() {
 	} else {
 		cmd = exec.Command(p.cfg.DefaultShell)
 	}
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(paneShellEnv(),
 		"BASH_SILENCE_DEPRECATION_WARNING=1",
 		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
 		"COLORFGBG=15;0",
 	)
+	// Tell the program in the pane WHICH pane it is in. Appended after the
+	// inherited environment so a value carried in from an outer session cannot
+	// make a pane claim to be its parent.
+	cmd.Env = append(cmd.Env,
+		paneIdentityEnv(p.cfg.SessionName, p.tabID, p.laneID, p.groupID, p.id)...)
 	// Governance proxy (design 001): when the loopback proxy is running, route
 	// this pane's third-party-CLI provider traffic through it by base-URL env
 	// injection (no TLS MITM). Empty endpoint ⇒ proxy off ⇒ env untouched.
 	if base := proxy.Endpoint(); base != "" {
+		// Register the pane as a legitimate attribution target before its
+		// program can call: the proxy refuses a {paneID} segment it never
+		// injected, and this is the moment rysh injects one.
+		if srv := proxy.Current(); srv != nil {
+			srv.NotePane(p.id)
+		}
 		cmd.Env = append(cmd.Env,
 			"ANTHROPIC_BASE_URL="+base+"/anthropic/"+p.id,
 			"OPENAI_BASE_URL="+base+"/openai/"+p.id,
@@ -108,6 +182,12 @@ func (p *PaneActor) startShell() {
 				}
 			}
 		}
+		// Per-CLI adapters (design 022 §4.4). Base-URL env is not enough for
+		// every CLI — codex can fall back to a ChatGPT session and egress
+		// around the proxy entirely — so an opted-in CLI gets the extra
+		// environment that actually forces it through. Opt-in because the
+		// adapter can change how the CLI authenticates.
+		cmd.Env = append(cmd.Env, p.proxyAdapterEnv(base)...)
 	}
 	if p.cfg.InteractiveShell && strings.Contains(filepath.Base(p.cfg.DefaultShell), "bash") {
 		// OSC 7 cwd reporting: bash emits its working directory before every
@@ -204,7 +284,14 @@ func (p *PaneActor) startShell() {
 		}
 	})
 
-	go p.rawReadLoop(f)
+	// The foreground poller lives exactly as long as the read loop: the channel
+	// is local so a later startShell cannot race with this one's goroutines.
+	foregroundStop := make(chan struct{})
+	go p.watchForeground(f, foregroundStop)
+	go func() {
+		p.rawReadLoop(f)
+		close(foregroundStop)
+	}()
 }
 
 func (p *PaneActor) stopShell() {
@@ -258,6 +345,36 @@ func (p *PaneActor) seedVTermCursorToBottom(reason string) {
 type terminalResponseWriter struct {
 	paneID string
 	w      io.Writer
+}
+
+// clearStaleMouseModes drops mouse tracking left behind by a child that just
+// exited. fg is the PTY's new foreground process group, and the reset happens
+// only when that is the pane's own shell again — the moment the child is gone.
+//
+// The emulator lives as long as the pane, so a program that enables tracking
+// and dies without disabling it (Ctrl+C, a crash, a sloppy teardown) otherwise
+// leaves the bit set for good, and every LATER program in the pane looks like
+// it wants mouse reports. The TUI then forwards wheel and click events into a
+// PTY that never asked for them, and Claude Code or a bare shell renders those
+// as literal "<65;50;54M" text.
+//
+// Gating on the return to the shell rather than on any foreground change lets a
+// program keep its tracking across a shell-out: vim's :!cmd runs in a NEW
+// process group, never the pane's shell pgid, so it does not trip this. Ctrl+Z
+// does hand the terminal back to the shell and so does clear the suspended
+// program's tracking, which is the right trade: programs re-initialise the
+// terminal (mouse tracking included) when they resume, and a suspended one is
+// indistinguishable from an exited one until it does.
+//
+// Ordering is safe against a program that starts and immediately enables
+// tracking: the kernel sets the foreground group before the new program can
+// write, so its \x1b[?1002h always arrives in a chunk read after this reset,
+// never in one clobbered by it.
+func (p *PaneActor) clearStaleMouseModes(fg int) {
+	if p.vtermEmu == nil || p.shellPgid <= 0 || fg != p.shellPgid {
+		return
+	}
+	p.vtermEmu.ResetMouseModes()
 }
 
 // rawReadLoop reads from the PTY in byte chunks (not line-based) and feeds
@@ -446,9 +563,19 @@ func (p *PaneActor) rawReadLoop(r io.Reader) {
 			}
 			childFg := fg > 0 && p.shellPgid > 0 && fg != p.shellPgid
 			if fg != lastFg {
+				p.clearStaleMouseModes(fg)
 				lastFg = fg
 				fgRedrew = false
+				// A new foreground program starts a fresh governance
+				// observation (design 022 §4.4) — each run of a CLI is judged
+				// on its own traffic, not on the previous program's — and is
+				// announced to anyone supervising the pane.
+				p.noteForegroundChange(fg)
 			}
+			// Cheap latch check on the same loop the pane already runs — no
+			// timer, and the warning lands next to the CLI's own output where
+			// the user is looking.
+			p.emitUnproxiedWarning()
 
 			// Feed raw bytes into the virtual terminal emulator.
 			// VTerm must always see the data so snapshot state stays correct.
@@ -775,12 +902,10 @@ func (p *PaneActor) rawReadLoop(r io.Reader) {
 				if tail := applyPromptStrip(stripAnsiEscapes(pendingTail)); tail != "" {
 					_ = pub.SendPaneShellOutput(id, tail)
 				}
-				pendingTail = ""
 			}
 			// Flush any remaining suppress buffer on EOF/error.
 			if suppressBuf != "" {
 				_ = pub.SendPaneShellOutput(id, applyPromptStrip(suppressBuf))
-				suppressBuf = ""
 			}
 			p.echoSuppress.Store(nil)
 			if err != io.EOF {
@@ -868,6 +993,147 @@ func (p *PaneActor) replayShareState() {
 // PTY resize handling
 // ---------------------------------------------------------------------------
 
+// paneSizeClaim is one viewport's measurement of a pane.
+type paneSizeClaim struct {
+	rows, cols int
+}
+
+// tuiClaimPrefix marks a size claim owned by a terminal UI process on this
+// machine. The pid after it is what makes the claim self-expiring: a TUI can
+// die by SIGKILL with no chance to withdraw anything, so the pane checks
+// liveness itself rather than trusting a departure message that may never come.
+const tuiClaimPrefix = "tui:"
+
+// anonymousSizeClaim keys a claim from a client that sent no id — an older
+// front-end build. Folding them all onto one key keeps such a client behaving
+// exactly as it did before claims existed (its latest size simply replaces its
+// previous one) instead of accumulating a new constraint per message, which
+// would ratchet the pane down to nothing.
+const anonymousSizeClaim = "anonymous"
+
+// claimPaneSize records a viewport's size for this pane and re-sizes the PTY to
+// the smallest claim currently held.
+func (p *PaneActor) claimPaneSize(clientID string, rows, cols int) {
+	if rows <= 0 || cols <= 0 {
+		return
+	}
+	if clientID == "" {
+		clientID = anonymousSizeClaim
+	}
+	if p.sizeClaims == nil {
+		p.sizeClaims = make(map[string]paneSizeClaim, 2)
+	}
+	p.sizeClaims[clientID] = paneSizeClaim{rows: rows, cols: cols}
+	p.applyEffectivePaneSize()
+}
+
+// releasePaneSize withdraws a viewport's claim (the web hub calls this when a
+// WebSocket closes) and re-sizes to whatever remains.
+func (p *PaneActor) releasePaneSize(clientID string) {
+	if clientID == "" {
+		clientID = anonymousSizeClaim
+	}
+	if _, held := p.sizeClaims[clientID]; !held {
+		return
+	}
+	delete(p.sizeClaims, clientID)
+	p.applyEffectivePaneSize()
+}
+
+// applyEffectivePaneSize sizes the PTY to the smallest live claim.
+//
+// Smallest wins because the constraint is asymmetric: a viewport LARGER than
+// the PTY simply has unused space around the grid, while a viewport SMALLER
+// than the PTY has to truncate or wrap it — which turns a full-screen app's
+// display into garbage. Sizing to the minimum is the only choice where every
+// attached viewport can render what the PTY produces.
+//
+// With no live claims the PTY is left exactly as it is. That matters on the
+// path where every viewport has gone: a detached daemon keeps its shells
+// running at their last size, and re-sizing them to some invented default
+// would reflow long-running interactive apps for nobody's benefit.
+func (p *PaneActor) applyEffectivePaneSize() {
+	p.pruneDeadSizeClaims()
+
+	rows, cols := 0, 0
+	for _, c := range p.sizeClaims {
+		if rows == 0 || c.rows < rows {
+			rows = c.rows
+		}
+		if cols == 0 || c.cols < cols {
+			cols = c.cols
+		}
+	}
+	if rows <= 0 || cols <= 0 {
+		return // no live viewport — keep the PTY as it stands
+	}
+	p.handleResize(rows, cols)
+}
+
+// sizeClaimReapInterval rate-limits reapStaleSizeClaims. Two seconds is short
+// enough that a pane recovers its full size almost immediately after the
+// viewport that was constraining it dies, and long enough that the liveness
+// syscalls stay invisible next to the snapshot poll that triggers them.
+const sizeClaimReapInterval = 2 * time.Second
+
+// reapStaleSizeClaims re-sizes the pane if a viewport that was constraining it
+// has died. It runs off snapshot requests rather than a timer, rate-limited to
+// sizeClaimReapInterval.
+//
+// This exists because a claim's owner can vanish without the pane hearing about
+// it. Kill a terminal UI and its "tui:<pid>" claim is still on record; the pane
+// stays clamped to that terminal's dimensions even though only a much larger
+// desktop-app window is left. Nothing would correct it, either — the app sends
+// a resize when ITS layout changes, and a terminal dying elsewhere does not
+// change the app's layout.
+//
+// It is skipped below two claims because that is the only case where a stale
+// claim changes the answer: with one claim there is nothing else to fall back
+// to, and dropping it would resize the pane for no viewport at all.
+func (p *PaneActor) reapStaleSizeClaims() {
+	if len(p.sizeClaims) < 2 {
+		return
+	}
+	now := time.Now()
+	if now.Sub(p.lastSizeClaimReap) < sizeClaimReapInterval {
+		return
+	}
+	p.lastSizeClaimReap = now
+
+	before := len(p.sizeClaims)
+	p.pruneDeadSizeClaims()
+	if len(p.sizeClaims) != before {
+		p.applyEffectivePaneSize()
+	}
+}
+
+// pruneDeadSizeClaims drops claims whose owner is provably gone.
+//
+// Only "tui:<pid>" claims can be tested this way, and they are the ones that
+// need it: a terminal UI attaches over loopback NATS, so its process is always
+// on this machine, and it can be killed without warning. Checking the pid
+// covers a clean exit and a crash with the same code path — no departure
+// message to lose, no timeout to tune.
+//
+// Web clients cannot be tested (the daemon sees only a socket) and are released
+// explicitly by the hub instead; if the hub itself dies, so has this daemon.
+//
+// This runs on every claim and release rather than on a timer, so a stale clamp
+// left by a killed TUI is cleared the next time any other viewport reports its
+// size — which is exactly when the wrong size would start to matter.
+func (p *PaneActor) pruneDeadSizeClaims() {
+	for id := range p.sizeClaims {
+		pidStr, ok := strings.CutPrefix(id, tuiClaimPrefix)
+		if !ok {
+			continue
+		}
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil || pid <= 0 || !session.ProcessAlive(pid) {
+			delete(p.sizeClaims, id)
+		}
+	}
+}
+
 // handleResize updates the PTY and virtual terminal dimensions.
 func (p *PaneActor) handleResize(rows, cols int) {
 	if rows <= 0 || cols <= 0 {
@@ -877,10 +1143,9 @@ func (p *PaneActor) handleResize(rows, cols int) {
 	if uint16(rows) == oldRows && uint16(cols) == oldCols {
 		return
 	}
-	oldCursorRow := -1
 	oldCursorNearBottom := false
 	if p.vtermEmu != nil {
-		oldCursorRow, _ = p.vtermEmu.CursorPos()
+		oldCursorRow, _ := p.vtermEmu.CursorPos()
 		oldCursorNearBottom = oldCursorRow >= int(oldRows)-1
 	}
 	p.ptyRows = uint16(rows)

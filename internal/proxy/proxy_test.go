@@ -92,6 +92,56 @@ func TestStopClearsEndpoint(t *testing.T) {
 	}
 }
 
+// TestStartPrivate_DoesNotPublish covers the half of probe isolation that lives
+// in this package: a private server serves traffic but never touches the
+// process globals a pane's env injection reads.
+func TestStartPrivate_DoesNotPublish(t *testing.T) {
+	live := New(nil, nil, nil, nil, false)
+	if _, err := live.Start(""); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer live.Stop()
+
+	probe := New(nil, nil, nil, nil, false)
+	if _, err := probe.StartPrivate(""); err != nil {
+		t.Fatalf("start private: %v", err)
+	}
+	if probe.BaseURL() == "" {
+		t.Fatal("a private server must still bind and report its own base URL")
+	}
+	if Endpoint() != live.BaseURL() || Current() != live {
+		t.Fatalf("StartPrivate published itself: endpoint=%q current=%v",
+			Endpoint(), Current())
+	}
+
+	// And the deferred Stop of a private server must not unpublish the live one.
+	probe.Stop()
+	if Endpoint() != live.BaseURL() || Current() != live {
+		t.Fatalf("a private Stop cleared the live endpoint: endpoint=%q current=%v",
+			Endpoint(), Current())
+	}
+}
+
+// TestStop_OnlyClearsItsOwnPublication guards the restart ordering: a stale
+// Stop on a superseded server must not blank the endpoint the new one just
+// published.
+func TestStop_OnlyClearsItsOwnPublication(t *testing.T) {
+	old := New(nil, nil, nil, nil, false)
+	if _, err := old.Start(""); err != nil {
+		t.Fatalf("start old: %v", err)
+	}
+	fresh := New(nil, nil, nil, nil, false)
+	if _, err := fresh.Start(""); err != nil {
+		t.Fatalf("start fresh: %v", err)
+	}
+	defer fresh.Stop()
+
+	old.Stop()
+	if Endpoint() != fresh.BaseURL() || Current() != fresh {
+		t.Fatalf("stopping the superseded server cleared the live endpoint: %q", Endpoint())
+	}
+}
+
 func TestSplitPath(t *testing.T) {
 	d, p, rest := splitPath("/anthropic/pane-1/v1/messages")
 	if d != "anthropic" || p != "pane-1" || rest != "v1/messages" {

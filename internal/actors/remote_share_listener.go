@@ -908,7 +908,7 @@ func (r *RemoteShareListenerActor) handleRawOutput(data []byte) {
 			"share", r.shareID, "rows", rows, "cols", cols)
 	}
 	// Always feed every byte into the VTerm immediately — never drop or reorder.
-	r.remoteVTerm.Write(rawBytes)
+	_, _ = r.remoteVTerm.Write(rawBytes)
 
 	// Throttle the expensive render+publish to ~rawRenderInterval. Leading edge:
 	// emit immediately if enough time has elapsed since the last emit. Otherwise

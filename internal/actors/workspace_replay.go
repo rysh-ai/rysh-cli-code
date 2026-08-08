@@ -20,14 +20,22 @@ import (
 //	                                    replay captured output into this pane, original timing
 //	##replay stop                       cancel an in-progress replay
 func (w *WorkspaceActor) handleReplayCommand(out *strings.Builder, paneID string, args []string) {
-	if w.replay == nil {
-		fmt.Fprintf(out, "replay: capture is OFF\n")
-		fmt.Fprintf(out, "  enable with  [replay] enabled: true  or  RYSH_REPLAY_ENABLED=1\n")
-		return
-	}
 	sub := ""
 	if len(args) > 0 {
 		sub = strings.ToLower(strings.TrimSpace(args[0]))
+	}
+	if w.replay == nil {
+		fmt.Fprintf(out, "replay: capture is OFF\n")
+		fmt.Fprintf(out, "  enable with  [replay] enabled: true  or  RYSH_REPLAY_ENABLED=1\n")
+		// Asking for status and being told "OFF" is an answer, not a failure.
+		// Asking to export/play/stop and getting it is a refusal — the sub is
+		// resolved before this guard so the two can be told apart.
+		switch sub {
+		case "", "status":
+		default:
+			w.failRysh("replay capture is OFF — enable it with [replay] enabled: true or RYSH_REPLAY_ENABLED=1")
+		}
+		return
 	}
 	switch sub {
 	case "", "status":
@@ -64,6 +72,7 @@ func (w *WorkspaceActor) handleReplayCommand(out *strings.Builder, paneID string
 		}
 	default:
 		fmt.Fprintf(out, "usage: ##replay [status] | ##replay export [--pane <id>] [--out <file>] | ##replay play [--pane <id>] [--from <dur|ts>] [--speed <n|max>] | ##replay stop\n")
+		w.failRyshUsage("unknown ##replay subcommand: %q", sub)
 	}
 }
 
@@ -98,6 +107,7 @@ func (w *WorkspaceActor) handleReplayExport(out *strings.Builder, curPane string
 	n, err := w.replay.ExportToFile(target, outPath, title)
 	if err != nil {
 		fmt.Fprintf(out, "replay: export failed: %v\n", err)
+		w.failRysh("replay: export failed: %v", err)
 		return
 	}
 	fmt.Fprintf(out, "replay: wrote %d event(s) → %s\n", n, outPath)
@@ -194,14 +204,17 @@ func replayBadgeFeed(publish func(string)) func(replay.PlayerStatus) {
 func (w *WorkspaceActor) handleReplayPlay(out *strings.Builder, curPane string, args []string) {
 	if curPane == "" {
 		fmt.Fprintf(out, "replay: no active pane to play into\n")
+		w.failRysh("replay: no active pane to play into")
 		return
 	}
 	if w.replayPlayer != nil && w.replayPlayer.Active() {
 		fmt.Fprintf(out, "replay: a playback is already running — ##replay stop first\n")
+		w.failRysh("replay: a playback is already running — ##replay stop first")
 		return
 	}
 	target, fromSpec, speedSpec, here, err := parseReplayPlayArgs(args)
 	if err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "replay: %v\n", err)
 		fmt.Fprintf(out, "usage: ##replay play [--pane <id>] [--from <duration|timestamp>] [--speed <n|max>] [--here]\n")
 		return
@@ -220,6 +233,7 @@ func (w *WorkspaceActor) handleReplayPlay(out *strings.Builder, curPane string, 
 func (w *WorkspaceActor) startReplayHere(out *strings.Builder, curPane, target, fromSpec, speedSpec string) {
 	steps, err := w.replay.PlaybackPlan(target, fromSpec, speedSpec)
 	if err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "replay: %v\n", err)
 		return
 	}
@@ -254,11 +268,13 @@ func (w *WorkspaceActor) startReplayHere(out *strings.Builder, curPane, target, 
 func (w *WorkspaceActor) startReplayPane(out *strings.Builder, curPane, target, fromSpec, speedSpec string) {
 	tl, err := w.replay.Timeline(target)
 	if err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "replay: %v\n", err)
 		return
 	}
 	from, err := w.replay.ParseFromOffset(target, fromSpec)
 	if err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "replay: %v\n", err)
 		return
 	}
@@ -268,6 +284,7 @@ func (w *WorkspaceActor) startReplayPane(out *strings.Builder, curPane, target, 
 	}
 	speed, err := replay.ParseSpeed(speedSpec)
 	if err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "replay: %v\n", err)
 		return
 	}
@@ -275,14 +292,17 @@ func (w *WorkspaceActor) startReplayPane(out *strings.Builder, curPane, target, 
 	tab := w.resolveOriginTab(curPane)
 	if tab == nil {
 		fmt.Fprintf(out, "replay: no active tab\n")
+		w.failRysh("replay: no active tab")
 		return
 	}
 	laneID := w.resolveLaneInTab(tab, "")
 	if laneID == "" {
 		fmt.Fprintf(out, "replay: no active lane\n")
+		w.failRysh("replay: no active lane")
 		return
 	}
 	if err := w.checkLimits(1); err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "replay: %v\n", err)
 		return
 	}
@@ -339,9 +359,6 @@ func (w *WorkspaceActor) startReplayPane(out *strings.Builder, curPane, target, 
 	fmt.Fprintf(out, "  focus the pane for controls:  space pause/resume   ←/→ seek ∓10s   +/- speed   q close\n")
 	fmt.Fprintf(out, "  ##replay stop cancels from anywhere\n")
 }
-
-// replaySeekStep is how far a ←/→ keypress moves the playback position.
-const replaySeekStep = 10 * time.Second
 
 // handleReplayControl applies a TUI playback control (design 006 v2). Only
 // controls for the active replay pane are honoured — a stale control from a

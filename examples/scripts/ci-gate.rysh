@@ -1,0 +1,35 @@
+#!/usr/bin/env rysh-script
+#
+# A CI gate. Boots its own throwaway session, does the work, tears it down.
+#
+#   rysh script ci-gate.rysh --ephemeral
+#
+# --ephemeral is what makes this safe to run on a developer's machine as well as
+# in CI: it never touches the session you have open. Without it, rysh refuses to
+# run against an attached session at all, because a ## command focuses the pane
+# it targets and would move your cursor around while you worked.
+
+set -euo pipefail
+
+echo "== workspace =="
+##new grid 2
+##pane list
+
+# Exit codes are the whole contract with CI, so check the things that can fail.
+echo "== preflight =="
+##policy show
+if [[ "${RYSH_OUT:-}" == *"unparseable"* ]]; then
+  echo "policy file is broken — refusing to run agents" >&2
+  exit 1
+fi
+
+# Real work goes here. ##prompt sends a prompt and BLOCKS until the agentic turn
+# ends, leaving the answer in $RYSH_OUT and rysh run's exit codes in $?:
+#   0 done · 1 error · 2 partial · 3 gate-blocked · 4 budget · 5 timeout
+#
+#   ##prompt review the diff on this branch and list any blocking issues
+#   if [[ "$RYSH_OUT" == *BLOCKING* ]]; then exit 1; fi
+#
+# Left commented so the example runs without a provider key.
+
+echo "== ok =="

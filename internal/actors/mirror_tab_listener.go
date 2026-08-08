@@ -98,7 +98,7 @@ const predictiveEchoEnabled = false
 func (pv *mirrorPaneVTerm) ensureDisplay() {
 	if pv.display == nil {
 		pv.display = vterm.New(pv.rows, pv.cols)
-		pv.display.Write(pv.vt.Repaint())
+		_, _ = pv.display.Write(pv.vt.Repaint())
 	}
 }
 
@@ -107,7 +107,7 @@ func (pv *mirrorPaneVTerm) ensureDisplay() {
 func (pv *mirrorPaneVTerm) predict(glyph rune) {
 	pv.ensureDisplay()
 	row, col := pv.display.CursorPos()
-	pv.display.Write([]byte(string(glyph)))
+	_, _ = pv.display.Write([]byte(string(glyph)))
 	pv.predictions = append(pv.predictions, predictedCell{row: row, col: col, glyph: glyph, at: time.Now()})
 }
 
@@ -130,9 +130,9 @@ func (pv *mirrorPaneVTerm) rebuildDisplay() {
 		return
 	}
 	pv.display = vterm.New(pv.rows, pv.cols)
-	pv.display.Write(pv.vt.Repaint())
+	_, _ = pv.display.Write(pv.vt.Repaint())
 	for _, p := range pv.predictions {
-		pv.display.Write([]byte(fmt.Sprintf("\x1b[%d;%dH%c", p.row+1, p.col+1, p.glyph)))
+		_, _ = pv.display.Write([]byte(fmt.Sprintf("\x1b[%d;%dH%c", p.row+1, p.col+1, p.glyph)))
 	}
 }
 
@@ -805,7 +805,7 @@ func (r *MirrorTabListenerActor) handleRawFrame(paneID string, data []byte) {
 		r.vterms[paneID] = pv
 	}
 	// Always feed every byte into the VTerm immediately — never drop or reorder.
-	pv.vt.Write(rawBytes)
+	_, _ = pv.vt.Write(rawBytes)
 	slog.Debug("perpane-diag SUB handleRawFrame applied",
 		"share", shortID(r.shareID), "pane", shortID(paneID), "rawBytes", len(rawBytes))
 

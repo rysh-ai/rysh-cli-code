@@ -1,0 +1,14 @@
+# The skill mandates the three sections; a null run has none of them.
+output_matches:
+  - "(?i)yesterday"
+  - "(?i)today"
+  - "(?i)blocker"
+  - "(?i)(csv|parser|header)"
+# Everything needed is inline: a read-only summarizer runs nothing.
+commands_forbidden:
+  - "git commit*"
+  - "git push*"
+  - "rm *"
+  - "* > *"
+  - "* >> *"
+max_tokens: 80000

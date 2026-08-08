@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
@@ -116,10 +117,10 @@ func TestDelete_NonexistentSession(t *testing.T) {
 	}
 }
 
-// TestUpsertGet_PreservesSource verifies the front-end ownership tag survives a
-// JSON round-trip through Upsert and Get, and through List. This is what lets
-// the desktop app filter to its own "app" sessions and the open guards reject a
-// session created by the other front-end.
+// TestUpsertGet_PreservesSource verifies the front-end provenance tag survives
+// a JSON round-trip through Upsert and Get, and through List. This is what lets
+// the desktop app label a session's origin in its picker and lets EnsureCanOpen
+// work out which render surfaces to warn about.
 func TestUpsertGet_PreservesSource(t *testing.T) {
 	st := newTestStore(t)
 
@@ -144,33 +145,84 @@ func TestUpsertGet_PreservesSource(t *testing.T) {
 	}
 }
 
-// TestEnsureSourceMatch covers the open-guard decision table: same source is
-// allowed, a mismatch is refused, and a blank (legacy) record source is
-// compatible with either front-end.
-func TestEnsureSourceMatch(t *testing.T) {
+// TestEnsureCanOpen covers the open decision table. Nothing is refused — both
+// front-ends drive the same daemon — so what the table pins is which
+// combinations produce DEGRADATION NOTES, and specifically that the asymmetry
+// runs one way: the desktop app is a superset of the terminal, so it opens a
+// terminal session with nothing lost, while the terminal opens an app session
+// with the app-only render surfaces called out.
+func TestEnsureCanOpen(t *testing.T) {
 	cases := []struct {
 		name      string
 		recSource string
 		want      string
-		ok        bool
+		wantNotes bool
 	}{
-		{"same-app", "app", "app", true},
-		{"same-cli", "cli", "cli", true},
-		{"cli-opens-app", "app", "cli", false},
+		{"same-app", "app", "app", false},
+		{"same-cli", "cli", "cli", false},
+		{"cli-opens-app", "app", "cli", true},
 		{"app-opens-cli", "cli", "app", false},
-		{"legacy-blank-cli", "", "cli", true},
-		{"legacy-blank-app", "", "app", true},
+		{"legacy-blank-cli", "", "cli", false},
+		{"legacy-blank-app", "", "app", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := Record{Name: tc.name, Source: tc.recSource}
-			err := EnsureSourceMatch(rec, tc.want)
-			if tc.ok && err != nil {
-				t.Errorf("ensureSourceMatch(%q, %q) = %v, want nil", tc.recSource, tc.want, err)
+			notes, err := EnsureCanOpen(rec, tc.want)
+			if err != nil {
+				t.Fatalf("EnsureCanOpen(%q, %q) = %v, want no error — no front-end pair is refused",
+					tc.recSource, tc.want, err)
 			}
-			if !tc.ok && err == nil {
-				t.Errorf("ensureSourceMatch(%q, %q) = nil, want error", tc.recSource, tc.want)
+			if tc.wantNotes && len(notes) == 0 {
+				t.Errorf("EnsureCanOpen(%q, %q) returned no notes, want degradations",
+					tc.recSource, tc.want)
+			}
+			if !tc.wantNotes && len(notes) > 0 {
+				t.Errorf("EnsureCanOpen(%q, %q) returned notes %v, want none",
+					tc.recSource, tc.want, notes)
 			}
 		})
+	}
+}
+
+// TestEnsureCanOpenEmailParity guards a real asymmetry inside the asymmetry:
+// the terminal has its own three-column email client (internal/tui/email_view.go)
+// speaking the same NATS request/reply as the app's, so opening an app session
+// must NOT claim email panes are degraded. Only the surfaces the terminal truly
+// cannot paint belong in the notes.
+func TestEnsureCanOpenEmailParity(t *testing.T) {
+	notes, err := EnsureCanOpen(Record{Name: "app-session", Source: SourceApp}, SourceCLI)
+	if err != nil {
+		t.Fatalf("EnsureCanOpen: %v", err)
+	}
+	for _, n := range notes {
+		if strings.Contains(n, "email") {
+			t.Errorf("note %q claims email degrades, but the TUI has a full email client", n)
+		}
+	}
+	if len(notes) == 0 {
+		t.Fatal("expected at least the web-pane degradation")
+	}
+}
+
+// TestDegradationSummary checks the rendered block names the creating front-end
+// and lists every note, since this is what the user actually reads.
+func TestDegradationSummary(t *testing.T) {
+	rec := Record{Name: "designs", Source: SourceApp}
+	notes, err := EnsureCanOpen(rec, SourceCLI)
+	if err != nil {
+		t.Fatalf("EnsureCanOpen: %v", err)
+	}
+	summary := DegradationSummary(rec, notes)
+	if !strings.Contains(summary, "designs") || !strings.Contains(summary, "rysh desktop app") {
+		t.Errorf("summary = %q; want it to name the session and its creator", summary)
+	}
+	for _, n := range notes {
+		if !strings.Contains(summary, n) {
+			t.Errorf("summary dropped note %q", n)
+		}
+	}
+	if got := DegradationSummary(rec, nil); got != "" {
+		t.Errorf("DegradationSummary with no notes = %q, want \"\"", got)
 	}
 }

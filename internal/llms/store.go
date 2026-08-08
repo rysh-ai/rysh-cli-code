@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -35,14 +36,32 @@ type ModelSpec struct {
 	// (low|medium|high|xhigh|max — anthropic providers only).
 	Effort string `yaml:"effort,omitempty"`
 	Added  string `yaml:"added,omitempty"` // YYYY-MM-DD, set on Add
+	// Disabled parks a model without deleting it: ##llm use and ##pane model
+	// refuse it, while ##llm list still shows it (marked) so it can be turned
+	// back on. Omitempty keeps every pre-existing file valid and enabled.
+	Disabled bool `yaml:"disabled,omitempty"`
 }
 
-// ExecutableProvider is the provider whose models rysh can actually run
-// today (the agentic executor speaks the Anthropic Messages API).
-const ExecutableProvider = "anthropic"
+// ExecutableProviders are the providers rysh can actually RUN a model on —
+// the ones internal/provider builds a real agentic provider for. Everything
+// else in the registry is a declaration for planning, selectable nowhere.
+//
+// This was a single provider ("anthropic") for as long as the executor spoke
+// only the Anthropic Messages API. It no longer does: design 002 added the
+// OpenAI-compatible dialect (Ollama, and Gemini via its compat surface), and
+// OpenAI proper now speaks the Responses API. Leaving the old value in place
+// meant `##llm openai/gpt-4o` refused a model that `##pane model
+// openai/gpt-4o` would happily run — the pane path never consulted this.
+//
+// Kept as a local list rather than an import of internal/provider so this
+// package stays a leaf; TestExecutableProvidersMatchProviderSelection pins the
+// two against each other so they cannot drift.
+var ExecutableProviders = []string{"anthropic", "claude-cli", "gemini", "ollama", "openai"}
 
 // Executable reports whether rysh's executor can run this model.
-func (m ModelSpec) Executable() bool { return m.Provider == ExecutableProvider }
+func (m ModelSpec) Executable() bool {
+	return slices.Contains(ExecutableProviders, strings.ToLower(strings.TrimSpace(m.Provider)))
+}
 
 // refPattern validates provider and model-name path segments: no separators,
 // no traversal, YAML-friendly.
@@ -127,6 +146,24 @@ func (s *Store) Add(spec ModelSpec) (string, error) {
 	return p, nil
 }
 
+// SetDisabled flips one model file's disabled flag and rewrites it in place,
+// returning the updated spec. A disabled model stays declared and inspectable;
+// only activation is refused.
+func (s *Store) SetDisabled(providerName, modelName string, disabled bool) (*ModelSpec, error) {
+	spec, err := s.Get(providerName, modelName)
+	if err != nil {
+		return nil, err
+	}
+	if spec.Disabled == disabled {
+		return spec, nil
+	}
+	spec.Disabled = disabled
+	if _, err := s.Add(*spec); err != nil {
+		return nil, err
+	}
+	return spec, nil
+}
+
 // List returns the registry content: provider names in sorted order and each
 // provider's models sorted by name. Unparseable files are skipped (listed
 // callers should not brick on one bad YAML file).
@@ -188,9 +225,17 @@ func (s *Store) SeedIfEmpty() error {
 	return nil
 }
 
-const notExecutableNote = "not executable by rysh yet (the executor speaks the Anthropic API); declared for planning"
+const notExecutableNote = "no rysh executor for this provider; declared for planning"
 
-// seedModels is the starter registry written by SeedIfEmpty.
+// seedModels is the starter registry written by SeedIfEmpty. EVERY entry must
+// name a model id the provider actually serves: this list is inherited by every
+// new session, so a speculative name is not a harmless placeholder — it is a
+// model the user can select and a 404 they have to diagnose. `gemini-3-pro` was
+// exactly that (Google's 3.x line is Flash and Flash-Lite; the Pro tier is
+// still 2.5, and `gemini-3-pro-image` is an image model, not a chat one).
+//
+// Verified against the providers' own model lists: OpenAI's /v1/models and
+// Google's published model page.
 var seedModels = []ModelSpec{
 	{Provider: "anthropic", Name: "fable5", Model: "claude-fable-5",
 		Description: "Anthropic's most intelligent generally available model (Mythos-class tier)."},
@@ -200,10 +245,28 @@ var seedModels = []ModelSpec{
 		Description: "Sonnet-tier alias; rysh's built-in internal-loop (do legs) seat."},
 	{Provider: "anthropic", Name: "haiku-4-5", Model: "claude-haiku-4-5-20251001",
 		Description: "Fast/cheap tier for lightweight legs."},
-	{Provider: "openai", Name: "gpt-5.1", Model: "gpt-5.1", Description: notExecutableNote},
-	{Provider: "openai", Name: "gpt-4o", Model: "gpt-4o", Description: notExecutableNote},
+	{Provider: "openai", Name: "sol", Model: "gpt-5.6-sol",
+		Description: "GPT-5.6 reasoning tier. Needs the Responses API, which rysh speaks."},
+	{Provider: "openai", Name: "terra", Model: "gpt-5.6-terra",
+		Description: "GPT-5.6 mid tier."},
+	{Provider: "openai", Name: "luna", Model: "gpt-5.6-luna",
+		Description: "GPT-5.6 fast/cheap tier."},
+	{Provider: "openai", Name: "gpt-5.1", Model: "gpt-5.1",
+		Description: "Previous frontier generation."},
+	{Provider: "openai", Name: "gpt-4o", Model: "gpt-4o",
+		Description: "Older general-purpose tier; cheap and widely available."},
+	{Provider: "gemini", Name: "gemini-3.6-flash", Model: "gemini-3.6-flash",
+		Description: "Latest Flash tier: strongest agentic/multimodal work per token."},
+	{Provider: "gemini", Name: "gemini-3.5-flash", Model: "gemini-3.5-flash",
+		Description: "Near-Pro coding and parallel agentic execution at Flash cost."},
+	{Provider: "gemini", Name: "gemini-3.5-flash-lite", Model: "gemini-3.5-flash-lite",
+		Description: "Fastest, lowest-cost tier for high-throughput legs."},
+	{Provider: "gemini", Name: "gemini-2.5-pro", Model: "gemini-2.5-pro",
+		Description: "The Pro tier — the 3.x line is Flash/Flash-Lite only, so Pro work stays on 2.5."},
+	{Provider: "gemini", Name: "gemini-2.5-flash", Model: "gemini-2.5-flash",
+		Description: "rysh's built-in default when a session selects gemini without pinning a model."},
+	// Grok has no rysh executor: no provider name selects it (see
+	// internal/provider.KnownProviderNames), so these stay declarations.
 	{Provider: "grok", Name: "grok-4", Model: "grok-4", Description: notExecutableNote},
 	{Provider: "grok", Name: "grok-3", Model: "grok-3", Description: notExecutableNote},
-	{Provider: "gemini", Name: "gemini-3-pro", Model: "gemini-3-pro", Description: notExecutableNote},
-	{Provider: "gemini", Name: "gemini-2.5-flash", Model: "gemini-2.5-flash", Description: notExecutableNote},
 }

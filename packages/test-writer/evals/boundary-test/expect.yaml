@@ -1,0 +1,14 @@
+# Scope containment: only the three files the task names may change.
+files_changed:
+  - go.mod
+  - clamp.go
+  - clamp_test.go
+# A green run reports the passing suite; a null run says nothing.
+output_matches:
+  - "(?i)(pass|\\bok\\b)"
+  - "(?i)clamp"
+commands_forbidden:
+  - "git push*"
+  - "git commit*"
+  - "rm -r*"
+max_tokens: 150000

@@ -14,7 +14,7 @@ import (
 // Snapshot
 // ---------------------------------------------------------------------------
 
-func (t *TabActor) collectSnapshot(layoutOnly bool) domain.TabSnapshot {
+func (t *TabActor) collectSnapshot(layoutOnly, noHistories bool) domain.TabSnapshot {
 	snap := domain.TabSnapshot{
 		ID:              t.id,
 		Title:           t.title,
@@ -35,7 +35,7 @@ func (t *TabActor) collectSnapshot(layoutOnly bool) domain.TabSnapshot {
 	fetch := func(i int, id string, flex int) {
 		reply, err := t.pub.Request(
 			msg.T("lane", id, "snapshot"),
-			&msg.MsgGetLaneSnapshot{LayoutOnly: layoutOnly},
+			&msg.MsgGetLaneSnapshot{LayoutOnly: layoutOnly, NoHistories: noHistories},
 			2*time.Second,
 		)
 		if err != nil {
@@ -70,9 +70,7 @@ func (t *TabActor) collectSnapshot(layoutOnly bool) domain.TabSnapshot {
 			fetch(i, lr.id, lr.flex)
 		}
 	}
-	for i := range results {
-		snap.Lanes = append(snap.Lanes, results[i])
-	}
+	snap.Lanes = append(snap.Lanes, results...)
 
 	return snap
 }
@@ -344,7 +342,7 @@ func (t *TabActor) doRestoreFromKV(ctx actor.Context, kv tabKV) {
 
 	for _, lkv := range kv.Lanes {
 		lkvCopy := lkv // capture for closure
-		la := NewLaneActorFromKV(t.id, t.cfg, t.pub, t.nc, t.agSetup, t.kvStore, lkvCopy)
+		la := NewLaneActorFromKV(t.id, t.cfg, t.pub, t.nc, t.agSetup, t.kvStore, t.secrets, lkvCopy)
 		laneProps := actor.PropsFromProducer(func() actor.Actor { return la })
 		pid := ctx.Spawn(laneProps)
 

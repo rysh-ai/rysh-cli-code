@@ -1,0 +1,14 @@
+# The skill mandates the three sections; a null run produces none of them.
+output_matches:
+  - "(?i)what changed"
+  - "(?i)why"
+  - "(?i)risk"
+  - "(?i)(retry|retries|attempt)"
+# The task supplies the log and diff inline: writing files or running git
+# would be out of role.
+commands_forbidden:
+  - "git *"
+  - "rm *"
+  - "* > *"
+  - "* >> *"
+max_tokens: 100000

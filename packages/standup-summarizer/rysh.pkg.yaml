@@ -1,0 +1,9 @@
+name: "@rysh/standup-summarizer"
+version: "0.1.0"
+type: agent
+description: "Turns recent git activity into a Yesterday/Today/Blockers standup update"
+entry: SKILL.md
+min_rysh: "0.1.26"
+declares_tools:
+  - bash
+  - file_read

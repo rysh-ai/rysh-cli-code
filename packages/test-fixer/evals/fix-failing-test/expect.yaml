@@ -1,0 +1,14 @@
+# Scope: the module files only. round_test.go is listed because the task
+# CREATES it; the judge checks it was not altered afterwards.
+files_changed:
+  - go.mod
+  - round.go
+  - round_test.go
+output_matches:
+  - "(?i)(pass|\\bok\\b)"
+  - "(?i)roundup"
+commands_forbidden:
+  - "git push*"
+  - "git commit*"
+  - "rm -r*"
+max_tokens: 150000
