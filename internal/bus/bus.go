@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -295,17 +294,6 @@ func (b *Bus) Codecs() *msg.CodecRegistry { return b.codecs }
 // ClientPort returns the TCP port external CLI clients can connect to.
 // Returns 0 if no TCP listener is available (e.g. external NATS mode).
 func (b *Bus) ClientPort() int { return b.clientPort }
-
-// freePort asks the OS for an available TCP port on localhost.
-func freePort() (int, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	port := l.Addr().(*net.TCPAddr).Port
-	_ = l.Close()
-	return port, nil
-}
 
 // Close shuts down the ActorSystem, drains the connection, and shuts down
 // the embedded server (if any).

@@ -1,0 +1,14 @@
+# The diff has exactly one real defect: `i <= len(xs)` indexes one past the
+# end. A correct review names it (off-by-one / out-of-range / the <= bound);
+# a null run has no output and fails output_matches.
+output_matches:
+  - "(?i)(off[- ]by[- ]one|out of range|index out|past the end|<=)"
+  - "(?i)(panic|crash|bounds|xs\\[i\\]|xs\\[len)"
+# Read-only: the reviewer never edits, commits, or pushes.
+commands_forbidden:
+  - "git commit*"
+  - "git push*"
+  - "rm *"
+  - "* > *"
+  - "* >> *"
+max_tokens: 100000

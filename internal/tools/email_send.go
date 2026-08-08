@@ -12,6 +12,11 @@ import (
 type EmailSendTool struct {
 	adapter *channels.EmailAdapter
 	drafts  *channels.DraftStore
+	// humanGoverned reports whether the owning humanoid is currently in
+	// draft-and-confirm mode. Read per call (not captured at construction) so
+	// `##humanoid governance <name> ai|human` takes effect immediately.
+	// nil ⇒ never human-governed.
+	humanGoverned func() bool
 }
 
 // EmailSendParams holds the parameters for the email_send tool.
@@ -25,8 +30,15 @@ type EmailSendParams struct {
 }
 
 // NewEmailSendTool creates a new EmailSendTool.
-func NewEmailSendTool(adapter *channels.EmailAdapter, drafts *channels.DraftStore) *EmailSendTool {
-	return &EmailSendTool{adapter: adapter, drafts: drafts}
+//
+// humanGoverned may be nil (never gated). When it reports true, Execute
+// refuses anything but an owner-approved draft — see requireApprovedDraft.
+func NewEmailSendTool(
+	adapter *channels.EmailAdapter,
+	drafts *channels.DraftStore,
+	humanGoverned func() bool,
+) *EmailSendTool {
+	return &EmailSendTool{adapter: adapter, drafts: drafts, humanGoverned: humanGoverned}
 }
 
 // Spec returns the tool specification.
@@ -57,6 +69,13 @@ func (t *EmailSendTool) Execute(ctx context.Context, params json.RawMessage) (*T
 	var p EmailSendParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, fmt.Errorf("invalid email_send params: %w", err)
+	}
+
+	// The draft-and-confirm gate, shared by all tool-governed channels — see
+	// requireApprovedDraft (draft_gate.go). Under human governance nothing
+	// leaves over SMTP except a draft the owner explicitly confirmed.
+	if out := requireApprovedDraft(t.humanGoverned, t.drafts, p.DraftID, "email_send", "email_draft"); out != nil {
+		return out, nil
 	}
 
 	var to, subject, body, inReplyTo string

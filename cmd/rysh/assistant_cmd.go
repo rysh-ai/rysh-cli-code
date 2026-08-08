@@ -459,12 +459,11 @@ func ensureAssistantDaemon(cfg config.Config, args []string, in *bufio.Reader, t
 	store, storeErr := session.NewStore(cfg)
 	live := false
 	if storeErr == nil {
-		// Settle the name before prompting: the consent below names the session,
-		// and a "default" record owned by the desktop app cannot be opened from
-		// here at all (see ownableSessionName).
-		if name, note := ownableSessionName(store, sessionName, session.NormalizeSource(cfg.SessionSource)); note != "" {
+		// Surface the render caveats before prompting: the consent below names
+		// the session, so the user should know a desktop-app session's web
+		// panes will not paint here before agreeing to open it.
+		if note := sessionOpenNote(store, sessionName, session.NormalizeSource(cfg.SessionSource)); note != "" {
 			fmt.Println(note)
-			sessionName = name
 		}
 		if rec, err := store.Get(sessionName); err == nil && rec.PID > 0 && session.ProcessAlive(rec.PID) && rec.NATSPort > 0 {
 			live = true

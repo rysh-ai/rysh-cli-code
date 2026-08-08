@@ -21,6 +21,13 @@ func SelfHeal(existing Record, found bool, self Record) (healed Record, changed 
 	}
 	healed = self
 	healed.State = "detached"
+	// Provenance is stamped once, by whichever front-end created the session,
+	// and outlives every daemon that serves it. Healing must never rewrite it:
+	// restarting an app-created session from the terminal would otherwise
+	// relabel it "cli" and lose the reason the terminal degrades its web panes.
+	if found && existing.Source != "" {
+		healed.Source = existing.Source
+	}
 	if found && existing.PID == self.PID {
 		// Ours, but wrong elsewhere (port or state): keep the TUI bookkeeping
 		// (and the live app-client count, maintained by the web hub) so an
@@ -28,6 +35,10 @@ func SelfHeal(existing Record, found bool, self Record) (healed Record, changed 
 		healed.TUIPIDs = existing.AliveTUIPIDs()
 		healed.AppClients = existing.AppClients
 		healed.ProxyPort = existing.ProxyPort // live daemon-maintained, like AppClients
+		// The web endpoint is maintained live by the daemon (UpdateWebEndpoint)
+		// and is how the desktop app adopts this session — dropping it here
+		// would strand a connected app on the next heal tick.
+		healed.WebPort = existing.WebPort
 		if len(healed.TUIPIDs) > 0 {
 			healed.State = "running"
 		}

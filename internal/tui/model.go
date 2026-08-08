@@ -115,6 +115,7 @@ const (
 	modeRaw          inputMode = "raw"          // raw terminal mode: all keys forwarded to PTY
 	modeRawScroll    inputMode = "rawscroll"    // frozen scrollback view over an interactive (raw) pane
 	modeEmail        inputMode = "email"        // three-column email client over a pane in "email" content mode
+	modeLLMPicker    inputMode = "llmpicker"    // interactive `##llm select`: model → scope → (optional) API key
 )
 
 // paneRect stores the screen coordinates of a pane's text content area
@@ -244,6 +245,11 @@ type Model struct {
 	rejectInput             textinput.Model         // text input for rejection reason (N + reason)
 	approvalCh              chan approvalRequestMsg // shared channel for approval subscription
 
+	// `##llm select` picker (llm_picker.go). Non-nil only while it is open;
+	// the mode and the state are set and cleared together.
+	llmPicker   *llmPickerState
+	llmPickerCh chan *msgpkg.MsgLLMPickerOpen
+
 	// pipeline mode: live output
 	pipelineCh      chan pipelineOutputMsg // shared channel for pipeline output subscription
 	pipelineOutputs map[string]string      // tabID → accumulated live pipeline output
@@ -366,10 +372,6 @@ func NewModel(cfg config.Config, logger *slog.Logger, b *bus.Bus) (Model, error)
 	// into the text input field as spurious key events.
 	termenv.SetDefaultOutput(termenv.NewOutput(os.Stdout, termenv.WithProfile(termenv.TrueColor)))
 
-	sessionName := cfg.SessionName
-	if sessionName == "" {
-		sessionName = "default"
-	}
 	workspaceInbox := msgpkg.T("ws", "inbox")
 	workspaceSnapshot := msgpkg.T("ws", "snapshot")
 
@@ -519,6 +521,7 @@ func NewModel(cfg config.Config, logger *slog.Logger, b *bus.Bus) (Model, error)
 	// Structured email-client streams (email_view.go): inbox/detail/compose/changed
 	// pushes plus the activate-mode push.
 	emailEventCh, activateModeCh := setupEmailSubscriptions(b)
+	llmPickerCh := setupLLMPickerSubscription(b)
 
 	m := Model{
 		cfg:                cfg,
@@ -563,6 +566,7 @@ func NewModel(cfg config.Config, logger *slog.Logger, b *bus.Bus) (Model, error)
 		emailViews:         make(map[string]*emailViewState),
 		emailEventCh:       emailEventCh,
 		activateModeCh:     activateModeCh,
+		llmPickerCh:        llmPickerCh,
 		pendingActivate:    make(map[string]string),
 	}
 	m.syncPaneInputs()
@@ -654,7 +658,7 @@ func (m Model) activePaneIsAgenticInFlight() bool {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.refreshCmd(), tickCmd(), m.reconcileWorkspacesCmd(), m.listenApprovalRequests(), m.listenPipelineOutput(), m.listenAttentionEvents(), m.listenMirrorDirty(), m.listenRemoteFullscreen(), m.listenContentCmd(), m.listenLayoutDirty(), m.listenRawDirtyCmd(), m.listenVTFrameCmd(), m.listenMCPStatusCmd(), m.listenEmailEventCmd(), m.listenActivateModeCmd(), reconcileTickCmd())
+	return tea.Batch(m.refreshCmd(), tickCmd(), m.reconcileWorkspacesCmd(), m.listenApprovalRequests(), m.listenPipelineOutput(), m.listenAttentionEvents(), m.listenMirrorDirty(), m.listenRemoteFullscreen(), m.listenContentCmd(), m.listenLayoutDirty(), m.listenRawDirtyCmd(), m.listenVTFrameCmd(), m.listenMCPStatusCmd(), m.listenEmailEventCmd(), m.listenActivateModeCmd(), m.listenLLMPickerCmd(), reconcileTickCmd())
 }
 
 // reconcileWorkspacesCmd asks the daemon (once, at startup/attach) to reconcile
@@ -753,10 +757,6 @@ func (m Model) refreshFreshCmd() tea.Cmd {
 }
 
 func (m Model) refreshSnapshotCmd(fresh bool) tea.Cmd {
-	sessionName := m.cfg.SessionName
-	if sessionName == "" {
-		sessionName = "default"
-	}
 	snapshotSubject := msgpkg.T("ws", "snapshot")
 	codecs := m.bus.Codecs()
 	nc := m.bus.Conn()

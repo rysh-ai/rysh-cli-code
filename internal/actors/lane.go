@@ -38,7 +38,8 @@ type LaneActor struct {
 	pub     *msg.NATSPublisher
 	agSetup *agentic.Setup
 	nc      *nats.Conn
-	kvStore nats.KeyValue // rysh-panes bucket
+	kvStore nats.KeyValue   // rysh-panes bucket
+	secrets *secretResolver // workspace-scoped ##secret lookup, threaded to panes
 	br      *bridge.NATSBridge
 
 	groupRefs     []*laneGroupRef
@@ -77,6 +78,7 @@ func NewLaneActor(
 	nc *nats.Conn,
 	agSetup *agentic.Setup,
 	kvStore nats.KeyValue,
+	secrets *secretResolver,
 ) *LaneActor {
 	return &LaneActor{
 		id:            id,
@@ -89,6 +91,7 @@ func NewLaneActor(
 		agSetup:       agSetup,
 		nc:            nc,
 		kvStore:       kvStore,
+		secrets:       secrets,
 		groupSubjects: make(map[string]string),
 		groupPIDs:     make(map[string]*actor.PID),
 		groupActors:   make(map[string]*PaneGroupActor),
@@ -105,9 +108,10 @@ func NewLaneActorFromKV(
 	nc *nats.Conn,
 	agSetup *agentic.Setup,
 	kvStore nats.KeyValue,
+	secrets *secretResolver,
 	kv laneKV,
 ) *LaneActor {
-	la := NewLaneActor(kv.ID, tabID, kv.Flex, "", "", cfg, pub, nc, agSetup, kvStore)
+	la := NewLaneActor(kv.ID, tabID, kv.Flex, "", "", cfg, pub, nc, agSetup, kvStore, secrets)
 	la.restoreData = &kv
 	return la
 }
@@ -227,7 +231,7 @@ func (l *LaneActor) Receive(ctx actor.Context) {
 	case *msg.RequestEnvelope:
 		switch inner := m.Inner.(type) {
 		case *msg.MsgGetLaneSnapshot:
-			snap := l.collectSnapshot(inner.LayoutOnly)
+			snap := l.collectSnapshot(inner.LayoutOnly, inner.NoHistories)
 			_ = m.Reply(&msg.MsgLaneSnapshotReply{Snapshot: snap})
 		case *msg.MsgGetLaneActivePane:
 			paneID := ""
@@ -275,7 +279,7 @@ func (l *LaneActor) createPaneGroup(ctx actor.Context, paneID, title, groupID, w
 		title = petname.Generate(2, "-")
 	}
 
-	ga := NewPaneGroupActor(groupID, l.tabID, l.id, paneID, title, paneGroupCfg(l.cfg, workingDir), l.pub, l.nc, l.agSetup, l.kvStore)
+	ga := NewPaneGroupActor(groupID, l.tabID, l.id, paneID, title, paneGroupCfg(l.cfg, workingDir), l.pub, l.nc, l.agSetup, l.kvStore, l.secrets)
 	ga.initialPaneType = paneType
 	groupProps := actor.PropsFromProducer(func() actor.Actor { return ga })
 	pid := ctx.Spawn(groupProps)
@@ -639,7 +643,7 @@ func (l *LaneActor) updateActivePaneFromGroup() {
 // Snapshot
 // ---------------------------------------------------------------------------
 
-func (l *LaneActor) collectSnapshot(layoutOnly bool) domain.LaneSnapshot {
+func (l *LaneActor) collectSnapshot(layoutOnly, noHistories bool) domain.LaneSnapshot {
 	snap := domain.LaneSnapshot{
 		ID:   l.id,
 		Flex: l.flex,
@@ -656,7 +660,7 @@ func (l *LaneActor) collectSnapshot(layoutOnly bool) domain.LaneSnapshot {
 	fetch := func(i int, id, activePaneID string, rowFlex int) {
 		reply, err := l.pub.Request(
 			msg.T("pane-group", id, "snapshot"),
-			&msg.MsgGetPaneGroupSnapshot{LayoutOnly: layoutOnly},
+			&msg.MsgGetPaneGroupSnapshot{LayoutOnly: layoutOnly, NoHistories: noHistories},
 			2*time.Second,
 		)
 		if err != nil {
@@ -711,9 +715,7 @@ func (l *LaneActor) collectSnapshot(layoutOnly bool) domain.LaneSnapshot {
 			fetch(i, gr.id, gr.activePaneID, gr.rowFlex)
 		}
 	}
-	for i := range results {
-		snap.PaneGroups = append(snap.PaneGroups, results[i])
-	}
+	snap.PaneGroups = append(snap.PaneGroups, results...)
 
 	return snap
 }
@@ -986,7 +988,7 @@ func (l *LaneActor) doRestoreFromKV(ctx actor.Context, kv laneKV) {
 
 	for _, gkv := range kv.PaneGroups {
 		gkvCopy := gkv // capture for closure
-		ga := NewPaneGroupActorFromKV(l.tabID, l.id, l.cfg, l.pub, l.nc, l.agSetup, l.kvStore, gkvCopy)
+		ga := NewPaneGroupActorFromKV(l.tabID, l.id, l.cfg, l.pub, l.nc, l.agSetup, l.kvStore, l.secrets, gkvCopy)
 		groupProps := actor.PropsFromProducer(func() actor.Actor { return ga })
 		pid := ctx.Spawn(groupProps)
 

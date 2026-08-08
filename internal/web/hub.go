@@ -17,6 +17,11 @@ type Hub struct {
 	register    chan *wsClient
 	unregister  chan *wsClient
 	streamCount atomic.Int32 // number of registered ?stream=1 (content-plane) clients
+	// plainCount is the number of registered clients that did NOT opt into the
+	// content plane. They are the only consumers of the blind full-snapshot
+	// poll, which is expensive enough (a whole workspace's pane content) that
+	// pollSnapshots checks this before building one at all.
+	plainCount atomic.Int32
 	// onCount, when set (before run starts), is invoked with the new total
 	// client count on every register/unregister transition. Runs on the hub
 	// goroutine — keep it cheap (the session-record presence update is a
@@ -60,6 +65,20 @@ func (h *Hub) sendWhere(data []byte, to func(*wsClient) bool) {
 // hasStream reports whether any client opted into the content plane.
 func (h *Hub) hasStream() bool { return h.streamCount.Load() > 0 }
 
+// hasPlain reports whether any client still needs the blind full-snapshot poll
+// (i.e. did NOT opt into the content plane).
+func (h *Hub) hasPlain() bool { return h.plainCount.Load() > 0 }
+
+// countClient adjusts the per-kind client counters by delta. Every add/remove
+// of a client goes through here so the two counters cannot drift apart.
+func (h *Hub) countClient(c *wsClient, delta int32) {
+	if c.streamContent {
+		h.streamCount.Add(delta)
+		return
+	}
+	h.plainCount.Add(delta)
+}
+
 func (h *Hub) run(ctx context.Context) {
 	for {
 		select {
@@ -71,17 +90,13 @@ func (h *Hub) run(ctx context.Context) {
 			return
 		case client := <-h.register:
 			h.clients[client] = true
-			if client.streamContent {
-				h.streamCount.Add(1)
-			}
+			h.countClient(client, 1)
 			h.notifyCount()
 		case client := <-h.unregister:
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
 				close(client.send)
-				if client.streamContent {
-					h.streamCount.Add(-1)
-				}
+				h.countClient(client, -1)
 				h.notifyCount()
 			}
 		case message := <-h.broadcast:
@@ -96,9 +111,7 @@ func (h *Hub) run(ctx context.Context) {
 					// Client too slow — disconnect.
 					delete(h.clients, client)
 					close(client.send)
-					if client.streamContent {
-						h.streamCount.Add(-1)
-					}
+					h.countClient(client, -1)
 					dropped = true
 				}
 			}
@@ -129,6 +142,17 @@ type wsClient struct {
 	// of the heavy full snapshot on the 200ms poll. Set from the ?stream=1 query
 	// param at connect; immutable thereafter.
 	streamContent bool
+	// sizeClientID identifies this connection in pane size arbitration (see
+	// msg.MsgPaneResize): a pane sizes its PTY to the smallest viewport showing
+	// it, so two app windows on one pane must be told apart. Assigned at
+	// connect; immutable thereafter.
+	sizeClientID string
+	// sizedPanes records which panes this connection has claimed a size on, so
+	// the claims can be withdrawn when the socket closes. A pane cannot test a
+	// web client's liveness the way it tests a TUI's pid, so this release is
+	// the ONLY thing that stops a closed window from clamping a pane forever.
+	// Written from the read pump and read on disconnect.
+	sizedPanes map[string]bool
 }
 
 // writePump pumps messages from the hub to the WebSocket connection.
@@ -163,6 +187,12 @@ func (c *wsClient) writePump() {
 // readPump pumps messages from the WebSocket connection to the server.
 func (c *wsClient) readPump(server *Server) {
 	defer func() {
+		// Withdraw this window's pane size claims BEFORE unregistering. A pane
+		// sizes its PTY to the smallest viewport showing it, and it cannot test
+		// whether a web client is still there the way it tests a TUI's pid — so
+		// without this a closed app window would clamp every pane it had sized
+		// for the life of the daemon.
+		server.releasePaneSizes(c)
 		c.hub.unregister <- c
 		c.conn.Close()
 	}()
@@ -198,7 +228,10 @@ func (c *wsClient) readPump(server *Server) {
 				Params json.RawMessage `json:"params,omitempty"`
 			}
 			if json.Unmarshal(wsMsg.Data, &cmd) == nil {
-				server.handleCommand(cmd.Action, cmd.Params)
+				// Routed through the client-aware dispatcher so request/reply
+				// exchanges (completion, W7) can answer THIS client only;
+				// everything else falls through to the broadcast handler.
+				server.handleClientCommand(c, cmd.Action, cmd.Params)
 			}
 		}
 	}

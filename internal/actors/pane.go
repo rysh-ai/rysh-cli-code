@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -55,22 +56,36 @@ type PaneActor struct {
 	agSetup      *agentic.Setup
 	providerName string // effective provider (override when set, else session)
 
-	// `##pane provider` runtime override (design 002 §3.4). providerHolder is
-	// consulted per call by the executor's provider decorator, so installs
-	// apply to the next agentic prompt without respawning the executor. The
-	// name/model pair is persisted in the pane snapshot (KV) so the override
-	// survives detach/attach.
+	// `##pane provider` / `##pane model` runtime override (design 002 §3.4).
+	// providerHolder is consulted per call by the executor's provider
+	// decorator, so installs apply to the next agentic prompt without
+	// respawning the executor. The name/model pair is persisted in the pane
+	// snapshot (KV) so the override survives detach/attach.
 	providerHolder        *provider.PaneOverride
 	providerOverride      string
 	providerOverrideModel string
-	nc                    *nats.Conn
-	br                    *bridge.NATSBridge
-	kvStore               nats.KeyValue // rysh-panes bucket
+	// Inherited selection, pushed by the WorkspaceActor from the nearest
+	// enclosing scope that binds a model (stack > lane > tab > workspace — see
+	// model_scope.go). Transient by design: the owning scope recomputes it, so
+	// it is never persisted and never overwrites the pane's OWN selection
+	// above, which outranks it.
+	inheritedProvider string
+	inheritedModel    string
+	inheritedScope    string
+	nc                *nats.Conn
+	br                *bridge.NATSBridge
+	kvStore           nats.KeyValue   // rysh-panes bucket
+	secrets           *secretResolver // workspace-scoped ##secret lookup for provider overrides
 
 	// Unguarded — sequential mailbox.
 	title     string
 	givenName string
-	mode      string
+	// meta is free-form metadata set through `##pane meta`, owned by whatever
+	// is driving this pane and never interpreted here. Persisted with the pane
+	// so a supervisor's record of what a pane is FOR survives a restart of both
+	// the supervisor and the daemon.
+	meta map[string]string
+	mode string
 	// paneType marks a special pane variant: "" / "normal" for regular panes,
 	// "replay" for the dedicated read-only replay pane (design 006 v2), which
 	// never starts a shell/PTY — its content is exclusively the recorded
@@ -171,6 +186,14 @@ type PaneActor struct {
 	// consumers fall back to lsof/proc resolution then. Holds a string.
 	shellCwdAtomic atomic.Value
 
+	// programAtomic is the pane's live foreground executable name, "" at the
+	// shell prompt. Read by buildSnapshot on the mailbox goroutine; written by
+	// two others — the read loop (fast path, on output) and the foreground
+	// poller (for programs that print nothing) — hence programMu guarding the
+	// compare-and-set that decides whether a transition is announced.
+	programAtomic atomic.Value
+	programMu     sync.Mutex
+
 	// nativeMode: ##native pass-through — the pane is permanently
 	// interactive (VT-rendered, raw keys to the PTY); bash owns the line.
 	nativeMode bool
@@ -195,6 +218,15 @@ type PaneActor struct {
 	ptyCols         uint16             // current PTY column count
 	rawInputSub     *nats.Subscription // NATS subscription for raw key input bypass
 
+	// sizeClaims holds each attached viewport's measurement of this pane,
+	// keyed by client id (see msg.MsgPaneResize). The PTY is sized to the
+	// SMALLEST claim so the grid fits inside every viewport showing the pane;
+	// see applyEffectivePaneSize. Touched only from the mailbox goroutine.
+	sizeClaims map[string]paneSizeClaim
+	// lastSizeClaimReap rate-limits the liveness sweep over sizeClaims, which
+	// runs off snapshot requests (a hot path) rather than a timer.
+	lastSizeClaimReap time.Time
+
 	// remoteSubscriber is true when this pane is the local owner pane of a remote
 	// share subscription (##upstream subscribe). While set, non-shell remote modes
 	// (chat/rysh/external) are also folded into the merged display buffer so a
@@ -217,6 +249,12 @@ type PaneActor struct {
 	// interactive I/O. The TUI subscribes to this subject and writes directly
 	// to stdout, bypassing the snapshot/VTerm rendering path.
 	relayActive atomic.Bool // set via MsgRelayActivate/Deactivate, read by rawReadLoop
+
+	// submitQ serializes the PTY writes of submitToPTY so a command's text and
+	// its deferred Enter stay together when commands arrive back-to-back.
+	// Enqueued from the actor goroutine, executed on its own (see
+	// pane_submit_queue.go).
+	submitQ ptySubmitQueue
 
 	// Echo suppression: persists across multiple PTY read chunks until the
 	// deadline expires. Set by executeShell (actor goroutine), read/cleared
@@ -243,9 +281,11 @@ type PaneActor struct {
 	// approvalAttentionEnabled controls whether approval events emit attention notifications.
 	approvalAttentionEnabled bool
 
-	kvDirty        bool
-	kvBuffersDirty bool // separate dirty flag for private/public buffers
-	lastKVWrite    time.Time
+	kvDirty bool
+	// persistTickStop halts the safety-net persist ticker (panePersistInterval).
+	persistTickStop chan struct{}
+	kvBuffersDirty  bool // separate dirty flag for private/public buffers
+	lastKVWrite     time.Time
 }
 
 // NewPaneActor creates a new PaneActor. It does not start any goroutines; that
@@ -258,6 +298,7 @@ func NewPaneActor(
 	nc *nats.Conn,
 	agSetup *agentic.Setup,
 	kvStore nats.KeyValue,
+	secrets *secretResolver,
 ) *PaneActor {
 	return &PaneActor{
 		id:                 id,
@@ -272,6 +313,7 @@ func NewPaneActor(
 		providerName:       agSetup.Provider.Name(),
 		providerHolder:     provider.NewPaneOverride(),
 		kvStore:            kvStore,
+		secrets:            secrets,
 		mode:               "shell",
 		enabledModes:       []string{"shell", "prompt", "rysh", "chat"},
 		status:             "idle",
@@ -291,6 +333,9 @@ func NewPaneActor(
 func (p *PaneActor) Receive(ctx actor.Context) {
 	switch m := ctx.Message().(type) {
 	case *actor.Started:
+		// Safety-net KV flush for a detached daemon, which gets no snapshot
+		// requests and so would otherwise never write dirty pane state.
+		p.startPersistTicker(ctx)
 		p.br = bridge.New(p.nc, ctx.Self(), ctx.ActorSystem(), p.pub.Codecs())
 		p.br.SetPaneID(p.id)
 		_ = p.br.AddSubject(msg.T("pane", p.id, "inbox"))
@@ -330,7 +375,7 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 		// spawns (RestoreState ran earlier, before Started, and only recorded the
 		// name/model pair — the holder needs a live provider).
 		if p.providerOverride != "" {
-			p.installProviderOverride()
+			p.applyEffectiveProvider()
 		}
 
 		// Spawn LLMPromptExecutionActor as a child. It creates its own bridge in
@@ -453,7 +498,14 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 		p.stopShell()
 
 	case *actor.Stopping:
+		p.stopPersistTicker()
 		teardownScope(p.agSetup, agentic.ScopePane, p.id)
+		// Release the pane's governance-proxy state: rate buckets, the cached
+		// ledger verdict, the ungoverned-CLI observation, and its place in the
+		// set of panes the proxy will accept traffic from.
+		if srv := p.proxyServer(); srv != nil {
+			srv.ForgetPane(p.id)
+		}
 		if p.remoteUpstreamPID != nil {
 			ctx.Stop(p.remoteUpstreamPID)
 			p.remoteUpstreamPID = nil
@@ -563,6 +615,9 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 	case *msg.MsgPaneSetProvider:
 		p.handleSetProviderOverride(m)
 
+	case *panePersistTickMsg:
+		p.maybePersist()
+
 	case *msg.MsgPaneSetGivenName:
 		p.givenName = m.Name
 		p.kvDirty = true
@@ -572,11 +627,34 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 		// nothing in the app until an unrelated action forced a refresh.
 		p.notifyLayoutDirty()
 
+	case *msg.MsgPaneSetMeta:
+		if m.Key != "" {
+			if m.Value == "" {
+				delete(p.meta, m.Key)
+			} else {
+				if p.meta == nil {
+					p.meta = make(map[string]string)
+				}
+				p.meta[m.Key] = m.Value
+			}
+			p.kvDirty = true
+		}
+
 	case *msg.MsgPaneStop:
 		ctx.Stop(ctx.Self())
 
 	case *msg.MsgPaneResize:
-		p.handleResize(m.Rows, m.Cols)
+		if m.Override {
+			// Deliberate one-off sizing (a remote share subscriber asking the
+			// source to render at its own resolution) — apply it as given and
+			// leave the claim set alone.
+			p.handleResize(m.Rows, m.Cols)
+		} else {
+			p.claimPaneSize(m.ClientID, m.Rows, m.Cols)
+		}
+
+	case *msg.MsgPaneReleaseSize:
+		p.releasePaneSize(m.ClientID)
 
 	case *msg.MsgRawKeyInput:
 		// Raw key input received through the actor mailbox (fallback path).
@@ -887,11 +965,15 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 	case *msg.RequestEnvelope:
 		switch inner := m.Inner.(type) {
 		case *msg.MsgGetPaneSnapshot:
+			// A snapshot request means some viewport is still rendering this
+			// pane — the right moment to notice that another one has died and
+			// give back the room it was holding (see reapStaleSizeClaims).
+			p.reapStaleSizeClaims()
 			// LayoutOnly (the TUI's cascade fetch) omits heavy content — the TUI
 			// streams it per-pane. A direct backfill/reconcile fetch leaves it
 			// false to pull full content in one hop. Conversation buffers are never
 			// needed on the reply path (only the 2s-gated persist path builds them).
-			snap := p.buildSnapshot(!inner.LayoutOnly, false)
+			snap := p.buildSnapshot(!inner.LayoutOnly, false, !inner.NoHistories)
 			_ = m.Reply(&msg.MsgPaneSnapshotReply{Snapshot: snap})
 			p.maybePersist()
 		case *msg.MsgGetPaneVT:

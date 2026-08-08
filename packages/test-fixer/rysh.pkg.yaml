@@ -1,0 +1,13 @@
+name: "@rysh/test-fixer"
+version: "0.1.0"
+type: agent
+description: "Diagnoses failing tests and fixes the defect — in the code, not the test"
+entry: SKILL.md
+min_rysh: "0.1.26"
+declares_tools:
+  - bash
+  - file_read
+  - edit
+  - grep
+  - glob
+  - test_run

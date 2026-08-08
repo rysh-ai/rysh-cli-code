@@ -281,7 +281,7 @@ func TestStopReplayIfPaneClosed(t *testing.T) {
 func TestReplayPaneTypePropagates(t *testing.T) {
 	// Snapshot carries the variant.
 	p := &PaneActor{id: "rp", title: "replay", paneType: "replay"}
-	snap := p.buildSnapshot(false, false)
+	snap := p.buildSnapshot(false, false, true)
 	if snap.PaneType != "replay" {
 		t.Fatalf("snapshot PaneType = %q, want \"replay\"", snap.PaneType)
 	}

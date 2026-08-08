@@ -54,6 +54,16 @@ type Policy struct {
 	BudgetCeilings map[string]int64
 	// ProxyRequired forces the governance proxy on and blocks ##proxy off.
 	ProxyRequired bool
+	// ProxyStrict escalates the ungoverned-CLI WARNING (design 022 §4.4) to a
+	// block: a known agent CLI that runs past the grace window with no governed
+	// request is stopped.
+	//
+	// Separate from ProxyRequired on purpose (022 §8.2). "The proxy must be
+	// running" is a fact about rysh and is always safe to enforce. "This CLI is
+	// escaping the proxy" is NEGATIVE evidence — an idle CLI is indistinguishable
+	// from an escaped one — so acting on it can stop innocent work, and that is
+	// a decision an operator has to make deliberately.
+	ProxyStrict bool
 	// SNATRequired names registered secrets that must be present.
 	SNATRequired []string
 
@@ -95,6 +105,7 @@ type yamlPolicy struct {
 	} `yaml:"budget"`
 	Proxy struct {
 		Required bool `yaml:"required"`
+		Strict   bool `yaml:"strict"`
 	} `yaml:"proxy"`
 	SNAT struct {
 		Required []string `yaml:"required"`
@@ -174,6 +185,7 @@ func parse(data []byte, path string) (*Policy, error) {
 		AlwaysGate:     yp.Approval.AlwaysGate,
 		BudgetCeilings: yp.Budget.Ceilings,
 		ProxyRequired:  yp.Proxy.Required,
+		ProxyStrict:    yp.Proxy.Strict,
 		SNATRequired:   yp.SNAT.Required,
 		Path:           path,
 		Loaded:         true,
@@ -222,12 +234,15 @@ func Merge(org, project *Policy) *Policy {
 		OrgAlwaysGate:  org.AlwaysGate,
 		BudgetCeilings: map[string]int64{},
 		ProxyRequired:  org.ProxyRequired || project.ProxyRequired,
-		SNATRequired:   unionStrings(org.SNATRequired, project.SNATRequired),
-		Path:           project.Path,
-		Loaded:         true,
-		OrgPath:        org.Path,
-		OrgActive:      true,
-		projectLoaded:  project.Loaded,
+		// Strictest wins, like every other merged rule: a project file cannot
+		// switch off an org's strict mode by omitting it.
+		ProxyStrict:   org.ProxyStrict || project.ProxyStrict,
+		SNATRequired:  unionStrings(org.SNATRequired, project.SNATRequired),
+		Path:          project.Path,
+		Loaded:        true,
+		OrgPath:       org.Path,
+		OrgActive:     true,
+		projectLoaded: project.Loaded,
 	}
 	// Budget ceilings: union of pane ids; where both bind, the LOWER wins.
 	for id, c := range org.BudgetCeilings {
@@ -295,6 +310,9 @@ func (p *Policy) Summary() string {
 	}
 	if p.ProxyRequired {
 		out += "  proxy:         REQUIRED (##proxy off blocked)\n"
+	}
+	if p.ProxyStrict {
+		out += "  proxy strict:  ON (an ungoverned agent CLI is stopped, not just warned)\n"
 	}
 	if len(p.SNATRequired) > 0 {
 		out += fmt.Sprintf("  snat required: %v\n", p.SNATRequired)

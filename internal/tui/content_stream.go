@@ -1014,7 +1014,7 @@ func (m *Model) syncPaneContentSet() (visible, needBackfill []string) {
 // once per dirty signal — bounded by the source-side and listener-side
 // coalesce cadences.
 func (m *Model) consumeDirtyRawPanes(visible []string) []string {
-	if m.dirtyRawPanes == nil || len(m.dirtyRawPanes) == 0 || len(visible) == 0 {
+	if len(m.dirtyRawPanes) == 0 || len(visible) == 0 {
 		return nil
 	}
 	out := make([]string, 0, len(visible))

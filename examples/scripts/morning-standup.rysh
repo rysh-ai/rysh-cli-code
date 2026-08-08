@@ -1,0 +1,187 @@
+#!/usr/bin/env rysh-script
+#
+# Morning standup: build the workspace you actually work in, one command.
+#
+#   rysh script morning-standup.rysh                      # 3 repos from ./
+#   rysh script morning-standup.rysh ~/src/api ~/src/web  # explicit repos
+#   bash morning-standup.rysh                             # rysh lines inert
+#
+# This is the longest example in the tree on purpose: it is the one that shows
+# what the language is FOR. Every other example demonstrates a capability; this
+# one does a job, and the rysh commands are load-bearing rather than
+# illustrative.
+#
+# What it demonstrates, in order of how much it matters:
+#
+#   * rysh output feeding bash, and bash driving rysh back. There is no API and
+#     no JSON — `##pane list` prints, bash greps ids out of it, and those ids go
+#     straight back into `##pane name`.
+#   * exit codes that mean something. Every ## command below can fail, and
+#     `set -e` is what stops this script rearranging your workspace half-way.
+#   * the colon form. A `##` line is a comment to bash, so one used as a
+#     block's only statement leaves bash with an empty body — a syntax error,
+#     not an inert line. `: ##cmd` is bash's no-op plus the command.
+#   * secrets vs variables. The agent may read one and never see the other.
+#   * the polyglot property. Run this file with `bash` and it still works,
+#     with the rysh half skipped.
+#
+# Check both halves before trusting it:  rysh script morning-standup.rysh --check
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Inputs. Ordinary bash — the point is that you did not have to learn anything
+# new to parameterise a rysh workspace.
+# ---------------------------------------------------------------------------
+
+REPOS=("$@")
+if [[ ${#REPOS[@]} -eq 0 ]]; then
+  # Default: every git repo one level down, capped so a stray directory does
+  # not open forty panes.
+  while IFS= read -r r; do REPOS+=("$r"); done < <(
+    find . -maxdepth 2 -name .git -type d -printf '%h\n' 2>/dev/null | sort | head -3
+  )
+fi
+if [[ ${#REPOS[@]} -eq 0 ]]; then
+  # Nothing below needs a repo — `git log` in a non-repo just prints nothing.
+  # Falling back to one pane here beats exiting, because the common case is
+  # `cd ~/project && rysh script morning-standup.rysh` where the repo IS the
+  # working directory and there is nothing one level down to find.
+  REPOS=(".")
+  echo "-- no repos found below here; opening one pane for the current directory"
+fi
+
+MODEL="${RYSH_STANDUP_MODEL:-}"
+
+# Am I running under rysh, or as plain bash with the ## lines commented out?
+# The prelude exports RYSH_SCRIPT_VERSION; nothing else sets it. This is the
+# idiom for a check that only makes sense when the rysh half actually ran.
+UNDER_RYSH=${RYSH_SCRIPT_VERSION:+yes}
+
+echo "== standup for ${#REPOS[@]} repo(s)${UNDER_RYSH:+ (under rysh)} =="
+
+# ---------------------------------------------------------------------------
+# 1. A tab, and one pane per repo.
+#
+# ##new grid takes the count, so the layout follows the input rather than being
+# hard-coded. This is the first place `set -e` earns its keep: if the grid
+# cannot be built, nothing below should run against a workspace that is not
+# the shape we think it is.
+# ---------------------------------------------------------------------------
+
+##new tab
+##new grid ${#REPOS[@]}
+
+# ---------------------------------------------------------------------------
+# 2. Name the panes after their repos.
+#
+# THE INTEROP STORY: ##pane list prints a human-readable listing; $RYSH_OUT
+# holds it; bash pulls the ids out with grep. No structured API — the text is
+# the interface, which is the same reason ## commands work from cron, CI and
+# an agent's mouth.
+# ---------------------------------------------------------------------------
+
+##pane list
+mapfile -t PANE_IDS < <(
+  printf '%s\n' "${RYSH_OUT:-}" | grep -o 'id=[0-9a-f-]\{36\}' | sed 's/^id=//' | tail -n "${#REPOS[@]}"
+)
+
+# Guarded on UNDER_RYSH: with no rysh, ##pane list never ran and finding zero
+# panes is correct, not a failure. Without this the file would still PARSE as
+# bash but stop working as bash, which is half the point of the format.
+if [[ -n "$UNDER_RYSH" && ${#PANE_IDS[@]} -lt ${#REPOS[@]} ]]; then
+  echo "expected ${#REPOS[@]} panes, found ${#PANE_IDS[@]}" >&2
+  exit 1
+fi
+
+for i in "${!REPOS[@]}"; do
+  name=$(basename "${REPOS[$i]}")
+  # Three things worth copying here.
+  #
+  # The leading ":" — bash needs a non-empty body for a loop, and a ## line is
+  # a comment to it. ":" is bash's no-op; rysh still runs the command.
+  #
+  # The "||" — a given-name is unique per lane, so re-running this against a
+  # session you already set up fails on the second pass. Catching it is what
+  # makes the script re-runnable, and it only works because a ## command
+  # returns a real exit status.
+  #
+  # What you must NOT write is `if : ##pane name ...; then`. Bash swallows the
+  # "; then" into the comment and the file stops parsing. A ## command has to
+  # be the END of its line, apart from trailing operators.
+  : ##pane name "${PANE_IDS[$i]}" "$name" || echo "-- '$name' is already taken in this lane; leaving that pane alone"
+done
+echo "-- ${#PANE_IDS[@]} panes checked against ${#REPOS[@]} repos"
+
+# ---------------------------------------------------------------------------
+# 3. Bind a model, if one was asked for.
+#
+# The binding is per-pane, and a narrower binding always wins over the session
+# default — so this changes these panes and nothing else you have open.
+# ---------------------------------------------------------------------------
+
+if [[ -n "$MODEL" ]]; then
+  ##llm
+  if [[ "${RYSH_OUT:-}" == *"$MODEL"* ]]; then
+    : ##pane model "$MODEL"
+    echo "-- bound $MODEL to this pane"
+  else
+    # Not fatal: the workspace is still usable, the model just is not declared.
+    echo "-- $MODEL is not in .rysh/llms; declare it with '##llm add $MODEL'" >&2
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Context the agents may read, and credentials they may use but never see.
+#
+# ##variable is visible to the LLM. ##secret is not: SecretNAT swaps it for a
+# token before anything leaves the machine, and rysh masks the value out of
+# pane output and history the moment you type it.
+# ---------------------------------------------------------------------------
+
+: ##variable new STANDUP_DATE "$(date +%Y-%m-%d)"
+: ##variable new REPO_COUNT "${#REPOS[@]}"
+
+if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+  : ##secret new GITHUB_TOKEN "$GITHUB_TOKEN"
+  echo "-- GITHUB_TOKEN registered as a secret (the agent gets a token, not the key)"
+fi
+
+##variable list
+
+# ---------------------------------------------------------------------------
+# 5. Fan a command out across every pane.
+#
+# ##cmd runs it in each pane of the scope, so output lands where the human is
+# looking rather than in this script. A fan-out that matches NO panes exits
+# non-zero — which is why there is no "did it work?" check here: `set -e`
+# already covers the case where the scope is wrong.
+# ---------------------------------------------------------------------------
+
+##cmd lane git --no-pager log --oneline -5
+
+# ---------------------------------------------------------------------------
+# 6. Ask an agent, and WAIT for the answer.
+#
+# ##prompt blocks until the agentic turn finishes and leaves the reply in
+# $RYSH_OUT, with rysh run's exit codes in $?:
+#
+#   0 done · 1 error · 2 partial · 3 gate-blocked · 4 budget · 5 timeout
+#
+# Approval gates fail closed (exit 3): a script cannot approve, and blocking
+# forever on a prompt nobody is watching is worse than stopping.
+#
+# Commented out so this example runs without a provider key. Uncomment for the
+# real thing.
+# ---------------------------------------------------------------------------
+
+# ##prompt summarise what changed across these repos since yesterday, as bullets
+# printf '%s\n' "$RYSH_OUT" > "standup-$(date +%F).md"
+# echo "-- wrote standup-$(date +%F).md"
+
+# ---------------------------------------------------------------------------
+# 7. Leave the workspace in a state you can describe.
+# ---------------------------------------------------------------------------
+
+##pane list
+echo "== standup ready: ${#REPOS[@]} panes, one per repo =="

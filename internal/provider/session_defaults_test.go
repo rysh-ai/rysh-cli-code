@@ -13,7 +13,7 @@ type fakeOverridable struct {
 	overridden            bool
 }
 
-func (f *fakeOverridable) Name() string                                   { return "fake" }
+func (f *fakeOverridable) Name() string                                     { return "fake" }
 func (f *fakeOverridable) Complete(context.Context, string) (string, error) { return "ok", nil }
 func (f *fakeOverridable) CompleteWithTools(
 	context.Context, []sharedprovider.ConversationTurn, []sharedprovider.ToolSpec, string,

@@ -10,34 +10,10 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/agentic"
+	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 	"github.com/rysh-ai/rysh-cli-code/internal/upstream"
 )
-
-// extractShareTriFlag pulls an optional `--flag [true|false]` (or `--flag=value`)
-// out of args, returning whether the flag was present, its boolean value (a bare
-// flag ⇒ true; only a following true|false token is consumed), and the remaining
-// args. Used for --share-api (default false ⇒ present&&value) and --redact
-// (default true ⇒ present ? value : true).
-func extractShareTriFlag(args []string, flag string) (present, value bool, rest []string) {
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		switch {
-		case a == flag:
-			present, value = true, true
-			if i+1 < len(args) && (args[i+1] == "true" || args[i+1] == "false") {
-				value = args[i+1] == "true"
-				i++
-			}
-		case strings.HasPrefix(a, flag+"="):
-			present = true
-			value = strings.TrimPrefix(a, flag+"=") != "false"
-		default:
-			rest = append(rest, a)
-		}
-	}
-	return present, value, rest
-}
 
 // forgedOpsForEntity computes the forge-origin operation specs shareable for a
 // given entity — the intersection of (ops the forge.Manager registered) ∩ (ops
@@ -127,6 +103,7 @@ func (w *WorkspaceActor) showShareRestrictions(out *strings.Builder, paneID stri
 	res, err := w.pub.Request(msg.T("pane", paneID, "inbox"), &msg.MsgGetPaneSnapshot{}, time.Second)
 	if err != nil {
 		fmt.Fprintf(out, "\n[rysh] failed to get pane snapshot: %v\n", err)
+		w.failRysh("failed to get pane snapshot: %v", err)
 		return
 	}
 	reply, ok := res.(*msg.MsgPaneSnapshotReply)
@@ -185,6 +162,14 @@ func (w *WorkspaceActor) handleShareCommand(out *strings.Builder, paneID string,
 	if !w.cfg.Upstream.Enabled || w.shareRegistryPID == nil {
 		fmt.Fprintf(out, "\n[rysh] upstream is not enabled\n")
 		fmt.Fprintf(out, "  set upstream.enabled: true in rysh.config.yaml\n\n")
+		// "nothing is shared, because upstream is off" is a complete answer to
+		// list/status. Only an ACTION that needed upstream has failed — the
+		// same rule ##replay status and ##upstream status follow.
+		switch first(args) {
+		case "list", "status":
+		default:
+			w.failRysh("upstream is not enabled")
+		}
 		return
 	}
 
@@ -202,6 +187,7 @@ func (w *WorkspaceActor) handleShareCommand(out *strings.Builder, paneID string,
 			resolved := w.resolvePaneID(pflag)
 			if resolved == "" {
 				fmt.Fprintf(out, "\n[rysh] no pane matching %q\n", pflag)
+				w.failRysh("no pane matching %q", pflag)
 				return
 			}
 			paneID = resolved
@@ -209,6 +195,7 @@ func (w *WorkspaceActor) handleShareCommand(out *strings.Builder, paneID string,
 		}
 		if paneID == "" {
 			fmt.Fprintf(out, "\n[rysh] no active pane\n")
+			w.failRysh("no active pane")
 			return
 		}
 		// File browsing is always enabled for a share. --allow-file-browse is
@@ -229,7 +216,8 @@ func (w *WorkspaceActor) handleShareCommand(out *strings.Builder, paneID string,
 					_ = w.pub.Send(msg.T("pane", paneID, "inbox"),
 						&msg.MsgShareDisableMode{PaneID: paneID, Mode: args[3]})
 				} else {
-					fmt.Fprintf(out, "\n[rysh] usage: ##share pane disable mode <sh|ai|rysh|chat>\n")
+					ryshWriter(out).UsageLine("##share pane disable mode <sh|ai|rysh|chat>")
+					w.failRyshUsage("usage: %s", "##share pane disable mode <sh|ai|rysh|chat>")
 				}
 				return
 			case "enable":
@@ -238,19 +226,22 @@ func (w *WorkspaceActor) handleShareCommand(out *strings.Builder, paneID string,
 					_ = w.pub.Send(msg.T("pane", paneID, "inbox"),
 						&msg.MsgShareEnableMode{PaneID: paneID, Mode: args[3]})
 				} else {
-					fmt.Fprintf(out, "\n[rysh] usage: ##share pane enable mode <sh|ai|rysh|chat>\n")
+					ryshWriter(out).UsageLine("##share pane enable mode <sh|ai|rysh|chat>")
+					w.failRyshUsage("usage: %s", "##share pane enable mode <sh|ai|rysh|chat>")
 				}
 				return
 			case "shell":
 				// ##share pane shell allow|forbid|clear <commands...>
 				if len(args) < 3 {
-					fmt.Fprintf(out, "\n[rysh] usage: ##share pane shell allow|forbid|clear [commands...]\n")
+					ryshWriter(out).UsageLine("##share pane shell allow|forbid|clear [commands...]")
+					w.failRyshUsage("usage: %s", "##share pane shell allow|forbid|clear [commands...]")
 					return
 				}
 				switch args[2] {
 				case "allow":
 					if len(args) < 4 {
-						fmt.Fprintf(out, "\n[rysh] usage: ##share pane shell allow <cmd1> <cmd2> ...\n")
+						ryshWriter(out).UsageLine("##share pane shell allow <cmd1> <cmd2> ...")
+						w.failRyshUsage("usage: %s", "##share pane shell allow <cmd1> <cmd2> ...")
 						return
 					}
 					cmds := normalizeCommandList(args[3:])
@@ -258,7 +249,8 @@ func (w *WorkspaceActor) handleShareCommand(out *strings.Builder, paneID string,
 						&msg.MsgShareShellAllow{PaneID: paneID, Commands: cmds})
 				case "forbid":
 					if len(args) < 4 {
-						fmt.Fprintf(out, "\n[rysh] usage: ##share pane shell forbid <cmd1> <cmd2> ...\n")
+						ryshWriter(out).UsageLine("##share pane shell forbid <cmd1> <cmd2> ...")
+						w.failRyshUsage("usage: %s", "##share pane shell forbid <cmd1> <cmd2> ...")
 						return
 					}
 					cmds := normalizeCommandList(args[3:])
@@ -268,7 +260,8 @@ func (w *WorkspaceActor) handleShareCommand(out *strings.Builder, paneID string,
 					_ = w.pub.Send(msg.T("pane", paneID, "inbox"),
 						&msg.MsgShareShellClear{PaneID: paneID})
 				default:
-					fmt.Fprintf(out, "\n[rysh] usage: ##share pane shell allow|forbid|clear [commands...]\n")
+					ryshWriter(out).UsageLine("##share pane shell allow|forbid|clear [commands...]")
+					w.failRyshUsage("usage: %s", "##share pane shell allow|forbid|clear [commands...]")
 				}
 				return
 			case "restrictions":
@@ -303,11 +296,13 @@ func (w *WorkspaceActor) handleShareCommand(out *strings.Builder, paneID string,
 	case "panegroup", "pg":
 		if paneID == "" {
 			fmt.Fprintf(out, "\n[rysh] no active pane\n")
+			w.failRysh("no active pane")
 			return
 		}
 		groupID := w.findActiveGroupID(paneID)
 		if groupID == "" {
 			fmt.Fprintf(out, "\n[rysh] could not determine active pane group\n")
+			w.failRysh("could not determine active pane group")
 			return
 		}
 		mode := "view"
@@ -326,11 +321,13 @@ func (w *WorkspaceActor) handleShareCommand(out *strings.Builder, paneID string,
 	case "lane":
 		if paneID == "" {
 			fmt.Fprintf(out, "\n[rysh] no active pane\n")
+			w.failRysh("no active pane")
 			return
 		}
 		laneID := w.findActiveLaneID(paneID)
 		if laneID == "" {
 			fmt.Fprintf(out, "\n[rysh] could not determine active lane\n")
+			w.failRysh("could not determine active lane")
 			return
 		}
 		mode := "view"
@@ -360,6 +357,7 @@ func (w *WorkspaceActor) handleShareCommand(out *strings.Builder, paneID string,
 		}
 		if tab == nil {
 			fmt.Fprintf(out, "\n[rysh] no active tab\n")
+			w.failRysh("no active tab")
 			return
 		}
 		mode := "view"
@@ -378,6 +376,7 @@ func (w *WorkspaceActor) handleShareCommand(out *strings.Builder, paneID string,
 		res, err := w.system().Root.RequestFuture(w.shareRegistryPID, &msg.MsgShareList{}, time.Second).Result()
 		if err != nil {
 			fmt.Fprintf(out, "\n[rysh] failed to get share list: %v\n", err)
+			w.failRysh("failed to get share list: %v", err)
 			return
 		}
 		lr, ok := res.(*msg.MsgShareListReply)
@@ -410,6 +409,7 @@ func (w *WorkspaceActor) handleShareCommand(out *strings.Builder, paneID string,
 		res, err := w.system().Root.RequestFuture(w.shareRegistryPID, &msg.MsgShareStatus{EntityID: entityID}, time.Second).Result()
 		if err != nil {
 			fmt.Fprintf(out, "\n[rysh] failed to get share status: %v\n", err)
+			w.failRysh("failed to get share status: %v", err)
 			return
 		}
 		sr, ok := res.(*msg.MsgShareStatusReply)
@@ -439,6 +439,7 @@ func (w *WorkspaceActor) handleShareCommand(out *strings.Builder, paneID string,
 
 	default:
 		w.shareHelp(out)
+		w.failRyshUsage("unknown ##share subcommand: %q", sub)
 	}
 }
 
@@ -446,12 +447,14 @@ func (w *WorkspaceActor) handleShareCommand(out *strings.Builder, paneID string,
 func (w *WorkspaceActor) handleUnshareCommand(out *strings.Builder, paneID string, args []string) {
 	if !w.cfg.Upstream.Enabled || w.shareRegistryPID == nil {
 		fmt.Fprintf(out, "\n[rysh] upstream is not enabled\n")
+		w.failRysh("upstream is not enabled")
 		fmt.Fprintf(out, "  set upstream.enabled: true in rysh.config.yaml\n\n")
 		return
 	}
 
 	if len(args) == 0 {
-		fmt.Fprintf(out, "\n[rysh] usage: ##unshare pane|panegroup|lane|tab\n")
+		ryshWriter(out).UsageLine("##unshare pane|panegroup|lane|tab")
+		w.failRyshUsage("usage: %s", "##unshare pane|panegroup|lane|tab")
 		return
 	}
 
@@ -460,6 +463,7 @@ func (w *WorkspaceActor) handleUnshareCommand(out *strings.Builder, paneID strin
 	case "pane":
 		if paneID == "" {
 			fmt.Fprintf(out, "\n[rysh] no active pane\n")
+			w.failRysh("no active pane")
 			return
 		}
 		w.endShare(paneID)
@@ -468,11 +472,13 @@ func (w *WorkspaceActor) handleUnshareCommand(out *strings.Builder, paneID strin
 	case "panegroup", "pg":
 		if paneID == "" {
 			fmt.Fprintf(out, "\n[rysh] no active pane\n")
+			w.failRysh("no active pane")
 			return
 		}
 		groupID := w.findActiveGroupID(paneID)
 		if groupID == "" {
 			fmt.Fprintf(out, "\n[rysh] could not determine active pane group\n")
+			w.failRysh("could not determine active pane group")
 			return
 		}
 		w.endShare(groupID)
@@ -481,11 +487,13 @@ func (w *WorkspaceActor) handleUnshareCommand(out *strings.Builder, paneID strin
 	case "lane":
 		if paneID == "" {
 			fmt.Fprintf(out, "\n[rysh] no active pane\n")
+			w.failRysh("no active pane")
 			return
 		}
 		laneID := w.findActiveLaneID(paneID)
 		if laneID == "" {
 			fmt.Fprintf(out, "\n[rysh] could not determine active lane\n")
+			w.failRysh("could not determine active lane")
 			return
 		}
 		w.endShare(laneID)
@@ -495,13 +503,15 @@ func (w *WorkspaceActor) handleUnshareCommand(out *strings.Builder, paneID strin
 		tab := w.currentTab()
 		if tab == nil {
 			fmt.Fprintf(out, "\n[rysh] no active tab\n")
+			w.failRysh("no active tab")
 			return
 		}
 		w.endShare(tab.id)
 		fmt.Fprintf(out, "\n[rysh] unshared tab %q\n", tab.title)
 
 	default:
-		fmt.Fprintf(out, "\n[rysh] usage: ##unshare pane|panegroup|lane|tab\n")
+		ryshWriter(out).UsageLine("##unshare pane|panegroup|lane|tab")
+		w.failRyshUsage("usage: %s", "##unshare pane|panegroup|lane|tab")
 	}
 }
 
@@ -679,11 +689,13 @@ func (w *WorkspaceActor) reshareActiveShares() {
 func (w *WorkspaceActor) handleUpstreamShares(out *strings.Builder) {
 	if !w.cfg.Upstream.Enabled || w.shareRegistryPID == nil {
 		fmt.Fprintf(out, "\n[rysh] upstream is not enabled\n")
+		w.failRysh("upstream is not enabled")
 		return
 	}
 	res, err := w.system().Root.RequestFuture(w.shareRegistryPID, &msg.MsgShareList{}, time.Second).Result()
 	if err != nil {
 		fmt.Fprintf(out, "\n[rysh] failed to query shares: %v\n", err)
+		w.failRysh("failed to query shares: %v", err)
 		return
 	}
 	lr, ok := res.(*msg.MsgShareListReply)
@@ -709,12 +721,14 @@ func (w *WorkspaceActor) handleUpstreamShares(out *strings.Builder) {
 func (w *WorkspaceActor) handleUpstreamListRemote(out *strings.Builder) {
 	if !w.cfg.Upstream.Enabled {
 		fmt.Fprintf(out, "\n[rysh] upstream is not enabled\n")
+		w.failRysh("upstream is not enabled")
 		return
 	}
 
 	shares, err := upstream.FetchRemoteShares(w.cfg)
 	if err != nil {
 		fmt.Fprintf(out, "\n[rysh] failed to fetch remote shares: %v\n", err)
+		w.failRysh("failed to fetch remote shares: %v", err)
 		return
 	}
 	if len(shares) == 0 {
@@ -741,14 +755,17 @@ func (w *WorkspaceActor) handleUpstreamListRemote(out *strings.Builder) {
 func (w *WorkspaceActor) handleUpstreamSubscribe(out *strings.Builder, paneID, shareID, mode string) {
 	if !w.cfg.Upstream.Enabled {
 		fmt.Fprintf(out, "\n[rysh] upstream is not enabled\n")
+		w.failRysh("upstream is not enabled")
 		return
 	}
 	if shareID == "" {
-		fmt.Fprintf(out, "\n[rysh] usage: ##upstream subscribe <shareID> [view|control]\n")
+		ryshWriter(out).UsageLine("##upstream subscribe <shareID> [view|control]")
+		w.failRyshUsage("usage: %s", "##upstream subscribe <shareID> [view|control]")
 		return
 	}
 	if paneID == "" {
 		fmt.Fprintf(out, "\n[rysh] no active pane to receive share output\n")
+		w.failRysh("no active pane to receive share output")
 		return
 	}
 
@@ -1080,6 +1097,7 @@ func (w *WorkspaceActor) handleUpstreamUnsubscribe(out *strings.Builder, arg str
 		switch len(w.mirrorTabs) {
 		case 0:
 			fmt.Fprintf(out, "\n[rysh] no active remote subscription\n")
+			w.failRysh("no active remote subscription")
 		case 1:
 			sid := w.mirrorTabs[0].shareID
 			w.removeMirrorTab(sid)
@@ -1119,10 +1137,12 @@ func (w *WorkspaceActor) handleUpstreamUnsubscribe(out *strings.Builder, arg str
 func (w *WorkspaceActor) handleUpstreamSend(out *strings.Builder, text string) {
 	if w.remoteListenerPID == nil {
 		fmt.Fprintf(out, "\n[rysh] no active remote subscription\n")
+		w.failRysh("no active remote subscription")
 		return
 	}
 	if text == "" {
-		fmt.Fprintf(out, "\n[rysh] usage: ##upstream send <text>\n")
+		ryshWriter(out).UsageLine("##upstream send <text>")
+		w.failRyshUsage("usage: %s", "##upstream send <text>")
 		return
 	}
 	w.system().Root.Send(w.remoteListenerPID, &msg.MsgUpstreamSendCommand{
@@ -1134,17 +1154,19 @@ func (w *WorkspaceActor) handleUpstreamSend(out *strings.Builder, text string) {
 
 // shareHelp prints usage for ##share.
 func (w *WorkspaceActor) shareHelp(out *strings.Builder) {
-	fmt.Fprintf(out, "\n[rysh] usage:\n")
-	fmt.Fprintf(out, "  ##share pane [--pane <id|name>] [view|control] [--allow-absolute]   share a pane (default: active; file browsing always enabled, --allow-absolute widens beyond the working dir)\n")
-	fmt.Fprintf(out, "  ##share panegroup [view|control]   share the active pane group\n")
-	fmt.Fprintf(out, "  ##share lane [view|control]        share the active lane\n")
-	fmt.Fprintf(out, "  ##share tab [--tab <id|index|title>] [view|control]  share a tab (default: active)\n")
-	fmt.Fprintf(out, "  ##share list                       list all active shares\n")
-	fmt.Fprintf(out, "  ##share status                     show share status for active pane\n")
-	fmt.Fprintf(out, "\n  sharing a forged API is separate from ##share — use:\n")
-	fmt.Fprintf(out, "    ##forge share api <name>                          (source) expose an enabled API\n")
-	fmt.Fprintf(out, "    ##forge list-remote                               (subscriber) list shared APIs\n")
-	fmt.Fprintf(out, "    ##forge subscribe <name> [--scope pane|panegroup|lane|tab]   (subscriber) mount it\n\n")
+	ryshWriter(out).Usage(
+		"##share pane [--pane <id|name>] [view|control] [--allow-absolute]   share a pane (default: active; file browsing always enabled, --allow-absolute widens beyond the working dir)",
+		"##share panegroup [view|control]   share the active pane group",
+		"##share lane [view|control]        share the active lane",
+		"##share tab [--tab <id|index|title>] [view|control]  share a tab (default: active)",
+		"##share list                       list all active shares",
+		"##share status                     show share status for active pane",
+		"",
+		"sharing a forged API is separate from ##share — use:",
+		"  ##forge share api <name>                          (source) expose an enabled API",
+		"  ##forge list-remote                               (subscriber) list shared APIs",
+		"  ##forge subscribe <name> [--scope pane|panegroup|lane|tab]   (subscriber) mount it",
+	)
 }
 
 // findActiveGroupID returns the pane group ID containing the given pane.
@@ -1157,15 +1179,9 @@ func (w *WorkspaceActor) sharePaneAlias(paneID string) string {
 	auto, given := "", ""
 	if tab := w.currentTab(); tab != nil {
 		if tabSnap := w.queryTabSnapshot(tab.id); tabSnap != nil {
-			for _, lane := range tabSnap.Lanes {
-				for _, g := range lane.PaneGroups {
-					for i := range g.Panes {
-						if g.Panes[i].ID == paneID {
-							auto = strings.TrimSpace(g.Panes[i].Title)
-							given = strings.TrimSpace(g.Panes[i].GivenName)
-						}
-					}
-				}
+			if p := domain.FindPaneInTab(tabSnap, paneID); p != nil {
+				auto = strings.TrimSpace(p.Title)
+				given = strings.TrimSpace(p.GivenName)
 			}
 		}
 	}
@@ -1221,4 +1237,12 @@ func extractShareBoolFlag(args []string, flag string) (bool, []string) {
 		}
 	}
 	return false, args
+}
+
+// first returns args[0], or "" when there are none.
+func first(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	return args[0]
 }

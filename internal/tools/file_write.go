@@ -129,7 +129,7 @@ func generateNewFileDiff(content, filePath string) string {
 	lines := strings.Split(content, "\n")
 
 	var buf strings.Builder
-	buf.WriteString(fmt.Sprintf("--- /dev/null\n"))
+	buf.WriteString("--- /dev/null\n")
 	buf.WriteString(fmt.Sprintf("+++ b/%s\n", filePath))
 	buf.WriteString(fmt.Sprintf("@@ -0,0 +1,%d @@\n", len(lines)))
 

@@ -53,7 +53,7 @@ func TestSlackSend_HumanMode_RefusesDirectSend(t *testing.T) {
 
 func TestSlackSend_HumanMode_RefusesUnapprovedDraft(t *testing.T) {
 	tool, drafts := gatedSendTool(t, true)
-	id := drafts.Create("C123", "", "drafted but not confirmed", "")
+	id := drafts.Create("slack", "C123", "", "drafted but not confirmed", "")
 
 	out := run(t, tool, `{"draft_id":"`+id+`"}`)
 	if out.Error == "" {
@@ -79,7 +79,7 @@ func TestSlackSend_HumanMode_RefusesUnknownDraft(t *testing.T) {
 // how we know the gate itself let it through.
 func TestSlackSend_HumanMode_ApprovedDraftPassesTheGate(t *testing.T) {
 	tool, drafts := gatedSendTool(t, true)
-	id := drafts.Create("C123", "", "approved reply", "")
+	id := drafts.Create("slack", "C123", "", "approved reply", "")
 	if !drafts.Approve(id) {
 		t.Fatal("Approve should find the draft it was just given")
 	}

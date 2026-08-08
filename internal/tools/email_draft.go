@@ -60,7 +60,7 @@ func (t *EmailDraftTool) Execute(ctx context.Context, params json.RawMessage) (*
 		return ErrOutput(ErrKindValidation, "to, subject, and body are required"), nil
 	}
 
-	id := t.drafts.Create(p.To, p.Subject, p.Body, p.InReplyTo)
+	id := t.drafts.Create("email", p.To, p.Subject, p.Body, p.InReplyTo)
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Draft created: %s\n\n", id))

@@ -6,6 +6,7 @@ import (
 	"github.com/asynkron/protoactor-go/actor"
 	"github.com/google/uuid"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 )
 
@@ -69,7 +70,7 @@ func (w *WorkspaceActor) createTab(ctx actor.Context) {
 		initialPaneTitles[i] = w.generateUniqueAlias()
 	}
 
-	ta := NewTabActor(tabID, title, w.cfg, w.pub, w.nc, w.agSetup, w.paneKV, initialPaneTitles)
+	ta := NewTabActor(tabID, title, w.cfg, w.pub, w.nc, w.agSetup, w.paneKV, w.childSecretResolver(), initialPaneTitles)
 	tabProps := actor.PropsFromProducer(func() actor.Actor { return ta })
 	pid := ctx.Spawn(tabProps)
 
@@ -130,7 +131,7 @@ func (w *WorkspaceActor) moveActiveTab(dir msg.Direction) bool {
 	if i < 0 || i >= len(w.tabs) {
 		return false
 	}
-	j := i
+	var j int
 	switch dir {
 	case msg.DirLeft, msg.DirPrev:
 		j = i - 1
@@ -229,14 +230,8 @@ func (w *WorkspaceActor) findPaneTab(paneID string) *tabInfo {
 		if snap == nil {
 			continue
 		}
-		for _, lane := range snap.Lanes {
-			for _, g := range lane.PaneGroups {
-				for _, ps := range g.Panes {
-					if ps.ID == paneID {
-						return t
-					}
-				}
-			}
+		if domain.TabContainsPane(snap, paneID) {
+			return t
 		}
 	}
 	return nil

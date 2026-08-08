@@ -284,7 +284,7 @@ func (l *PaneSharedOutputListenerActor) handleRawOutput(m *msg.MsgPaneRawOutputA
 		l.remoteVTerm = vterm.New(24, 80)
 		l.resetForwardedScrollback()
 	}
-	l.remoteVTerm.Write(rawBytes)
+	_, _ = l.remoteVTerm.Write(rawBytes)
 
 	// Forward newly-evicted scrollback lines so the listening pane can scroll
 	// the target program's history in copy mode.

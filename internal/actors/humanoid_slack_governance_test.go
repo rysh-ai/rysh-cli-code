@@ -34,7 +34,7 @@ func TestNewHumanoidActorSlackGovernanceInit(t *testing.T) {
 	// Skill-file governance: human.
 	h := NewHumanoidActor("gov-bot", "sp", map[string]msg.ChannelConfig{
 		"slack": {Governance: "human"},
-	}, config.Config{}, nil, nil, nil)
+	}, config.Config{}, nil, nil, nil, nil)
 	if h.slackGovernance != "human" {
 		t.Errorf("expected slack governance human, got %q", h.slackGovernance)
 	}
@@ -45,7 +45,7 @@ func TestNewHumanoidActorSlackGovernanceInit(t *testing.T) {
 	// Default: ai.
 	h2 := NewHumanoidActor("gov-bot2", "sp", map[string]msg.ChannelConfig{
 		"slack": {},
-	}, config.Config{}, nil, nil, nil)
+	}, config.Config{}, nil, nil, nil, nil)
 	if h2.slackGovernance != "ai" {
 		t.Errorf("expected default slack governance ai, got %q", h2.slackGovernance)
 	}

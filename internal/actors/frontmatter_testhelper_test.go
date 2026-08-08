@@ -20,6 +20,13 @@ func parseHumanoidFileFromString(content string) (*humanoidDefinition, error) {
 	resolved := make(map[string]msg.ChannelConfig, len(fm.Contacts))
 	for ct, cc := range fm.Contacts {
 		cc = resolveChannelEnvVars(cc, envOnlyExpand)
+		if ct == "whatsapp" {
+			var err error
+			cc, err = normalizeWhatsAppRelayMode(cc, contactHasExplicitKey(fmRaw, ct, "relay"))
+			if err != nil {
+				return nil, err
+			}
+		}
 		resolved[ct] = cc
 	}
 	return &humanoidDefinition{Name: fm.Name, SystemPrompt: strings.TrimSpace(body), Contacts: resolved}, nil

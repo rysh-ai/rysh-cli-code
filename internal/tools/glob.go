@@ -190,9 +190,7 @@ func doMatchGlob(pattern, path string) bool {
 	suffix := pattern[idx+2:]
 
 	// Remove leading separator from suffix if present.
-	if strings.HasPrefix(suffix, "/") {
-		suffix = suffix[1:]
-	}
+	suffix = strings.TrimPrefix(suffix, "/")
 
 	// The prefix must match the beginning of the path.
 	if prefix != "" {

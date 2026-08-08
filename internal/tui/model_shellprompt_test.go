@@ -21,9 +21,9 @@ func TestShellCommandIncomplete(t *testing.T) {
 		{`echo "unclosed`, true},
 		{`echo 'unclosed`, true},
 		{`ls \`, true},
-		{`ls \\`, false},                       // escaped backslash, complete
-		{"echo \"line1\nline2\"", false},       // closed across lines
-		{"echo \"line1\nline2", true},          // still open across lines
+		{`ls \\`, false},                        // escaped backslash, complete
+		{"echo \"line1\nline2\"", false},        // closed across lines
+		{"echo \"line1\nline2", true},           // still open across lines
 		{`echo it's unbalanced`, true},          // lone apostrophe opens a quote
 		{`ls # trailing 'comment quote`, false}, // quotes inside comments ignored
 		{`ls; # comment \`, false},              // trailing backslash in comment ignored

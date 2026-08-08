@@ -49,6 +49,7 @@ type TabActor struct {
 	agSetup *agentic.Setup
 	nc      *nats.Conn
 	kvStore nats.KeyValue // rysh-panes bucket
+	secrets *secretResolver // workspace-scoped ##secret lookup, threaded to panes
 	br      *bridge.NATSBridge
 
 	// Unguarded state.
@@ -97,6 +98,7 @@ func NewTabActor(
 	nc *nats.Conn,
 	agSetup *agentic.Setup,
 	kvStore nats.KeyValue,
+	secrets *secretResolver,
 	initialPaneTitles []string,
 ) *TabActor {
 	return &TabActor{
@@ -107,6 +109,7 @@ func NewTabActor(
 		agSetup:           agSetup,
 		nc:                nc,
 		kvStore:           kvStore,
+		secrets:           secrets,
 		initialPaneTitles: initialPaneTitles,
 		laneSubjects:      make(map[string]string),
 		lanePIDs:          make(map[string]*actor.PID),
@@ -125,9 +128,10 @@ func NewTabActorFromKV(
 	nc *nats.Conn,
 	agSetup *agentic.Setup,
 	kvStore nats.KeyValue,
+	secrets *secretResolver,
 	kv tabKV,
 ) *TabActor {
-	ta := NewTabActor(kv.ID, kv.Title, cfg, pub, nc, agSetup, kvStore, nil)
+	ta := NewTabActor(kv.ID, kv.Title, cfg, pub, nc, agSetup, kvStore, secrets, nil)
 	ta.restoreData = &kv
 	return ta
 }
@@ -355,7 +359,7 @@ func (t *TabActor) Receive(ctx actor.Context) {
 	case *msg.RequestEnvelope:
 		switch inner := m.Inner.(type) {
 		case *msg.MsgGetTabSnapshot:
-			snap := t.collectSnapshot(inner.LayoutOnly)
+			snap := t.collectSnapshot(inner.LayoutOnly, inner.NoHistories)
 			_ = m.Reply(&msg.MsgTabSnapshotReply{Snapshot: snap})
 		case *msg.MsgGetActivePane:
 			// Refresh lane pane counts to avoid stale cached values.

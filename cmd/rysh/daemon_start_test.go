@@ -268,84 +268,77 @@ func TestSpawnDaemonSucceedsForHealthyDaemon(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ownableSessionName
+// sessionOpenNote
 // ---------------------------------------------------------------------------
 
-// TestOwnableSessionNameMovesOffForeignSession is the root-cause regression
-// test. A stale desktop-app record under "default" — exactly what a machine that
-// once ran the app has sitting in .rysh/sessions — must not stop a CLI first
-// run: onboarding moves to a name the CLI can own and says why.
-func TestOwnableSessionNameMovesOffForeignSession(t *testing.T) {
+// TestSessionOpenNoteExplainsForeignSession is the inverse of the old
+// ownership regression test. A stale desktop-app record under "default" —
+// exactly what a machine that once ran the app has sitting in .rysh/sessions —
+// no longer diverts a CLI first run onto a "default-cli" twin. The terminal
+// opens the app's session directly and explains what it cannot paint.
+func TestSessionOpenNoteExplainsForeignSession(t *testing.T) {
 	store := newTestStore(t)
-	// Stopped, no PID: ownership is about the KV state, not liveness.
+	// Stopped, no PID: provenance is about the record, not liveness.
 	if _, err := store.Upsert(session.Record{
 		Name: "default", State: "stopped", NATSPort: 24242, Source: session.SourceApp,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	name, note := ownableSessionName(store, "default", session.SourceCLI)
-	if name != "default-cli" {
-		t.Errorf("name = %q, want %q", name, "default-cli")
-	}
+	note := sessionOpenNote(store, "default", session.SourceCLI)
 	if note == "" {
-		t.Error("no note explaining the switch")
+		t.Fatal("no note explaining what renders differently")
 	}
-	if !strings.Contains(note, "rysh desktop app") || !strings.Contains(note, "default-cli") {
-		t.Errorf("note = %q; want it to name the owner and the replacement", note)
+	if !strings.Contains(note, "rysh desktop app") {
+		t.Errorf("note = %q; want it to name the front-end that created the session", note)
 	}
-	// The chosen name must actually be openable by this front-end.
-	rec, err := store.Get(name)
-	if err == nil {
-		if merr := session.EnsureSourceMatch(rec, session.SourceCLI); merr != nil {
-			t.Errorf("picked a name the CLI still cannot open: %v", merr)
-		}
+	// The single most visible degradation must be called out by name, together
+	// with the way to keep working — a note that only says "unavailable" sends
+	// the user hunting.
+	if !strings.Contains(note, "web panes") || !strings.Contains(note, "##web headless on") {
+		t.Errorf("note = %q; want the web-pane degradation and its workaround", note)
 	}
 }
 
-// TestOwnableSessionNameKeepsOwnSessions verifies the common cases are
-// untouched: no record at all, and a record this front-end already owns.
-func TestOwnableSessionNameKeepsOwnSessions(t *testing.T) {
+// TestSessionOpenNoteSilentWhenNothingDegrades covers the quiet cases: no
+// record, a record this front-end created, and a legacy record with no source.
+// None of them should print anything at all.
+func TestSessionOpenNoteSilentWhenNothingDegrades(t *testing.T) {
 	store := newTestStore(t)
-	if name, note := ownableSessionName(store, "default", session.SourceCLI); name != "default" || note != "" {
-		t.Errorf("absent record: got (%q, %q), want (\"default\", \"\")", name, note)
+	if note := sessionOpenNote(store, "default", session.SourceCLI); note != "" {
+		t.Errorf("absent record: note = %q, want \"\"", note)
 	}
 	if _, err := store.Upsert(session.Record{Name: "default", State: "stopped", Source: session.SourceCLI}); err != nil {
 		t.Fatal(err)
 	}
-	if name, note := ownableSessionName(store, "default", session.SourceCLI); name != "default" || note != "" {
-		t.Errorf("own record: got (%q, %q), want (\"default\", \"\")", name, note)
+	if note := sessionOpenNote(store, "default", session.SourceCLI); note != "" {
+		t.Errorf("own record: note = %q, want \"\"", note)
 	}
-	// A legacy record with no source is compatible with either front-end.
+	// A legacy record with no source opens cleanly from either front-end.
 	if _, err := store.Upsert(session.Record{Name: "legacy", State: "stopped"}); err != nil {
 		t.Fatal(err)
 	}
-	if name, note := ownableSessionName(store, "legacy", session.SourceCLI); name != "legacy" || note != "" {
-		t.Errorf("legacy record: got (%q, %q), want (\"legacy\", \"\")", name, note)
+	if note := sessionOpenNote(store, "legacy", session.SourceCLI); note != "" {
+		t.Errorf("legacy record: note = %q, want \"\"", note)
 	}
 }
 
-// TestOwnableSessionNameSkipsTakenCandidates walks past a "-cli" name the other
-// front-end also owns rather than handing back a name that would be refused.
-func TestOwnableSessionNameSkipsTakenCandidates(t *testing.T) {
+// TestSessionOpenNoteAppOpensCLISilently pins the asymmetry: the desktop app is
+// a superset of the terminal, so opening a CLI-created session loses nothing
+// and must not warn about anything.
+func TestSessionOpenNoteAppOpensCLISilently(t *testing.T) {
 	store := newTestStore(t)
-	for _, n := range []string{"default", "default-cli", "default-cli-2"} {
-		if _, err := store.Upsert(session.Record{Name: n, State: "stopped", Source: session.SourceApp}); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := store.Upsert(session.Record{Name: "term", State: "stopped", Source: session.SourceCLI}); err != nil {
+		t.Fatal(err)
 	}
-	name, note := ownableSessionName(store, "default", session.SourceCLI)
-	if name != "default-cli-3" {
-		t.Errorf("name = %q, want %q", name, "default-cli-3")
-	}
-	if note == "" {
-		t.Error("no note explaining the switch")
+	if note := sessionOpenNote(store, "term", session.SourceApp); note != "" {
+		t.Errorf("app opening a CLI session: note = %q, want \"\" (the app renders everything the terminal can)", note)
 	}
 }
 
-// TestOwnableSessionNameHandlesNilStore keeps the helper safe on the path where
+// TestSessionOpenNoteHandlesNilStore keeps the helper safe on the path where
 // the store failed to open (onboard still runs its config steps).
-func TestOwnableSessionNameHandlesNilStore(t *testing.T) {
-	if name, note := ownableSessionName(nil, "default", session.SourceCLI); name != "default" || note != "" {
-		t.Errorf("got (%q, %q), want (\"default\", \"\")", name, note)
+func TestSessionOpenNoteHandlesNilStore(t *testing.T) {
+	if note := sessionOpenNote(nil, "default", session.SourceCLI); note != "" {
+		t.Errorf("note = %q, want \"\"", note)
 	}
 }

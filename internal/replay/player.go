@@ -51,10 +51,10 @@ func ParseSpeed(spec string) (float64, error) {
 }
 
 // parseFrom parses a --from value into an offset from the start of the
-// recording (firstTsMs): a duration ("90s", "1m30s"), an RFC3339 timestamp,
+// recording (firstTSMs): a duration ("90s", "1m30s"), an RFC3339 timestamp,
 // or a unix timestamp (seconds, or millis when > 1e12). A timestamp before
 // the recording clamps to 0.
-func parseFrom(spec string, firstTsMs int64) (time.Duration, error) {
+func parseFrom(spec string, firstTSMs int64) (time.Duration, error) {
 	if spec == "" {
 		return 0, nil
 	}
@@ -76,10 +76,10 @@ func parseFrom(spec string, firstTsMs int64) (time.Duration, error) {
 	} else {
 		return 0, fmt.Errorf("invalid --from %q (want a duration, RFC3339, or unix timestamp)", spec)
 	}
-	if tsMs <= firstTsMs {
+	if tsMs <= firstTSMs {
 		return 0, nil
 	}
-	return time.Duration(tsMs-firstTsMs) * time.Millisecond, nil
+	return time.Duration(tsMs-firstTSMs) * time.Millisecond, nil
 }
 
 // planSteps turns recorded events into a playback schedule: events before the

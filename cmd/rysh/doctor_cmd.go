@@ -238,7 +238,7 @@ func checkProvider(cfg config.Config, deps doctorDeps) doctorCheck {
 // providerBaseURL picks the base URL the runtime would use: the configured
 // api_url unless it is the config default that only applies to Anthropic.
 func providerBaseURL(cfg config.Config, p onboardProvider) string {
-	if cfg.APIURL != "" && cfg.APIURL != "https://api.anthropic.com" {
+	if cfg.APIURL != "" && cfg.APIURL != config.DefaultAnthropicAPIURL {
 		return cfg.APIURL
 	}
 	if p.Name == "anthropic" {

@@ -81,7 +81,7 @@ func (p *PaneActor) executeShell(command string) {
 	if trimmed == "reset" {
 		p.clearOutput()
 		if p.ptyFile != nil {
-			_, _ = io.WriteString(p.ptyFile, command+"\n")
+			p.submitToPTY(command)
 		}
 		p.status = "idle"
 		return
@@ -133,12 +133,75 @@ func (p *PaneActor) executeShell(command string) {
 	// interactive shell prints its real prompt and echoes the command itself,
 	// so the PTY stream already reads like a normal terminal.
 
-	if _, err := io.WriteString(p.ptyFile, command+"\n"); err != nil {
-		errText := fmt.Sprintf("shell write failed: %v\n", err)
-		p.appendOutput(errText)
-		p.appendPrivateBuffer(errText)
-		p.status = "error"
+	p.submitToPTY(command)
+}
+
+// interactiveEnterDelay is how long submitToPTY waits after the command text
+// before pressing Enter in a pane that is running an interactive program. Long
+// enough that the TUI's paste detection closes the burst it started with the
+// text, short enough to be imperceptible.
+const interactiveEnterDelay = 150 * time.Millisecond
+
+// submitToPTY types command into the pane's PTY and presses Enter.
+//
+// Enter is a carriage return (0x0d) — what a terminal actually sends, and what
+// keyMsgToBytes forwards for tea.KeyEnter — not a line feed. At a shell prompt
+// the line discipline's ICRNL turns the CR into a newline, so nothing changes
+// there; but an interactive program (claude, codex, vim) puts the terminal in
+// raw mode where ICRNL is off and reads the bytes itself. Those TUIs bind
+// submit to CR and treat a bare LF as "insert a newline in my input box", which
+// is why a prompt delivered by `##cmd` landed in a claude pane and just sat
+// there unsent.
+//
+// For an interactive pane the CR is also written separately, a beat after the
+// text: such TUIs coalesce one burst of stdin into a single paste, absorbing a
+// trailing CR into the pasted text instead of acting on it. Same reason driving
+// claude from tmux needs `send-keys "text"`, a pause, then `send-keys Enter`
+// rather than one combined call.
+//
+// The writes are handed to the pane's submit queue rather than performed here,
+// so a second command cannot land between a first one's text and its Enter, and
+// so the actor goroutine is not held for the pause. That makes the write itself
+// asynchronous: the PTY handle and the interactive decision are captured here,
+// on the mailbox goroutine, and a failed write is reported over NATS instead of
+// by touching the pane's buffers directly.
+func (p *PaneActor) submitToPTY(command string) {
+	f := p.ptyFile
+	if f == nil {
+		p.reportShellWriteError(fmt.Errorf("shell is not available"))
+		return
 	}
+	interactive := p.computeInteractive()
+	// The closure captures f, not p.ptyFile: the pane's shell may be restarted
+	// (or stopped) before the queue reaches this command, and the command
+	// belongs to the PTY that was live when it was issued. A write to a closed
+	// *os.File fails safely rather than landing on a reused fd.
+	p.submitQ.enqueue(func() {
+		if !interactive {
+			if _, err := io.WriteString(f, command+"\r"); err != nil {
+				p.reportShellWriteError(err)
+			}
+			return
+		}
+		if _, err := io.WriteString(f, command); err != nil {
+			p.reportShellWriteError(err)
+			return
+		}
+		time.Sleep(interactiveEnterDelay)
+		if _, err := io.WriteString(f, "\r"); err != nil {
+			p.reportShellWriteError(err)
+		}
+	})
+}
+
+// reportShellWriteError surfaces a failed PTY write from the submit queue's
+// goroutine. The pane's output buffer and status field belong to the mailbox
+// goroutine, so it publishes instead of writing them: SendPaneOutput lands the
+// text in the same buffers the synchronous path appended to, and the status
+// subject is the route rawReadLoop already uses for its own status changes.
+func (p *PaneActor) reportShellWriteError(err error) {
+	_ = p.pub.SendPaneOutput(p.id, fmt.Sprintf("shell write failed: %v\n", err))
+	_ = p.pub.Send(msg.T("pane", p.id, "status"), &msg.MsgPaneStatusUpdate{Status: "error"})
 }
 
 // ---------------------------------------------------------------------------

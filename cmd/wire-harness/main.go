@@ -277,45 +277,26 @@ func runRealCLI(rec *recorder, dialect, bin, baseURL string, timeout time.Durati
 	rec.printf("   %s (%s)", bin, path)
 
 	prompt := "In one sentence: is " + plantedSecret + " a live or test key?"
-	var cmd *exec.Cmd
-	env := os.Environ()
-	switch dialect {
-	case "openai":
-		// Codex CLI. Pinning a custom provider at the proxy URL (rather than
-		// only exporting OPENAI_BASE_URL) guarantees NO fallback egress to the
-		// real backend if the CLI is ChatGPT-authenticated on this machine —
-		// the planted secret must never ride an ungoverned path. CODEX_HOME
-		// points at a scratch dir for the same reason: the user's ~/.codex
-		// auth/session state stays untouched and unused.
-		codexHome, err := os.MkdirTemp("", "rysh-wire-codex-*")
-		if err != nil {
-			return fmt.Errorf("codex home: %w", err)
-		}
-		cmd = exec.Command(path, "exec",
-			"--skip-git-repo-check",
-			"-c", "model_provider=rysh",
-			"-c", "model_providers.rysh.name=rysh wire proxy",
-			"-c", "model_providers.rysh.base_url="+baseURL+"/v1",
-			"-c", "model_providers.rysh.env_key=OPENAI_API_KEY",
-			"-c", "model=gpt-4o",
-			prompt)
-		env = append(env,
-			"CODEX_HOME="+codexHome,
-			"OPENAI_BASE_URL="+baseURL,
-			// Dummy pane-side key, mirroring cfg.Proxy.InjectKey: the real key
-			// is injected proxy-side, so the CLI must never need a working one.
-			"OPENAI_API_KEY=sk-wire-harness-dummy",
-		)
-	default:
-		cmd = exec.Command(path, "--print", prompt)
-		env = append(env,
-			"ANTHROPIC_BASE_URL="+baseURL,
-			// A dummy pane-side key, mirroring cfg.Proxy.InjectKey: the real key is
-			// injected proxy-side, so the CLI must never need a working one.
-			"ANTHROPIC_API_KEY=sk-ant-wire-harness-dummy",
-		)
+
+	// How to force a given CLI through a base URL lives in internal/proxy's
+	// profile table, NOT here. It used to live here, which meant `##proxy check`
+	// and this harness could disagree about whether codex needs a pinned
+	// model_provider — and the compat matrix's claims rest on this harness.
+	// One home, both callers.
+	prof, ok := proxy.ProfileFor(bin)
+	if !ok {
+		return fmt.Errorf("no CLI profile for %q — add one to internal/proxy/compat.go", bin)
 	}
-	cmd.Env = env
+	scratch, err := os.MkdirTemp("", "rysh-wire-cli-*")
+	if err != nil {
+		return fmt.Errorf("scratch dir: %w", err)
+	}
+	argv, extraEnv, err := prof.ProbeCommand(path, baseURL, prompt, scratch, "rysh-wire-harness-dummy")
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Env = append(os.Environ(), extraEnv...)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/agentic"
+	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 	"github.com/rysh-ai/rysh-cli-code/internal/forge"
 )
 
@@ -23,6 +24,7 @@ import (
 func (w *WorkspaceActor) handleIntegrationSubcommand(out *strings.Builder, paneID string, args []string) {
 	if w.agSetup == nil || w.agSetup.Forge == nil {
 		fmt.Fprintf(out, "\n[integration] Forge is unavailable (agentic mode disabled?)\n")
+		w.failRysh("Forge is unavailable (agentic mode disabled?)")
 		return
 	}
 	mgr := w.agSetup.Forge
@@ -39,12 +41,14 @@ func (w *WorkspaceActor) handleIntegrationSubcommand(out *strings.Builder, paneI
 	case "enable":
 		name, scopeStr, ok := parseNameAndScope(args[1:])
 		if !ok {
-			fmt.Fprintf(out, "\n[integration] usage: ##integration enable <name> [--scope pane|panegroup|lane|tab]\n")
+			ryshWriter(out).UsageLineIn("integration", "##integration enable <name> [--scope pane|panegroup|lane|tab]")
+			w.failRyshUsage("usage: %s", "##integration enable <name> [--scope pane|panegroup|lane|tab]")
 			return
 		}
 		kind, ok := agentic.ParseScope(scopeStr)
 		if !ok {
 			fmt.Fprintf(out, "\n[integration] unknown scope %q (use pane|panegroup|lane|tab)\n", scopeStr)
+			w.failRysh("unknown scope %q (use pane|panegroup|lane|tab)", scopeStr)
 			return
 		}
 		ids := w.resolveScopeIDs(paneID)
@@ -55,16 +59,19 @@ func (w *WorkspaceActor) handleIntegrationSubcommand(out *strings.Builder, paneI
 		n, mode, err := mgr.EnableByName(context.Background(), name, target)
 		if err != nil {
 			fmt.Fprintf(out, "\n[integration] enable %q failed: %v\n", name, err)
+			w.failRysh("enable %q failed: %v", name, err)
 			return
 		}
 		fmt.Fprintf(out, "\n[integration] %q enabled at scope %s — %d tool(s) registered (exposure: %s). Visible to AI executing in that scope on its next prompt.\n", name, kind, n, modeStr(string(mode)))
 
 	case "disable":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[integration] usage: ##integration disable <name>\n")
+			ryshWriter(out).UsageLineIn("integration", "##integration disable <name>")
+			w.failRyshUsage("usage: %s", "##integration disable <name>")
 			return
 		}
 		if err := mgr.Disable(args[1]); err != nil {
+			w.failRysh("%v", err)
 			fmt.Fprintf(out, "\n[integration] %v\n", err)
 			return
 		}
@@ -72,12 +79,14 @@ func (w *WorkspaceActor) handleIntegrationSubcommand(out *strings.Builder, paneI
 
 	case "tools":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[integration] usage: ##integration tools <name>\n")
+			ryshWriter(out).UsageLineIn("integration", "##integration tools <name>")
+			w.failRyshUsage("usage: %s", "##integration tools <name>")
 			return
 		}
 		names, ok := mgr.Tools(args[1])
 		if !ok {
 			fmt.Fprintf(out, "\n[integration] %q is not enabled\n", args[1])
+			w.failRysh("%q is not enabled", args[1])
 			return
 		}
 		fmt.Fprintf(out, "\n[integration] tools for %q (%d):\n", args[1], len(names))
@@ -87,17 +96,20 @@ func (w *WorkspaceActor) handleIntegrationSubcommand(out *strings.Builder, paneI
 
 	case "remove", "rm", "delete":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[integration] usage: ##integration remove <name>\n")
+			ryshWriter(out).UsageLineIn("integration", "##integration remove <name>")
+			w.failRyshUsage("usage: %s", "##integration remove <name>")
 			return
 		}
 		if err := mgr.Remove(args[1]); err != nil {
+			w.failRysh("%v", err)
 			fmt.Fprintf(out, "\n[integration] %v\n", err)
 			return
 		}
 		fmt.Fprintf(out, "\n[integration] removed %q (tools unregistered, definition + spec deleted)\n", args[1])
 
 	default:
-		fmt.Fprintf(out, "\n[integration] unknown subcommand: %q\n", args[0])
+		ryshWriter(out).UnknownIn("integration", args[0])
+		w.failRyshUsage("unknown %s subcommand: %q", "integration", args[0])
 		w.integrationHelp(out)
 	}
 }
@@ -200,16 +212,9 @@ func (w *WorkspaceActor) resolveScopeIDs(paneID string) agentic.ScopeIDs {
 	if snap == nil {
 		return ids
 	}
-	for li := range snap.Lanes {
-		for _, g := range snap.Lanes[li].PaneGroups {
-			for _, p := range g.Panes {
-				if p.ID == paneID {
-					ids.LaneID = snap.Lanes[li].ID
-					ids.GroupID = g.ID
-					return ids
-				}
-			}
-		}
+	if site, ok := domain.LocatePaneInTab(snap, paneID); ok {
+		ids.LaneID = site.Lane.ID
+		ids.GroupID = site.Group.ID
 	}
 	return ids
 }

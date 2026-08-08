@@ -141,9 +141,7 @@ func ryshCommandIsReadOnly(command string) bool {
 // silently change which session the command lands in.
 func normalizeRyshCommand(command string) string {
 	body := strings.TrimSpace(command)
-	if strings.HasPrefix(body, "##") {
-		body = body[2:]
-	}
+	body = strings.TrimPrefix(body, "##")
 	return strings.TrimSpace(body)
 }
 
@@ -249,9 +247,7 @@ func collectRyshOutput(ctx context.Context, outCh <-chan *nats.Msg) []string {
 		select {
 		case m := <-outCh:
 			if content, ok := decodeRyshOutput(m.Data); ok && content != "" {
-				for _, ln := range strings.Split(strings.TrimRight(content, "\n"), "\n") {
-					lines = append(lines, ln)
-				}
+				lines = append(lines, strings.Split(strings.TrimRight(content, "\n"), "\n")...)
 			}
 			if !quiet.Stop() {
 				select {

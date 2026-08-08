@@ -27,6 +27,9 @@ const (
 	UsageSourceProxy = sharedmsg.UsageSourceProxy
 	UsageSourceEval  = sharedmsg.UsageSourceEval
 	UsageSourceCI    = sharedmsg.UsageSourceCI
+
+	UsageScopePane   = sharedmsg.UsageScopePane
+	UsageScopeTenant = sharedmsg.UsageScopeTenant
 )
 
 var (

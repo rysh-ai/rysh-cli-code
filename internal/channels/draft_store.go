@@ -15,7 +15,12 @@ type Attachment struct {
 
 // Draft represents an unsent draft.
 type Draft struct {
-	ID          string
+	ID string
+	// Channel is the channel type this draft belongs to ("slack", "email",
+	// "whatsapp"). A humanoid's channels share ONE store, so an owner's bare
+	// "send" must only ever approve a draft on the channel they are looking
+	// at — ApproveLatest filters on this field.
+	Channel     string
 	To          string
 	Subject     string
 	Body        string
@@ -48,14 +53,15 @@ func NewDraftStore() *DraftStore {
 	return &DraftStore{drafts: make(map[string]*Draft)}
 }
 
-// Create adds a new draft and returns its ID.
-func (ds *DraftStore) Create(to, subject, body, inReplyTo string) string {
+// Create adds a new draft for the given channel type and returns its ID.
+func (ds *DraftStore) Create(channel, to, subject, body, inReplyTo string) string {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 	ds.seq++
 	id := fmt.Sprintf("draft-%d", ds.seq)
 	ds.drafts[id] = &Draft{
 		ID:        id,
+		Channel:   channel,
 		To:        to,
 		Subject:   subject,
 		Body:      body,
@@ -90,14 +96,18 @@ func (ds *DraftStore) Approve(id string) bool {
 	return true
 }
 
-// ApproveLatest confirms the most recently created pending draft and returns
-// its ID.
+// ApproveLatest confirms the most recently created pending draft on the given
+// channel and returns its ID. An empty channel matches any draft.
 //
 // This backs the bare "send" confirmation, where the owner names no ID: the
 // draft they are looking at is the one just created. Only PENDING drafts are
 // considered, so repeating "send" cannot silently re-approve an older draft
-// that was already sent and deleted, nor resurrect one the owner ignored.
-func (ds *DraftStore) ApproveLatest() (string, bool) {
+// that was already sent and deleted, nor resurrect one the owner ignored. The
+// channel filter exists because the store is shared by ALL of a humanoid's
+// channels: an owner's "send" on the email flow must never flip a pending
+// Slack draft (or vice versa) — the channel send tools verify approval in
+// code, so a cross-channel approval would authorise the wrong payload.
+func (ds *DraftStore) ApproveLatest(channel string) (string, bool) {
 	if ds == nil {
 		return "", false
 	}
@@ -106,6 +116,9 @@ func (ds *DraftStore) ApproveLatest() (string, bool) {
 	var newest *Draft
 	for _, d := range ds.drafts {
 		if !d.ApprovedAt.IsZero() {
+			continue
+		}
+		if channel != "" && d.Channel != channel {
 			continue
 		}
 		if newest == nil || d.CreatedAt.After(newest.CreatedAt) {

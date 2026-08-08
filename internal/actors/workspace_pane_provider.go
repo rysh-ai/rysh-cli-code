@@ -21,6 +21,7 @@ import (
 func (w *WorkspaceActor) cmdPaneProvider(out *strings.Builder, paneID string, args []string) *msg.MsgPaneSetProvider {
 	if paneID == "" {
 		fmt.Fprintf(out, "\n[rysh] no active pane\n")
+		w.failRysh("no active pane")
 		return nil
 	}
 	if len(args) == 0 {
@@ -38,6 +39,7 @@ func (w *WorkspaceActor) cmdPaneProvider(out *strings.Builder, paneID string, ar
 	if !provider.IsKnownProviderName(name) {
 		fmt.Fprintf(out, "\n[rysh] unknown provider %q — valid: %s (or \"default\" to clear)\n",
 			name, strings.Join(provider.KnownProviderNames(), ", "))
+		w.failRyshUsage("unknown provider %q", name)
 		return nil
 	}
 	model := ""
@@ -51,13 +53,7 @@ func (w *WorkspaceActor) cmdPaneProvider(out *strings.Builder, paneID string, ar
 	fmt.Fprintf(out, "\n[rysh] applies to the next agentic prompt in this pane (no respawn needed); persisted with the pane across detach/attach\n")
 	// The selection would 401 without credentials; say so now rather than on
 	// the next prompt. Never echo the key itself — presence only.
-	family := providerFamily(name)
-	if provider.RequiresAPIKey(family) &&
-		family != providerFamily(w.cfg.ProviderName) &&
-		providerKeyFromEnv(family) == "" {
-		fmt.Fprintf(out, "[rysh] warning: no API key found for %s (set %s in the daemon environment) — prompts will fail until it is set\n",
-			name, providerKeyEnvHint(family))
-	}
+	w.warnMissingKey(out, providerFamily(name))
 	return &msg.MsgPaneSetProvider{Provider: name, Model: model}
 }
 
@@ -87,19 +83,6 @@ func paneProviderStatus(snap *domain.PaneSnapshot, sessionProvider string) strin
 		fmt.Fprintf(&b, "  override  : none (set with ##pane provider <name> [model])\n")
 	}
 	return b.String()
-}
-
-// providerKeyEnvHint names the conventional key variable(s) for a provider
-// family — the counterpart of providerKeyFromEnv, for error/warning text.
-func providerKeyEnvHint(family string) string {
-	switch family {
-	case "openai":
-		return "OPENAI_API_KEY"
-	case "gemini":
-		return "GEMINI_API_KEY (or GOOGLE_API_KEY)"
-	default:
-		return "ANTHROPIC_API_KEY"
-	}
 }
 
 // findPaneSnapshot fetches the live snapshot of one pane in the active tab

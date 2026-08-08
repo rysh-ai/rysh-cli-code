@@ -23,14 +23,8 @@ func (w *WorkspaceActor) findActiveGroupID(paneID string) string {
 	if tabSnap == nil {
 		return ""
 	}
-	for _, lane := range tabSnap.Lanes {
-		for _, g := range lane.PaneGroups {
-			for _, p := range g.Panes {
-				if p.ID == paneID {
-					return g.ID
-				}
-			}
-		}
+	if g := domain.GroupOfPane(tabSnap, paneID); g != nil {
+		return g.ID
 	}
 	return ""
 }
@@ -45,14 +39,8 @@ func (w *WorkspaceActor) findActiveLaneID(paneID string) string {
 	if tabSnap == nil {
 		return ""
 	}
-	for _, lane := range tabSnap.Lanes {
-		for _, g := range lane.PaneGroups {
-			for _, p := range g.Panes {
-				if p.ID == paneID {
-					return lane.ID
-				}
-			}
-		}
+	if l := domain.LaneOfPane(tabSnap, paneID); l != nil {
+		return l.ID
 	}
 	return ""
 }
@@ -99,36 +87,8 @@ func (w *WorkspaceActor) resolveTabArg(arg string) *tabInfo {
 // (the lane containing the active pane, falling back to the first lane).
 // Returns "" if no match.
 func (w *WorkspaceActor) resolveLaneInTab(tab *tabInfo, arg string) string {
-	tabSnap := w.queryTabSnapshot(tab.id)
-	if tabSnap == nil || len(tabSnap.Lanes) == 0 {
-		return ""
-	}
-	if arg == "" {
-		if tabSnap.ActivePaneID != "" {
-			for _, lane := range tabSnap.Lanes {
-				for _, g := range lane.PaneGroups {
-					for _, ps := range g.Panes {
-						if ps.ID == tabSnap.ActivePaneID {
-							return lane.ID
-						}
-					}
-				}
-			}
-		}
-		return tabSnap.Lanes[0].ID
-	}
-	for _, lane := range tabSnap.Lanes {
-		if lane.ID == arg {
-			return lane.ID
-		}
-	}
-	if n, err := strconv.Atoi(arg); err == nil && n >= 1 && n <= len(tabSnap.Lanes) {
-		return tabSnap.Lanes[n-1].ID
-	}
-	for _, lane := range tabSnap.Lanes {
-		if lane.Name == arg {
-			return lane.ID
-		}
+	if lane := domain.ResolveLane(w.queryTabSnapshot(tab.id), arg); lane != nil {
+		return lane.ID
 	}
 	return ""
 }
@@ -166,14 +126,8 @@ func (w *WorkspaceActor) activePaneTitle(tab *tabInfo) string {
 	if tabSnap == nil {
 		return ""
 	}
-	for _, lane := range tabSnap.Lanes {
-		for _, g := range lane.PaneGroups {
-			for _, ps := range g.Panes {
-				if ps.ID == w.activePaneID {
-					return ps.Title
-				}
-			}
-		}
+	if p := domain.FindPaneInTab(tabSnap, w.activePaneID); p != nil {
+		return p.Title
 	}
 	return ""
 }
@@ -184,14 +138,10 @@ func (w *WorkspaceActor) resolvePaneID(idOrAlias string) string {
 		if tabSnap == nil {
 			continue
 		}
-		for _, lane := range tabSnap.Lanes {
-			for _, g := range lane.PaneGroups {
-				for _, ps := range g.Panes {
-					if ps.ID == idOrAlias || ps.Title == idOrAlias ||
-						(ps.GivenName != "" && ps.GivenName == idOrAlias) {
-						return ps.ID
-					}
-				}
+		for p := range domain.PanesInTab(tabSnap) {
+			if p.ID == idOrAlias || p.Title == idOrAlias ||
+				(p.GivenName != "" && p.GivenName == idOrAlias) {
+				return p.ID
 			}
 		}
 	}
@@ -205,14 +155,8 @@ func (w *WorkspaceActor) findPaneGroupID(paneID string) string {
 		if tabSnap == nil {
 			continue
 		}
-		for _, lane := range tabSnap.Lanes {
-			for _, g := range lane.PaneGroups {
-				for _, ps := range g.Panes {
-					if ps.ID == paneID {
-						return g.ID
-					}
-				}
-			}
+		if g := domain.GroupOfPane(tabSnap, paneID); g != nil {
+			return g.ID
 		}
 	}
 	return ""
@@ -226,14 +170,8 @@ func (w *WorkspaceActor) isPaneListeningTo(listenerID, targetID string) bool {
 		if tabSnap == nil {
 			continue
 		}
-		for _, lane := range tabSnap.Lanes {
-			for _, g := range lane.PaneGroups {
-				for _, ps := range g.Panes {
-					if ps.ID == listenerID {
-						return ps.ListeningToID == targetID
-					}
-				}
-			}
+		if p := domain.FindPaneInTab(tabSnap, listenerID); p != nil {
+			return p.ListeningToID == targetID
 		}
 	}
 	return false
@@ -286,20 +224,14 @@ func (w *WorkspaceActor) focusPaneByID(id string) {
 		if tabSnap == nil {
 			continue
 		}
-		for _, lane := range tabSnap.Lanes {
-			for _, g := range lane.PaneGroups {
-				for _, ps := range g.Panes {
-					if ps.ID == id {
-						w.activeTabIdx = tabIdx
-						w.activePaneID = id
-						_ = w.pub.Send(
-							msg.T("tab", info.id, "inbox"),
-							&msg.MsgTabFocusPaneByID{ID: id},
-						)
-						return
-					}
-				}
-			}
+		if domain.TabContainsPane(tabSnap, id) {
+			w.activeTabIdx = tabIdx
+			w.activePaneID = id
+			_ = w.pub.Send(
+				msg.T("tab", info.id, "inbox"),
+				&msg.MsgTabFocusPaneByID{ID: id},
+			)
+			return
 		}
 	}
 }
@@ -394,14 +326,7 @@ func (w *WorkspaceActor) resolveOriginTab(focusPaneID string) *tabInfo {
 
 // tabSnapshotHasPane reports whether a tab snapshot contains a pane with paneID.
 func tabSnapshotHasPane(t *domain.TabSnapshot, paneID string) bool {
-	for li := range t.Lanes {
-		for gi := range t.Lanes[li].PaneGroups {
-			if groupContainsPane(&t.Lanes[li].PaneGroups[gi], paneID) {
-				return true
-			}
-		}
-	}
-	return false
+	return domain.TabContainsPane(t, paneID)
 }
 
 // reconcileActiveTab repairs a drifted active-tab index: when a real (non-mirror)

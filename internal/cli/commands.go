@@ -12,7 +12,20 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/session"
 )
 
-const defaultTimeout = 5 * time.Second
+// defaultTimeout bounds a CLI request/reply against the daemon.
+//
+// 5s was too tight for scripted use. A structural command does real work
+// before it can answer — `##new grid 2x2` spawns four PTYs, `##forge add`
+// ingests a spec and generates artifacts — and on a loaded machine those
+// exceed 5s and come back as "timeout waiting for reply", which reads like the
+// daemon is broken rather than busy. A human typing into a pane never saw this
+// because the TUI does not use this path.
+//
+// 30s is chosen to cover the slowest structural command comfortably while
+// still failing fast enough that a genuinely wedged daemon does not hang a
+// script for minutes. `rysh prompt` and `rysh run`, which wait for an agentic
+// turn, have their own much longer budgets and do not use this.
+const defaultTimeout = 30 * time.Second
 
 // resolveSession finds a running or detached session by name (or default) and
 // returns its record. The session's NATS server must be reachable.
@@ -48,6 +61,15 @@ func connect(store *session.Store, sessionName string) (*Client, error) {
 	// Set the NATS topic prefix to match the running session.
 	msg.SetSessionPrefix(rec.Name)
 	return NewClient(rec.NATSPort, rec.Name)
+}
+
+// Connect opens a client against a running (or detached) session by name,
+// setting the NATS subject prefix to match it.
+//
+// Exported for `rysh prompt`, which needs a long-lived connection it can
+// subscribe on rather than the single request/reply the helpers here wrap.
+func Connect(store *session.Store, sessionName string) (*Client, error) {
+	return connect(store, sessionName)
 }
 
 // getSnapshot fetches the workspace snapshot from a running session.
@@ -100,12 +122,7 @@ func TabList(store *session.Store, sessionName string) error {
 		if tab.ID == snap.ActiveTabID {
 			marker = "> "
 		}
-		totalPanes := 0
-		for _, lane := range tab.Lanes {
-			for _, g := range lane.PaneGroups {
-				totalPanes += len(g.Panes)
-			}
-		}
+		totalPanes := domain.CountPanesInTab(&tab)
 		pipeLabel := ""
 		if tab.PipelineEnabled {
 			pipeLabel = "  [pipeline]"
@@ -194,10 +211,7 @@ func LaneList(store *session.Store, sessionName, tabID string) error {
 	fmt.Printf("LANES in tab %q (%d lanes)\n", tab.Title, len(tab.Lanes))
 	fmt.Println(strings.Repeat("-", 80))
 	for i, lane := range tab.Lanes {
-		totalPanes := 0
-		for _, g := range lane.PaneGroups {
-			totalPanes += len(g.Panes)
-		}
+		totalPanes := domain.CountPanesInLane(&lane)
 		marker := "  "
 		if lane.ActivePaneID == tab.ActivePaneID {
 			marker = "> "
@@ -380,10 +394,7 @@ func PaneList(store *session.Store, sessionName, tabID, laneID string) error {
 		return fmt.Errorf("lane %q not found in tab %q", laneID, tabID)
 	}
 
-	totalPanes := 0
-	for _, g := range lane.PaneGroups {
-		totalPanes += len(g.Panes)
-	}
+	totalPanes := domain.CountPanesInLane(lane)
 
 	fmt.Printf("PANES in lane %s, tab %s (%d total)\n", laneID, tab.Title, totalPanes)
 	fmt.Println(strings.Repeat("-", 80))
@@ -545,17 +556,7 @@ func StackedPaneCreate(store *session.Store, sessionName, tabID, laneID, paneGro
 // "cmd echo hailo", "pane info", "tab list"). tabID/paneID select the target
 // pane; empty values fall back to the tab's / workspace's active pane.
 func RyshCommand(store *session.Store, sessionName, tabID, paneID, command string) error {
-	c, err := connect(store, sessionName)
-	if err != nil {
-		return err
-	}
-	defer c.Close()
-
-	resp, err := cliRequest(c, &msg.MsgCLIRyshCommand{
-		TabID:   tabID,
-		PaneID:  paneID,
-		Command: command,
-	})
+	resp, err := RyshCommandResult(store, sessionName, tabID, paneID, command)
 	if err != nil {
 		return err
 	}
@@ -572,6 +573,27 @@ func RyshCommand(store *session.Store, sessionName, tabID, paneID, command strin
 		return fmt.Errorf("rysh command failed")
 	}
 	return nil
+}
+
+// RyshCommandResult is RyshCommand without the printing: it runs a "##" system
+// command and hands back the daemon's raw response so the caller decides what
+// to do with the output, the OK flag and the error text.
+//
+// `rysh exec` needs this to render --json, and to keep "the command failed"
+// (resp.OK == false) distinct from "we could not ask" (a transport error) —
+// the two mean different things to a script and want different exit codes.
+func RyshCommandResult(store *session.Store, sessionName, tabID, paneID, command string) (*msg.MsgCLIResponse, error) {
+	c, err := connect(store, sessionName)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+
+	return cliRequest(c, &msg.MsgCLIRyshCommand{
+		TabID:   tabID,
+		PaneID:  paneID,
+		Command: command,
+	})
 }
 
 // ---------------------------------------------------------------------------

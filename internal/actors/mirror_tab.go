@@ -229,15 +229,7 @@ func (mt *mirrorTab) displayName() string {
 // orderedPaneIDs returns the remote pane IDs of the latest layout in render
 // order (lanes → groups → panes).
 func (mt *mirrorTab) orderedPaneIDs() []string {
-	var ids []string
-	for _, lane := range mt.snap.Lanes {
-		for _, g := range lane.PaneGroups {
-			for _, p := range g.Panes {
-				ids = append(ids, p.ID)
-			}
-		}
-	}
-	return ids
+	return domain.PaneIDsInTab(&mt.snap)
 }
 
 // orderedGroupPaneIDs returns one representative pane id per pane group in
@@ -435,13 +427,9 @@ func (mt *mirrorTab) displayTab(layoutOnly bool) domain.TabSnapshot {
 // interactive (alternate-screen) program. Used to publish layout updates at a
 // faster cadence while an interactive program is on screen.
 func tabHasInteractive(t domain.TabSnapshot) bool {
-	for _, lane := range t.Lanes {
-		for _, g := range lane.PaneGroups {
-			for _, p := range g.Panes {
-				if p.RawMode {
-					return true
-				}
-			}
+	for p := range domain.PanesInTab(&t) {
+		if p.RawMode {
+			return true
 		}
 	}
 	return false
@@ -721,6 +709,8 @@ func trimTabForMirror(src domain.TabSnapshot) domain.TabSnapshot {
 					ps.VTCursorRow = p.VTCursorRow
 					ps.VTCursorCol = p.VTCursorCol
 					ps.MouseEnabled = p.MouseEnabled
+					ps.MouseProto = p.MouseProto
+					ps.MouseSGR = p.MouseSGR
 				}
 				ng.Panes = append(ng.Panes, ps)
 			}

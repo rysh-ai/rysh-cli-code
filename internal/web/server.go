@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -17,6 +18,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -41,11 +43,22 @@ type Server struct {
 	codecs      *msg.CodecRegistry
 	logger      *slog.Logger
 
-	// authToken, when non-empty, gates every route (except /health): a request
-	// must present the token via the ?token= query on first load, after which a
-	// cookie carries it. Empty ⇒ no auth (loopback-only default). Set via
-	// SetAuthToken before Start; see auth.go.
-	authToken string
+	// nextClientSeq numbers WebSocket connections so each gets a distinct id
+	// for pane size arbitration (see handlePaneResize). Two app windows on the
+	// same pane must be distinguishable, or the second would silently replace
+	// the first's claim instead of adding to it.
+	nextClientSeq atomic.Int64
+
+	// creds, when non-nil, gates routes carrying session data behind a
+	// username/password login (POST /api/auth/login) that mints a one-month JWT
+	// the browser keeps in localStorage. Set with `##rysh web auth` or
+	// `##rysh web start --username/--password`; see credentials.go. Guarded by
+	// credsMu because credentials can be changed while the server is running.
+	//
+	// WHICH DOOR a request came through decides whether the gate applies at all
+	// — see authMiddleware and StartShared.
+	credsMu sync.RWMutex
+	creds   *Credentials
 
 	// fsBrowse serves the web UI's file browser (GET /fs/list, /fs/read).
 	// Injected by the WorkspaceActor via SetFSBrowser — the implementation
@@ -53,7 +66,39 @@ type Server struct {
 	// this package cannot import. nil ⇒ endpoints answer "disabled".
 	fsBrowse func(op, paneID, path string, offset, length int64) (any, string, string)
 
+	// --- electronAPI parity (web_electron_roadmap Phase 3, W7–W10 + W12) ---
+	// voice is the daemon's [voice]/[voice_control] config (SetVoice); the API
+	// key never leaves the server. bashCompletion mirrors [ui]
+	// shell_bash_completion (SetBashCompletion). wsPath/wsName identify the
+	// current workspace (SetWorkspaceInfo); workspaceLister supplies recent
+	// workspaces from the session registry (SetWorkspaceLister). transcribeFn
+	// is the transcription entrypoint, overridable in tests (nil ⇒ the real
+	// internal/voice provider call).
+	voice           VoiceSettings
+	bashCompletion  bool
+	wsPath          string
+	wsName          string
+	workspaceLister func() []WorkspaceEntry
+	transcribeFn    func(ctx context.Context, v VoiceSettings, audioPath string) (string, error)
+
+	// webPanes holds the server-side embedded browsers for web-mode web panes
+	// (W12, webpane.go), keyed by pane ID.
+	webPaneMu sync.Mutex
+	webPanes  map[string]*webPaneSession
+
 	httpSrv          *http.Server
+
+	// engine is the built route set, kept after Start so a SHARED listener can
+	// be attached to the same routes, the same hub and the same session.
+	engine http.Handler
+	// sharedSrv/sharedLn are the second door: another listener onto those same
+	// routes, on which a login is ALWAYS required. It exists so the desktop app
+	// can keep its unauthenticated loopback connection while the same UI is
+	// handed to a browser (or a phone) behind a password. nil ⇒ no shared door.
+	sharedSrv  *http.Server
+	sharedLn   net.Listener
+	sharedHost string
+	sharedPort int
 	hub              *Hub
 	cancel           context.CancelFunc
 	mu               sync.Mutex
@@ -114,9 +159,9 @@ func NewServer(port int, sessionName string, pub *msg.NATSPublisher, nc *nats.Co
 // DefaultHost is the bind address used when none is configured: loopback, so
 // a rysh web session is reachable only from the machine running the daemon
 // unless the operator explicitly opts into a wider bind (`--bind 0.0.0.0`,
-// [web] host, RYSH_WEB_HOST). The access token is a guard, not a perimeter —
-// binding the default surface to a LAN-visible interface is a decision the
-// operator must make deliberately.
+// [web] host, RYSH_WEB_HOST). The login is a guard, not a perimeter — binding
+// the default surface to a LAN-visible interface is a decision the operator
+// must make deliberately.
 const DefaultHost = "127.0.0.1"
 
 // SetHost pins the HTTP listener to a specific bind IP — 0.0.0.0 to expose the
@@ -215,8 +260,8 @@ func (s *Server) Start() error {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
-	// Access-token gate (no-op when authToken is empty). Must precede routes so
-	// static assets, the page, and the /ws upgrade are all protected.
+	// Login gate (no-op when no credentials are configured). Must precede routes
+	// so session data, and the /ws upgrade, are all protected.
 	r.Use(s.authMiddleware())
 
 	// Serve embedded static files.
@@ -253,6 +298,9 @@ func (s *Server) Start() error {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
+	// Username/password login (auth.go). Reachable without credentials — it is
+	// how a browser acquires them.
+	s.registerAuthAPI(r)
 	r.GET("/ws", s.handleWebSocket)
 	// File browser for the web UI (mobile drill-down's file viewer): list a
 	// directory / read a text-or-image file, sandboxed to the pane's cwd.
@@ -264,10 +312,17 @@ func (s *Server) Start() error {
 	// unless control mode is enabled.
 	s.registerControlAPI(r)
 
+	// electronAPI-parity API (roadmap Phase 3): /api/env, /api/workspaces,
+	// /api/voice/*. Read-only except transcription; token-gated like all routes.
+	s.registerParityAPI(r)
+
 	// The listener is already bound (see the net.Listen above, which also
 	// resolved the bind address — loopback by default, control mode forced
 	// onto loopback per design 005 DB4).
 	s.httpSrv = &http.Server{Handler: r}
+	// Kept so a shared door can be opened later on the SAME routes, hub and
+	// session — one server, a second way in (see StartShared).
+	s.engine = r
 
 	go func() {
 		if err := s.httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -295,6 +350,13 @@ func (s *Server) Stop() error {
 	}
 
 	s.running = false
+	// The shared door goes with the server it is a door onto — leaving a
+	// listener up after Stop would serve a session nothing is driving.
+	if s.sharedSrv != nil {
+		_ = s.sharedSrv.Close()
+		s.sharedSrv, s.sharedLn = nil, nil
+		s.sharedHost, s.sharedPort = "", 0
+	}
 	if s.approSub != nil {
 		_ = s.approSub.Unsubscribe()
 		s.approSub = nil
@@ -367,6 +429,10 @@ func (s *Server) Stop() error {
 	s.httpSrv = nil
 	s.mu.Unlock()
 
+	// Tear down any server-side embedded browsers (W12) so headless Chromium
+	// processes never outlive the web session.
+	s.closeAllWebPanes()
+
 	if srv != nil {
 		// Shutdown OUTSIDE the lock: in-flight handlers take s.mu (requireControl
 		// → ControlEnabled, Host), so holding it here deadlocks them against the
@@ -412,6 +478,8 @@ func (s *Server) handleWebSocket(c *gin.Context) {
 		conn:          conn,
 		send:          make(chan []byte, 256),
 		streamContent: stream,
+		sizeClientID:  fmt.Sprintf("web:%d", s.nextClientSeq.Add(1)),
+		sizedPanes:    make(map[string]bool),
 	}
 	s.hub.register <- client
 
@@ -444,13 +512,22 @@ func (s *Server) pollSnapshots(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// The blind 200ms full-snapshot poll serves only clients that did NOT
+			// opt into the content plane. Stream clients instead receive
+			// layout-only snapshots on ws.layoutDirty plus per-pane content deltas.
+			//
+			// Ask whether such a client exists BEFORE building the snapshot. With
+			// layoutOnly=false the reply carries every pane's content — measured at
+			// 4.4 MB on a 50-pane session — so polling it five times a second and
+			// then discarding it in sendWhere cost ~22 MB/s of bus traffic for
+			// nothing whenever every connected client was a stream client.
+			if !s.hub.hasPlain() {
+				continue
+			}
 			data := s.snapshotMessage(false, false)
 			if data == nil {
 				continue
 			}
-			// The blind 200ms full-snapshot poll serves only clients that did NOT
-			// opt into the content plane. Stream clients instead receive
-			// layout-only snapshots on ws.layoutDirty plus per-pane content deltas.
 			s.hub.sendWhere(data, func(c *wsClient) bool { return !c.streamContent })
 		}
 	}
@@ -1178,20 +1255,9 @@ func (s *Server) handleCommand(action string, data json.RawMessage) {
 			}
 		}
 
-	case "pane_resize":
-		// Size a pane's PTY + virtual terminal to the renderer's measured cell
-		// grid. Without this the PTY stays at the 80x24 default, so interactive
-		// apps (vim, claude) only fill ~24 rows regardless of the pane's real
-		// height. Mirrors the TUI's sendPaneResizes — addressed straight to the
-		// PaneActor inbox (the same subject the TUI uses).
-		var cmd struct {
-			PaneID string `json:"pane_id"`
-			Rows   int    `json:"rows"`
-			Cols   int    `json:"cols"`
-		}
-		if json.Unmarshal(data, &cmd) == nil && cmd.PaneID != "" && cmd.Rows > 0 && cmd.Cols > 0 {
-			_ = s.pub.Send(msg.T("pane", cmd.PaneID, "inbox"), &msg.MsgPaneResize{Rows: cmd.Rows, Cols: cmd.Cols})
-		}
+	// "pane_resize" is deliberately NOT here: it needs the originating client,
+	// because a resize is a per-viewport size claim rather than a broadcast
+	// command. It is handled in handleClientCommand → handlePaneResize.
 
 	case "pane_clear_output":
 		// Readline Ctrl+L from the desktop app: clear the pane display buffers
@@ -1773,13 +1839,14 @@ func modeFromSubject(subject string) string {
 // streamPaneVT keeps interactive panes' VT screens fresh for stream clients.
 // Layout-only snapshots omit vt_screen, and the per-pane output stream carries
 // text (not VT frames), so — while any stream client is connected — this finds
-// interactive panes from a cheap layout snapshot and fast-pulls each one's full
-// snapshot, forwarding a pane_vt envelope. Mirrors the TUI's raw-VT fast pull.
+// interactive panes from a cheap layout snapshot and fast-pulls each one's VT
+// frame, forwarding a pane_vt envelope. paneVTFrame picks the cheapest request
+// that can carry the fields, the same split the TUI makes.
 func (s *Server) streamPaneVT(ctx context.Context) {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	// Panes reported interactive on the previous tick. When a pane's interactive
-	// program exits it simply drops out of interactivePaneIDs and the poll stops
+	// program exits it simply drops out of interactivePanes and the poll stops
 	// pushing frames for it — but stream clients latch interactivity from the
 	// pane_vt delta (raw-mode transitions don't emit a layout snapshot), so
 	// without an explicit clear they'd stay stuck on the program's last VT frame.
@@ -1788,6 +1855,19 @@ func (s *Server) streamPaneVT(ctx context.Context) {
 	// interactivity from its initial full snapshot, so dropping this state when no
 	// stream clients are connected is safe.
 	prevInteractive := map[string]bool{}
+	// Hash of the last pane_vt frame actually BROADCAST for each pane. The poll
+	// runs at a fixed 10Hz per interactive pane whether or not anything moved, so
+	// an idle vim or claude pane re-sent a byte-identical frame ten times a
+	// second: measured at 240 msgs/s over 24 idle panes, ~650 KB/s to a single
+	// client, all of it redundant. The TUI has always deduped its side of this
+	// (vtFrameHash, tui/content_stream.go); the web server never did.
+	//
+	// Skipping an unchanged frame cannot starve a client: a stream client is
+	// seeded with a FULL snapshot on connect (handleWebSocket), which carries
+	// vt_screen for every pane, and every later CHANGE is still broadcast.
+	// Cleared with prevInteractive when the last stream client leaves, so the
+	// next one starts from a clean slate rather than inheriting stale hashes.
+	lastFrame := map[string]uint64{}
 	for {
 		select {
 		case <-ctx.Done():
@@ -1797,9 +1877,19 @@ func (s *Server) streamPaneVT(ctx context.Context) {
 				if len(prevInteractive) > 0 {
 					prevInteractive = map[string]bool{}
 				}
+				if len(lastFrame) > 0 {
+					lastFrame = map[string]uint64{}
+				}
 				continue
 			}
-			reply, err := s.pub.Request(msg.T("ws", "snapshot"), &msg.MsgGetWorkspaceSnapshot{LayoutOnly: true}, time.Second)
+			// NoHistories: this loop reads pane ids and the RawMode /
+			// RemoteInteractive flags and nothing else, but a layout-only snapshot
+			// still carries each pane's command history — measured at 28.9 KB of a
+			// 29.9 KB pane reply, the same seeded file duplicated across every pane
+			// (F-7c). At 10Hz over 50 panes that was ~7.5 MB/s of bus traffic for
+			// bytes discarded on arrival.
+			reply, err := s.pub.Request(msg.T("ws", "snapshot"),
+				&msg.MsgGetWorkspaceSnapshot{LayoutOnly: true, NoHistories: true}, time.Second)
 			if err != nil {
 				continue
 			}
@@ -1808,36 +1898,23 @@ func (s *Server) streamPaneVT(ctx context.Context) {
 				continue
 			}
 			current := map[string]bool{}
-			for _, paneID := range interactivePaneIDs(&r.Snapshot) {
+			for _, pane := range interactivePanes(&r.Snapshot) {
 				// Mark interactive before any per-pane fetch error so a transient
 				// snapshot failure doesn't spuriously clear the pane next tick.
-				current[paneID] = true
-				preply, err := s.pub.Request(msg.T("pane", paneID, "snapshot"), &msg.MsgGetPaneSnapshot{}, time.Second)
-				if err != nil {
-					continue
-				}
-				pr, ok := preply.(*msg.MsgPaneSnapshotReply)
+				current[pane.id] = true
+				data, ok := s.paneVTFrame(pane)
 				if !ok {
 					continue
 				}
-				p := pr.Snapshot
-				data, err := json.Marshal(map[string]interface{}{
-					"type": "pane_vt",
-					"data": map[string]interface{}{
-						"pane_id":              paneID,
-						"raw_mode":             p.RawMode,
-						"vt_screen":            p.VTScreen,
-						"vt_cursor_row":        p.VTCursorRow,
-						"vt_cursor_col":        p.VTCursorCol,
-						"remote_interactive":   p.RemoteInteractive,
-						"remote_vt_screen":     p.RemoteVTScreen,
-						"remote_vt_cursor_row": p.RemoteVTCursorRow,
-						"remote_vt_cursor_col": p.RemoteVTCursorCol,
-					},
-				})
-				if err != nil {
+				// Identical bytes render identically, so there is nothing for a
+				// client to do with a repeat. Hash the encoded frame rather than the
+				// fields: it is exactly what the client would receive, so it cannot
+				// drift from the comparison the skip is claiming to make.
+				h := frameHash(data)
+				if prev, seen := lastFrame[pane.id]; seen && prev == h {
 					continue
 				}
+				lastFrame[pane.id] = h
 				s.hub.sendWhere(data, func(c *wsClient) bool { return c.streamContent })
 			}
 			// Panes that were interactive last tick but aren't now: push one
@@ -1846,6 +1923,10 @@ func (s *Server) streamPaneVT(ctx context.Context) {
 				if current[paneID] {
 					continue
 				}
+				// Drop the remembered frame too, so a pane that goes interactive
+				// again re-sends its first frame instead of being deduped against
+				// what it looked like before the program exited.
+				delete(lastFrame, paneID)
 				data, err := json.Marshal(map[string]interface{}{
 					"type": "pane_vt",
 					"data": map[string]interface{}{
@@ -1864,22 +1945,123 @@ func (s *Server) streamPaneVT(ctx context.Context) {
 	}
 }
 
-// interactivePaneIDs returns the ids of panes showing a VT screen (local raw or
-// remote-interactive) in the snapshot.
-func interactivePaneIDs(snap *domain.WorkspaceSnapshot) []string {
-	var ids []string
-	for _, tab := range snap.Tabs {
-		for _, lane := range tab.Lanes {
-			for _, g := range lane.PaneGroups {
-				for _, p := range g.Panes {
-					if p.RawMode || p.RemoteInteractive {
-						ids = append(ids, p.ID)
-					}
-				}
-			}
+// frameHash is an FNV-1a hash of an encoded pane_vt frame. Mirrors the TUI's
+// vtFrameHash (tui/content_stream.go) in purpose: two frames with the same hash
+// render identically, so the second one need not be sent.
+func frameHash(data []byte) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write(data)
+	return h.Sum64()
+}
+
+// interactivePane is one pane streamPaneVT must refresh, together with how to
+// refresh it cheaply. localRaw marks the panes eligible for the VT-only pull.
+type interactivePane struct {
+	id       string
+	localRaw bool
+}
+
+// isMirrorPaneID reports whether an id names a synthetic mirror pane. Mirror
+// panes have no PaneActor, so they can never answer MsgGetPaneVT — same rule the
+// TUI applies in isLocalRawPane (tui/content_stream.go:565).
+func isMirrorPaneID(id string) bool { return strings.HasPrefix(id, "mirror") }
+
+// isLocalRawPane reports whether a pane carries ONLY a local VT frame, so the
+// lightweight MsgGetPaneVT reply is sufficient. Remote-interactive and mirror
+// panes carry extra state (RemoteVTScreen and friends) that MsgPaneVTReply does
+// not model at all, so they must keep the full snapshot.
+func isLocalRawPane(p *domain.PaneSnapshot) bool {
+	return p.RawMode && !p.RemoteInteractive && !isMirrorPaneID(p.ID)
+}
+
+// interactivePanes returns the panes showing a VT screen (local raw or
+// remote-interactive) in the snapshot, each classified for the cheap path.
+func interactivePanes(snap *domain.WorkspaceSnapshot) []interactivePane {
+	var out []interactivePane
+	for p := range domain.PanesInWorkspace(snap) {
+		if p.RawMode || p.RemoteInteractive {
+			out = append(out, interactivePane{id: p.ID, localRaw: isLocalRawPane(p)})
 		}
 	}
-	return ids
+	return out
+}
+
+// paneVTFrame builds one pane_vt envelope, taking the cheapest route that can
+// carry the fields the client needs.
+//
+// A LOCAL raw pane pulls MsgGetPaneVT: screen + cursor only, measured at 1.4 KB
+// against 29.3 KB for the full snapshot on live panes — 21x smaller, and the
+// full reply's remaining bytes are almost entirely shell_history (97%, see F-7c)
+// that this stream never reads. A remote-interactive or mirror pane still pulls
+// the full snapshot, because MsgPaneVTReply has no Remote* fields to carry.
+//
+// This is the split tui/content_stream.go:579 has always made; the web server
+// never had it, which is why a daemon with no TUI attached issued 100%
+// MsgGetPaneSnapshot and zero MsgGetPaneVT (F-7b).
+func (s *Server) paneVTFrame(pane interactivePane) ([]byte, bool) {
+	subject := msg.T("pane", pane.id, "snapshot")
+
+	if pane.localRaw {
+		reply, err := s.pub.Request(subject, &msg.MsgGetPaneVT{}, time.Second)
+		if err != nil {
+			return nil, false
+		}
+		r, ok := reply.(*msg.MsgPaneVTReply)
+		if !ok {
+			return nil, false
+		}
+		// r.Interactive is the same computeInteractive() gate that sets RawMode on
+		// the full snapshot (actors/pane_snapshot.go:150 and :268), so it maps
+		// straight onto raw_mode. The remote_* fields stay at their zero values —
+		// which is exactly what the full snapshot carried for a !RemoteInteractive
+		// pane, so the wire shape the client sees is unchanged.
+		data, err := json.Marshal(map[string]interface{}{
+			"type": "pane_vt",
+			"data": map[string]interface{}{
+				"pane_id":              pane.id,
+				"raw_mode":             r.Interactive,
+				"vt_screen":            r.Screen,
+				"vt_cursor_row":        r.CursorRow,
+				"vt_cursor_col":        r.CursorCol,
+				"remote_interactive":   false,
+				"remote_vt_screen":     nil,
+				"remote_vt_cursor_row": 0,
+				"remote_vt_cursor_col": 0,
+			},
+		})
+		if err != nil {
+			return nil, false
+		}
+		return data, true
+	}
+
+	preply, err := s.pub.Request(subject, &msg.MsgGetPaneSnapshot{}, time.Second)
+	if err != nil {
+		return nil, false
+	}
+	pr, ok := preply.(*msg.MsgPaneSnapshotReply)
+	if !ok {
+		return nil, false
+	}
+	p := pr.Snapshot
+	data, err := json.Marshal(map[string]interface{}{
+		"type": "pane_vt",
+		"data": map[string]interface{}{
+			"pane_id":              pane.id,
+			"raw_mode":             p.RawMode,
+			"vt_screen":            p.VTScreen,
+			"vt_cursor_row":        p.VTCursorRow,
+			"vt_cursor_col":        p.VTCursorCol,
+			"remote_interactive":   p.RemoteInteractive,
+			"remote_vt_screen":     p.RemoteVTScreen,
+			"remote_vt_cursor_row": p.RemoteVTCursorRow,
+			"remote_vt_cursor_col": p.RemoteVTCursorCol,
+		},
+	})
+	if err != nil {
+		return nil, false
+	}
+	return data, true
 }
 
 // ---------------------------------------------------------------------------

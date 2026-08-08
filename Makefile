@@ -36,6 +36,10 @@ build-alt: ## Build legacy 'ry' alias binary
 	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BIN_ALT) ./cmd/rysh
 	@echo "Built $(BIN_DIR)/$(BIN_ALT)"
 
+build-script-shim: ## Build the rysh-script shebang shim (#!/usr/bin/env rysh-script)
+	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/rysh-script ./cmd/rysh-script
+	@echo "Built $(BIN_DIR)/rysh-script"
+
 install: build ## Build and install rysh to ~/.local/bin
 	install -d $(HOME)/.local/bin
 	install $(BIN_DIR)/$(BIN) $(HOME)/.local/bin/$(BIN)

@@ -15,14 +15,19 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/policy"
 )
 
-// humanoidKV is the serialisable representation of a humanoid for KV persistence.
+// humanoidKV is the serialisable representation of a humanoid for KV
+// persistence. Governance and reply-mode live INSIDE Contacts (each channel's
+// ChannelConfig): NewHumanoidActor re-reads them from there on restore, which
+// is what lets a runtime flip survive a restart once the registry has updated
+// its contacts (MsgHumanoidGovernanceChanged / MsgHumanoidReplyModeChanged).
+// A former dedicated EmailGovernance field was written nowhere and read
+// nowhere — removed rather than left as a decoy.
 type humanoidKV struct {
 	Name            string                       `json:"name"`
 	SystemPrompt    string                       `json:"system_prompt"`
 	Active          bool                         `json:"active"`
 	RegisteredPanes map[string]string            `json:"registered_panes"`
 	Contacts        map[string]msg.ChannelConfig `json:"contacts"`
-	EmailGovernance string                       `json:"email_governance,omitempty"`
 	Provider        string                       `json:"provider,omitempty"`
 	Model           string                       `json:"model,omitempty"`
 	Profile         string                       `json:"profile,omitempty"`
@@ -60,6 +65,7 @@ type HumanoidRegistryActor struct {
 	agSetup     *agentic.Setup
 	humanoids   map[string]*humanoidEntry // name -> entry
 	kvStore     nats.KeyValue
+	secrets     *secretResolver // workspace-scoped ##secret lookup, threaded to humanoids
 }
 
 // NewHumanoidRegistryActor creates a new humanoid registry.
@@ -70,6 +76,7 @@ func NewHumanoidRegistryActor(
 	nc *nats.Conn,
 	agSetup *agentic.Setup,
 	kvStore nats.KeyValue,
+	secrets *secretResolver,
 ) *HumanoidRegistryActor {
 	return &HumanoidRegistryActor{
 		sessionName: sessionName,
@@ -79,6 +86,7 @@ func NewHumanoidRegistryActor(
 		agSetup:     agSetup,
 		humanoids:   make(map[string]*humanoidEntry),
 		kvStore:     kvStore,
+		secrets:     secrets,
 	}
 }
 
@@ -203,6 +211,16 @@ func (r *HumanoidRegistryActor) Receive(ctx actor.Context) {
 		}
 		r.persistToKV()
 
+	case *msg.MsgHumanoidGovernanceChanged:
+		slog.Debug("humanoid-registry: received MsgHumanoidGovernanceChanged",
+			"name", m.Name, "mode", m.Mode)
+		r.handleGovernanceChanged(m)
+
+	case *msg.MsgHumanoidReplyModeChanged:
+		slog.Debug("humanoid-registry: received MsgHumanoidReplyModeChanged",
+			"name", m.Name, "channel", m.ChannelType, "mode", m.Mode)
+		r.handleReplyModeChanged(m)
+
 	case *msg.MsgHumanoidChannelStart:
 		slog.Debug("humanoid-registry: received MsgHumanoidChannelStart (noop — dispatched directly)")
 
@@ -247,9 +265,13 @@ func (r *HumanoidRegistryActor) createHumanoid(
 		"prompt_len", len(systemPrompt), "contacts", len(contacts),
 		"provider", providerName, "model", model, "profile", profile)
 
+	// The actor gets its OWN copy of the contact map. The registry mutates its
+	// copy on runtime governance/reply-mode flips (then persists it to KV)
+	// while the actor reads its copy on the actor goroutine — sharing one map
+	// across the two goroutines would be a data race.
 	humanoidActor := NewHumanoidActor(
-		name, systemPrompt, contacts,
-		r.cfg, r.pub, r.nc, r.agSetup,
+		name, systemPrompt, cloneContacts(contacts),
+		r.cfg, r.pub, r.nc, r.agSetup, r.secrets,
 	)
 	humanoidActor.provider = providerName
 	humanoidActor.providerModel = model
@@ -371,6 +393,66 @@ func (r *HumanoidRegistryActor) getHumanoidInfos() []msg.HumanoidInfo {
 func (r *HumanoidRegistryActor) HumanoidExists(name string) bool {
 	_, ok := r.humanoids[name]
 	return ok
+}
+
+// cloneContacts copies a contact map (including the nested EmailConfig
+// pointer) so the registry and a spawned HumanoidActor never share mutable
+// state across their goroutines. Slice fields are treated as immutable by
+// both sides and are not deep-copied.
+func cloneContacts(contacts map[string]msg.ChannelConfig) map[string]msg.ChannelConfig {
+	out := make(map[string]msg.ChannelConfig, len(contacts))
+	for channelType, cc := range contacts {
+		if cc.EmailConfig != nil {
+			ec := *cc.EmailConfig
+			cc.EmailConfig = &ec
+		}
+		out[channelType] = cc
+	}
+	return out
+}
+
+// handleGovernanceChanged records a runtime governance flip in the registry's
+// copy of the humanoid's contacts and persists it. restoreFromKV re-creates
+// humanoids from these contacts (NewHumanoidActor re-reads governance from
+// them), so this is what makes `##humanoid governance <name> ai|human`
+// survive a daemon restart instead of silently reverting to the skill-file
+// mode (design 019 gap 2). Email gets BOTH spellings (top-level and nested
+// config.governance) so either reader sees the same mode.
+func (r *HumanoidRegistryActor) handleGovernanceChanged(m *msg.MsgHumanoidGovernanceChanged) {
+	if m.Mode != "ai" && m.Mode != "human" {
+		return
+	}
+	entry, ok := r.humanoids[m.Name]
+	if !ok {
+		return
+	}
+	for channelType, cc := range entry.contacts {
+		cc.Governance = m.Mode
+		if cc.EmailConfig != nil {
+			ec := *cc.EmailConfig
+			ec.Governance = m.Mode
+			cc.EmailConfig = &ec
+		}
+		entry.contacts[channelType] = cc
+	}
+	r.persistToKV()
+}
+
+// handleReplyModeChanged is the reply-mode analogue of
+// handleGovernanceChanged: adapters are rebuilt from the stored contacts on
+// restart, so the flipped reply_mode must reach the KV record too.
+func (r *HumanoidRegistryActor) handleReplyModeChanged(m *msg.MsgHumanoidReplyModeChanged) {
+	entry, ok := r.humanoids[m.Name]
+	if !ok {
+		return
+	}
+	cc, ok := entry.contacts[m.ChannelType]
+	if !ok {
+		return
+	}
+	cc.ReplyMode = m.Mode
+	entry.contacts[m.ChannelType] = cc
+	r.persistToKV()
 }
 
 // persistToKV serialises the current humanoid map to KV storage.

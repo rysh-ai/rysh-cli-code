@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/asynkron/protoactor-go/actor"
@@ -64,6 +64,9 @@ type HumanoidActor struct {
 	nc           *nats.Conn
 	agSetup      *agentic.Setup
 	br           *bridge.NATSBridge
+	// secrets resolves a provider API key for a `provider:` selection through
+	// the workspace's ##secret store; nil means environment-only.
+	secrets *secretResolver
 
 	// provider is the skill-file `provider:` selection (design 006 MP2).
 	// Empty = the config/default provider (exactly the pre-MP2 behaviour).
@@ -113,6 +116,17 @@ type HumanoidActor struct {
 	// humanPromptPending tracks if a human-initiated prompt (external mode)
 	// is in flight, so output is routed to external buffer instead of chat.
 	humanPromptPending bool
+
+	// govMu guards the four governance-mode fields (emailGovernance,
+	// whatsappGovernance, slackGovernance, governance). The actor struct is
+	// mailbox-serialized, but governance is the one exception: it is written
+	// on the actor goroutine (applyGovernanceMode) and read from TOOL
+	// EXECUTION goroutines through the humanGoverned closures handed to the
+	// channel send tools (slack_send/email_send/whatsapp_send) — an unguarded
+	// read there is a data race (design 019 gap 5, confirmed under -race).
+	// Reads on the actor goroutine may keep touching the fields directly;
+	// anything that can run off it must go through govMode().
+	govMu sync.RWMutex
 
 	// emailGovernance controls how inbound emails are handled: "ai" (auto-reply)
 	// or "human" (display only, human uses AI tools to respond).
@@ -240,6 +254,7 @@ func NewHumanoidActor(
 	pub *msg.NATSPublisher,
 	nc *nats.Conn,
 	agSetup *agentic.Setup,
+	secrets *secretResolver,
 ) *HumanoidActor {
 	h := &HumanoidActor{
 		name:               name,
@@ -249,6 +264,7 @@ func NewHumanoidActor(
 		pub:                pub,
 		nc:                 nc,
 		agSetup:            agSetup,
+		secrets:            secrets,
 		llmPromptExecInbox: msg.T("pane", name, "llm_prompt_execution", "inbox"),
 		registeredPanes:    make(map[string]string),
 		contacts:           contacts,
@@ -258,9 +274,15 @@ func NewHumanoidActor(
 		pendingApprovals:   make(map[string]*pendingApproval),
 	}
 
-	// Read email governance mode from contact config.
-	if emailCC, ok := contacts["email"]; ok && emailCC.EmailConfig != nil {
-		h.emailGovernance = emailCC.EmailConfig.Governance
+	// Read email governance mode from contact config. Both spellings are
+	// honoured: `rysh skill scaffold` (and every other channel) writes the
+	// top-level `governance:` key, while older hand-written skill files nest
+	// it under `config.governance`. Reading only the nested key silently
+	// downgraded every scaffolded `governance: human` email humanoid to ai
+	// (design 019 gap 6) — see emailGovernanceFrom for the restrictive-wins
+	// resolution.
+	if emailCC, ok := contacts["email"]; ok {
+		h.emailGovernance = emailGovernanceFrom(emailCC)
 	}
 	if h.emailGovernance == "" {
 		h.emailGovernance = "ai" // default
@@ -321,10 +343,33 @@ func NewHumanoidActor(
 	return h
 }
 
+// emailGovernanceFrom resolves the email channel's governance mode from its
+// contact block. The top-level `governance:` key (what the scaffold writes,
+// and what every other channel reads) and the nested `config.governance` key
+// (the historical email-only spelling) are BOTH honoured; when they disagree,
+// the restrictive mode wins — a governance key saying "human" anywhere must
+// never be silently downgraded to ai.
+func emailGovernanceFrom(cc msg.ChannelConfig) string {
+	nested := ""
+	if cc.EmailConfig != nil {
+		nested = cc.EmailConfig.Governance
+	}
+	if cc.Governance == "human" || nested == "human" {
+		return "human"
+	}
+	if cc.Governance != "" {
+		return cc.Governance
+	}
+	return nested
+}
+
 // govMode returns the ai|human governance mode for a channel. slack/email/
 // whatsapp keep their dedicated fields (tool-based flows); every other channel
-// reads the generic map, defaulting to "ai".
+// reads the generic map, defaulting to "ai". Safe to call from any goroutine
+// (govMu) — the per-call send-tool gates rely on that.
 func (h *HumanoidActor) govMode(channelType string) string {
+	h.govMu.RLock()
+	defer h.govMu.RUnlock()
 	switch channelType {
 	case "slack":
 		return h.slackGovernance
@@ -351,6 +396,7 @@ func (h *HumanoidActor) govMode(channelType string) string {
 // already validated mode ∈ {"ai","human"}.
 func (h *HumanoidActor) applyGovernanceMode(mode string) []string {
 	var switched []string
+	h.govMu.Lock()
 	if _, ok := h.contacts["email"]; ok {
 		h.emailGovernance = mode
 		switched = append(switched, "email")
@@ -372,6 +418,21 @@ func (h *HumanoidActor) applyGovernanceMode(mode string) []string {
 		}
 		h.governance[channelType] = mode
 		switched = append(switched, channelType)
+	}
+	h.govMu.Unlock()
+	// Mirror the flip into the actor's own contact map so anything that later
+	// re-reads contacts (spawn-time toolset selection on a respawn, status
+	// surfaces) sees the live mode, not the spawn-time one. The registry keeps
+	// its own copy of this map and is told separately (see the
+	// MsgHumanoidSetGovernance handler) so the flip reaches the KV record.
+	for channelType, cc := range h.contacts {
+		cc.Governance = mode
+		if cc.EmailConfig != nil {
+			ec := *cc.EmailConfig
+			ec.Governance = mode
+			cc.EmailConfig = &ec
+		}
+		h.contacts[channelType] = cc
 	}
 	sort.Strings(switched)
 	return switched
@@ -668,6 +729,19 @@ func (h *HumanoidActor) Receive(ctx actor.Context) {
 		adapter.SetReplyMode(m.Mode)
 		slog.Info("humanoid: reply mode changed", "name", h.name,
 			"channel", m.ChannelType, "mode", m.Mode)
+		// Mirror + persist, same as governance flips: adapters are rebuilt
+		// from the contact config on restart, so an unpersisted reply-mode
+		// flip would silently revert (design 019 gap 2).
+		if cc, ok := h.contacts[m.ChannelType]; ok {
+			cc.ReplyMode = m.Mode
+			h.contacts[m.ChannelType] = cc
+		}
+		if h.pub != nil {
+			_ = h.pub.Send(msg.T("humanoid", "registry", "inbox"),
+				&msg.MsgHumanoidReplyModeChanged{
+					Name: h.name, ChannelType: m.ChannelType, Mode: m.Mode,
+				})
+		}
 
 	case *msg.MsgHumanoidSetGovernance:
 		// Switch the governance FLAG for whichever channel(s) the humanoid has.
@@ -694,6 +768,15 @@ func (h *HumanoidActor) Receive(ctx actor.Context) {
 				"mode", m.Mode, "channels", switched)
 			h.streamToPane(fmt.Sprintf("\n[governance] mode changed to: %s (%s)\n",
 				m.Mode, strings.Join(switched, ", ")))
+			// Persist the flip. The registry owns the KV record that respawns
+			// humanoids after a restart, and it round-trips the CONTACTS it
+			// holds — without this notification a runtime flip silently
+			// reverts to the skill-file mode on the next restart (design 019
+			// gap 2).
+			if h.pub != nil {
+				_ = h.pub.Send(msg.T("humanoid", "registry", "inbox"),
+					&msg.MsgHumanoidGovernanceChanged{Name: h.name, Mode: m.Mode})
+			}
 		}
 
 	case *msg.MsgHumanoidSetProvider:
@@ -2149,30 +2232,6 @@ func providerFamily(name string) string {
 	}
 }
 
-// providerKeyFromEnv resolves the conventional API-key env var for a provider
-// family. Used only when a humanoid overrides the config provider — the
-// config's own key belongs to the config's provider and must not leak into a
-// different provider's requests.
-func providerKeyFromEnv(family string) string {
-	switch family {
-	case "openai":
-		return os.Getenv("OPENAI_API_KEY")
-	case "ollama":
-		return os.Getenv("OLLAMA_API_KEY") // optional; local ollama needs none
-	case "gemini":
-		// GEMINI_API_KEY is the documented variable; GOOGLE_API_KEY is accepted
-		// as the fallback (same order as config.applyEnvOverrides).
-		if v := os.Getenv("GEMINI_API_KEY"); v != "" {
-			return v
-		}
-		return os.Getenv("GOOGLE_API_KEY")
-	case "claude-cli":
-		return "" // the `claude` binary carries its own login; no key
-	default:
-		return os.Getenv("ANTHROPIC_API_KEY")
-	}
-}
-
 // setupForProvider returns the agentic Setup this humanoid's LLM executor is
 // built from (design 006 MP2). With no frontmatter provider — or one in the
 // same family as the config provider — it returns the shared Setup unchanged,
@@ -2180,8 +2239,9 @@ func providerKeyFromEnv(family string) string {
 // copy of the Setup (tool registry, scopes, prompts, SecretNAT, … all shared)
 // whose Provider is constructed for the selected name via the existing
 // provider.NewAgenticProvider seam. Model/base-URL are left to the selected
-// provider's own defaults and the key comes from its conventional env var, so
-// the config provider's model/key never leak into the override's requests.
+// provider's own defaults and the key is resolved for the selected family alone
+// — through the workspace's ##secret store, then the environment — so the
+// config provider's model/key never leak into the override's requests.
 // The frontmatter selection is explicit, so it deliberately bypasses the
 // session-wide ##llm default wrapper (frontmatter > config precedence).
 func (h *HumanoidActor) setupForProvider() *agentic.Setup {
@@ -2195,16 +2255,26 @@ func (h *HumanoidActor) setupForProvider() *agentic.Setup {
 	if family == providerFamily(h.cfg.ProviderName) && strings.TrimSpace(h.providerModel) == "" {
 		return h.agSetup
 	}
-	cfg := h.cfg
-	cfg.ProviderName = family
-	cfg.DefaultModel = strings.TrimSpace(h.providerModel) // "" = provider's own default
-	cfg.APIURL = ""                                       // selected provider's own default endpoint
-	cfg.APIKey = providerKeyFromEnv(family)
+	cfg := h.providerOverrideConfig(family)
 	setup := *h.agSetup
 	setup.Provider = provider.NewAgenticProvider(cfg)
 	slog.Info("humanoid: provider selection applied", "name", h.name,
 		"provider", family, "model", cfg.DefaultModel, "config_provider", h.cfg.ProviderName)
 	return &setup
+}
+
+// providerOverrideConfig is the config a humanoid's `provider:` selection is
+// constructed from. Split out from setupForProvider for the same reason the
+// pane's is (pane_provider.go): the resolved key cannot be read back off a
+// constructed provider, and which key lands here is the part worth pinning.
+func (h *HumanoidActor) providerOverrideConfig(family string) config.Config {
+	cfg := h.cfg
+	cfg.ProviderName = family
+	cfg.DefaultModel = strings.TrimSpace(h.providerModel) // "" = provider's own default
+	cfg.APIURL = ""                                       // selected provider's own default endpoint
+	// A humanoid belongs to no tab, so its keys resolve at the workspace scope.
+	cfg.APIKey = h.secrets.providerAPIKey("", family)
+	return cfg
 }
 
 // buildHumanGovernedPrompt wraps a user instruction with the last inbound
@@ -2223,8 +2293,19 @@ func (h *HumanoidActor) buildHumanGovernedPrompt(userInstruction string) string 
 	// previous email_draft call. Re-wrapping confuses it into thinking this
 	// is a new session.
 	if isSendCommand {
+		// THE approval (mirrors buildSlackGovernedPrompt): the owner's "send"
+		// flips the newest pending email draft to approved — email_send
+		// refuses anything else under human governance. The prompt below only
+		// tells the model what to do next; it is not what authorises the send.
+		approvedID, ok := h.drafts.ApproveLatest("email")
+		if !ok {
+			return "The human said: " + userInstruction + ", but there is no pending email draft to send. " +
+				"Tell them there is nothing awaiting approval, and do not call email_send."
+		}
+		slog.Info("humanoid: owner approved email draft",
+			"name", h.name, "draft", approvedID)
 		return "The human says: " + userInstruction + ". " +
-			"Now call email_send with the draft_id from the email_draft you created earlier in this conversation."
+			"They have approved draft " + approvedID + ". Now call email_send with draft_id=" + approvedID + "."
 	}
 
 	// First-time instruction: inject the context of the email to act on. The UI's
@@ -2251,8 +2332,18 @@ func (h *HumanoidActor) buildWhatsAppGovernedPrompt(userInstruction string) stri
 	isSendCommand := lower == "send" || lower == "yes" || lower == "confirm" ||
 		lower == "send it" || lower == "go ahead" || lower == "ok" || lower == "do it"
 	if isSendCommand {
+		// THE approval (mirrors buildSlackGovernedPrompt): the owner's "send"
+		// flips the newest pending WhatsApp draft to approved — whatsapp_send
+		// refuses anything else under human governance.
+		approvedID, ok := h.drafts.ApproveLatest("whatsapp")
+		if !ok {
+			return "The human said: " + userInstruction + ", but there is no pending WhatsApp draft to send. " +
+				"Tell them there is nothing awaiting approval, and do not call whatsapp_send."
+		}
+		slog.Info("humanoid: owner approved whatsapp draft",
+			"name", h.name, "draft", approvedID)
 		return "The human says: " + userInstruction + ". " +
-			"Now call whatsapp_send with the draft_id from the whatsapp_draft you created earlier in this conversation."
+			"They have approved draft " + approvedID + ". Now call whatsapp_send with draft_id=" + approvedID + "."
 	}
 	// Prefer the message the desktop UI currently has open (focus) over the most
 	// recent inbound, so "reply to this" acts on the selected message.
@@ -2306,7 +2397,19 @@ func (h *HumanoidActor) buildInboundWhatsAppPrompt(userInstruction string) strin
 // captured value so `##humanoid governance <name> ai|human` takes effect on the
 // very next tool call.
 func (h *HumanoidActor) slackHumanGoverned() bool {
-	return h.slackGovernance == "human"
+	return h.govMode("slack") == "human"
+}
+
+// emailHumanGoverned / whatsappHumanGoverned are the email and WhatsApp
+// analogues of slackHumanGoverned: live per-call gates for email_send and
+// whatsapp_send (+ whatsapp_send_template). They run on tool-execution
+// goroutines, hence govMode's lock.
+func (h *HumanoidActor) emailHumanGoverned() bool {
+	return h.govMode("email") == "human"
+}
+
+func (h *HumanoidActor) whatsappHumanGoverned() bool {
+	return h.govMode("whatsapp") == "human"
 }
 
 func (h *HumanoidActor) buildSlackGovernedPrompt(userInstruction string) string {
@@ -2318,7 +2421,7 @@ func (h *HumanoidActor) buildSlackGovernedPrompt(userInstruction string) string 
 		// the draft from pending to approved — slack_send refuses anything
 		// else while human governance is on. The prompt below only tells the
 		// model what to do next; it is not what authorises the send.
-		approvedID, ok := h.drafts.ApproveLatest()
+		approvedID, ok := h.drafts.ApproveLatest("slack")
 		if !ok {
 			return "The human said: " + userInstruction + ", but there is no pending draft to send. " +
 				"Tell them there is nothing awaiting approval, and do not call slack_send."
@@ -2994,7 +3097,7 @@ func (h *HumanoidActor) handleEmailCompose(m *msg.MsgHumanoidEmailCompose) {
 		// Stage-and-approve so a manual send leaves the same audit trail as an
 		// approved AI draft (best-effort; drafts is nil for ai-governed humanoids).
 		if drafts != nil {
-			id := drafts.Create(to, subj, body, inReplyTo)
+			id := drafts.Create("email", to, subj, body, inReplyTo)
 			drafts.Approve(id)
 			defer drafts.Delete(id)
 		}
@@ -3089,21 +3192,4 @@ func truncateStr(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
-}
-
-// channelStatuses returns the status of all configured channels.
-func (h *HumanoidActor) channelStatuses() []msg.ChannelStatus {
-	statuses := make([]msg.ChannelStatus, 0, len(h.contacts))
-	for channelType := range h.contacts {
-		if adapter, ok := h.adapters[channelType]; ok {
-			statuses = append(statuses, adapter.Status())
-		} else {
-			statuses = append(statuses, msg.ChannelStatus{
-				Type:      channelType,
-				Connected: false,
-				Details:   "not started",
-			})
-		}
-	}
-	return statuses
 }

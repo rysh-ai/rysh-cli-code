@@ -631,148 +631,11 @@ func (s *Setup) agentScopeResolver() func(string) *tools.ToolRegistry {
 	}
 }
 
-// CreateHumanoidLLMWithEmailTools creates a LLMPromptExecutionActor for a humanoid
-// in human-governed email mode. It includes all standard agent tools plus email-specific
-// tools (email_list, email_read, email_draft, email_send, email_attach).
-func (s *Setup) CreateHumanoidLLMWithEmailTools(
-	name string,
-	cfg config.Config,
-	pub *msg.NATSPublisher,
-	nc *nats.Conn,
-	systemPrompt string,
-	chatOutputPaneID string,
-	adapter *channels.EmailAdapter,
-	drafts *channels.DraftStore,
-) *LLMPromptExecutionActor {
-	// Live child of the shared registry (see CreateLLMPromptExecutionActor).
-	perRegistry := tools.NewChildRegistry(s.ToolRegistry)
-	// Standard per-agent NATS tools.
-	perRegistry.Register("pane_inspect", tools.NewPaneInspectTool(nc, cfg.SessionName))
-	perRegistry.Register("pane_send", tools.NewPaneSendTool(nc, cfg.SessionName))
-	codecs := pub.Codecs()
-	perRegistry.Register("agents_list", tools.NewAgentsListTool(nc, cfg.SessionName, codecs))
-	perRegistry.Register("session_history", tools.NewSessionHistoryTool(nc, cfg.SessionName))
-	if js, err := nc.JetStream(); err == nil {
-		perRegistry.Register("context", tools.NewContextTool(js))
-	}
-	// rysh_command (design 008 RA3) — see CreateAgentLLMPromptExecutionActor.
-	perRegistry.Register("rysh_command", tools.NewRyshCommandTool(nc, cfg.SessionName, chatOutputPaneID))
-	// Email-specific tools.
-	perRegistry.Register("email_list", tools.NewEmailListTool(adapter))
-	perRegistry.Register("email_read", tools.NewEmailReadTool(adapter))
-	perRegistry.Register("email_draft", tools.NewEmailDraftTool(drafts))
-	perRegistry.Register("email_send", tools.NewEmailSendTool(adapter, drafts))
-	perRegistry.Register("email_attach", tools.NewEmailAttachTool(drafts))
-	perRegistry.Register("list_tools", tools.NewListToolsTool(perRegistry))
-
-	maxIterations := s.AgenticCfg.MaxIterations
-	if maxIterations <= 0 {
-		maxIterations = 50
-	}
-
-	// Enhance system prompt with email governance instructions.
-	sp := systemPrompt
-	if sp == "" {
-		sp = s.SystemPrompt
-	}
-	sp += "\n\n" + s.Prompts.emailGovernance()
-
-	llm := sharedagentic.NewLLMPromptExecutionActor(
-		name,
-		maxIterations,
-		pub,
-		nc,
-		s.Provider,
-		perRegistry,
-		sp,
-		"",
-		chatOutputPaneID,
-		nil, // humanoids don't have pane KV store
-	)
-	llm.SetAgentName(name) // attribute usage to this humanoid (design 003 "by agent")
-	if s.Metrics != nil {
-		llm.SetMetricsSink(s.Metrics)
-	}
-	llm.SetScopeResolver(s.agentScopeResolver())
-	// Grounding: humanoids get the ADVISORY protocol (prompt mode).
-	llm.SetGroundingMode(s.agentGroundingMode())
-	// SecretNAT / ReSet: humanoids get their own isolated translation session.
-	if s.SecretNAT != nil {
-		llm.SetSecretNAT(s.SecretNAT.Session(name))
-	}
-	return llm
-}
-
-// CreateHumanoidLLMWithWhatsAppTools creates a LLMPromptExecutionActor for a
-// humanoid in human-governed WhatsApp mode. It includes all standard agent tools
-// plus WhatsApp-specific tools (whatsapp_list, whatsapp_read, whatsapp_draft,
-// whatsapp_send). Mirrors CreateHumanoidLLMWithEmailTools.
-func (s *Setup) CreateHumanoidLLMWithWhatsAppTools(
-	name string,
-	cfg config.Config,
-	pub *msg.NATSPublisher,
-	nc *nats.Conn,
-	systemPrompt string,
-	chatOutputPaneID string,
-	adapter *channels.WhatsAppAdapter,
-	drafts *channels.DraftStore,
-) *LLMPromptExecutionActor {
-	perRegistry := tools.NewChildRegistry(s.ToolRegistry)
-	// Standard per-agent NATS tools.
-	perRegistry.Register("pane_inspect", tools.NewPaneInspectTool(nc, cfg.SessionName))
-	perRegistry.Register("pane_send", tools.NewPaneSendTool(nc, cfg.SessionName))
-	codecs := pub.Codecs()
-	perRegistry.Register("agents_list", tools.NewAgentsListTool(nc, cfg.SessionName, codecs))
-	perRegistry.Register("session_history", tools.NewSessionHistoryTool(nc, cfg.SessionName))
-	if js, err := nc.JetStream(); err == nil {
-		perRegistry.Register("context", tools.NewContextTool(js))
-	}
-	// rysh_command (design 008 RA3) — see CreateAgentLLMPromptExecutionActor.
-	perRegistry.Register("rysh_command", tools.NewRyshCommandTool(nc, cfg.SessionName, chatOutputPaneID))
-	// WhatsApp-specific tools.
-	perRegistry.Register("whatsapp_list", tools.NewWhatsAppListTool(adapter))
-	perRegistry.Register("whatsapp_read", tools.NewWhatsAppReadTool(adapter))
-	perRegistry.Register("whatsapp_draft", tools.NewWhatsAppDraftTool(drafts))
-	perRegistry.Register("whatsapp_send", tools.NewWhatsAppSendTool(adapter, drafts))
-	perRegistry.Register("whatsapp_send_template", tools.NewWhatsAppSendTemplateTool(adapter))
-	perRegistry.Register("list_tools", tools.NewListToolsTool(perRegistry))
-
-	maxIterations := s.AgenticCfg.MaxIterations
-	if maxIterations <= 0 {
-		maxIterations = 50
-	}
-
-	sp := systemPrompt
-	if sp == "" {
-		sp = s.SystemPrompt
-	}
-	sp += "\n\n" + s.Prompts.whatsappGovernance()
-
-	llm := sharedagentic.NewLLMPromptExecutionActor(
-		name,
-		maxIterations,
-		pub,
-		nc,
-		s.Provider,
-		perRegistry,
-		sp,
-		"",
-		chatOutputPaneID,
-		nil, // humanoids don't have pane KV store
-	)
-	llm.SetAgentName(name) // attribute usage to this humanoid (design 003 "by agent")
-	if s.Metrics != nil {
-		llm.SetMetricsSink(s.Metrics)
-	}
-	llm.SetScopeResolver(s.agentScopeResolver())
-	// Grounding: humanoids get the ADVISORY protocol (prompt mode).
-	llm.SetGroundingMode(s.agentGroundingMode())
-	// SecretNAT / ReSet: humanoids get their own isolated translation session.
-	if s.SecretNAT != nil {
-		llm.SetSecretNAT(s.SecretNAT.Session(name))
-	}
-	return llm
-}
+// The former per-channel constructors (CreateHumanoidLLMWithEmailTools /
+// WhatsAppTools / SlackTools) are gone: they were dead code, and the email/
+// whatsapp variants built UNGATED send tools — exactly the regression the
+// shared requireApprovedDraft gate exists to prevent. Every humanoid toolset
+// now goes through CreateHumanoidLLMWithChannelTools below.
 
 // HumanoidChannelTools declares which channel toolsets a humanoid should get.
 //
@@ -787,10 +650,15 @@ type HumanoidChannelTools struct {
 	Slack    *channels.SlackAdapter
 	Drafts   *channels.DraftStore
 
-	// SlackHumanGoverned gates slack_send: when it reports true, only an
-	// owner-approved draft may be posted. Read per call so a runtime
-	// `##humanoid governance` switch takes effect immediately.
-	SlackHumanGoverned func() bool
+	// SlackHumanGoverned / EmailHumanGoverned / WhatsAppHumanGoverned gate
+	// slack_send, email_send and whatsapp_send (and whatsapp_send_template):
+	// when one reports true, only an owner-approved draft may leave on that
+	// channel. Read per call so a runtime `##humanoid governance` switch
+	// takes effect immediately. All three share one gate implementation —
+	// requireApprovedDraft in internal/tools.
+	SlackHumanGoverned    func() bool
+	EmailHumanGoverned    func() bool
+	WhatsAppHumanGoverned func() bool
 }
 
 // CreateHumanoidLLMWithChannelTools builds a humanoid's LLM actor with every
@@ -823,15 +691,15 @@ func (s *Setup) CreateHumanoidLLMWithChannelTools(
 		perRegistry.Register("whatsapp_list", tools.NewWhatsAppListTool(ct.WhatsApp))
 		perRegistry.Register("whatsapp_read", tools.NewWhatsAppReadTool(ct.WhatsApp))
 		perRegistry.Register("whatsapp_draft", tools.NewWhatsAppDraftTool(ct.Drafts))
-		perRegistry.Register("whatsapp_send", tools.NewWhatsAppSendTool(ct.WhatsApp, ct.Drafts))
-		perRegistry.Register("whatsapp_send_template", tools.NewWhatsAppSendTemplateTool(ct.WhatsApp))
+		perRegistry.Register("whatsapp_send", tools.NewWhatsAppSendTool(ct.WhatsApp, ct.Drafts, ct.WhatsAppHumanGoverned))
+		perRegistry.Register("whatsapp_send_template", tools.NewWhatsAppSendTemplateTool(ct.WhatsApp, ct.WhatsAppHumanGoverned))
 		sp += "\n\n" + s.Prompts.whatsappGovernance()
 	}
 	if ct.Email != nil {
 		perRegistry.Register("email_list", tools.NewEmailListTool(ct.Email))
 		perRegistry.Register("email_read", tools.NewEmailReadTool(ct.Email))
 		perRegistry.Register("email_draft", tools.NewEmailDraftTool(ct.Drafts))
-		perRegistry.Register("email_send", tools.NewEmailSendTool(ct.Email, ct.Drafts))
+		perRegistry.Register("email_send", tools.NewEmailSendTool(ct.Email, ct.Drafts, ct.EmailHumanGoverned))
 		perRegistry.Register("email_attach", tools.NewEmailAttachTool(ct.Drafts))
 		sp += "\n\n" + s.Prompts.emailGovernance()
 	}
@@ -866,71 +734,6 @@ func (s *Setup) CreateHumanoidLLMWithChannelTools(
 		llm.SetMetricsSink(s.Metrics)
 	}
 	llm.SetScopeResolver(s.agentScopeResolver())
-	llm.SetGroundingMode(s.agentGroundingMode())
-	return llm
-}
-
-// CreateHumanoidLLMWithSlackTools creates a LLMPromptExecutionActor for a
-// humanoid in human-governed Slack mode. It includes all standard agent tools
-// plus Slack-specific tools (slack_list, slack_read, slack_draft, slack_send).
-// Mirrors CreateHumanoidLLMWithWhatsAppTools.
-func (s *Setup) CreateHumanoidLLMWithSlackTools(
-	name string,
-	cfg config.Config,
-	pub *msg.NATSPublisher,
-	nc *nats.Conn,
-	systemPrompt string,
-	chatOutputPaneID string,
-	adapter *channels.SlackAdapter,
-	drafts *channels.DraftStore,
-	humanGoverned func() bool,
-) *LLMPromptExecutionActor {
-	perRegistry := tools.NewChildRegistry(s.ToolRegistry)
-	// Standard per-agent NATS tools.
-	perRegistry.Register("pane_inspect", tools.NewPaneInspectTool(nc, cfg.SessionName))
-	perRegistry.Register("pane_send", tools.NewPaneSendTool(nc, cfg.SessionName))
-	codecs := pub.Codecs()
-	perRegistry.Register("agents_list", tools.NewAgentsListTool(nc, cfg.SessionName, codecs))
-	perRegistry.Register("session_history", tools.NewSessionHistoryTool(nc, cfg.SessionName))
-	if js, err := nc.JetStream(); err == nil {
-		perRegistry.Register("context", tools.NewContextTool(js))
-	}
-	// Slack-specific tools.
-	perRegistry.Register("slack_list", tools.NewSlackListTool(adapter))
-	perRegistry.Register("slack_read", tools.NewSlackReadTool(adapter))
-	perRegistry.Register("slack_draft", tools.NewSlackDraftTool(drafts))
-	perRegistry.Register("slack_send", tools.NewSlackSendTool(adapter, drafts, humanGoverned))
-	perRegistry.Register("list_tools", tools.NewListToolsTool(perRegistry))
-
-	maxIterations := s.AgenticCfg.MaxIterations
-	if maxIterations <= 0 {
-		maxIterations = 50
-	}
-
-	sp := systemPrompt
-	if sp == "" {
-		sp = s.SystemPrompt
-	}
-	sp += "\n\n" + s.Prompts.slackGovernance()
-
-	llm := sharedagentic.NewLLMPromptExecutionActor(
-		name,
-		maxIterations,
-		pub,
-		nc,
-		s.Provider,
-		perRegistry,
-		sp,
-		"",
-		chatOutputPaneID,
-		nil, // humanoids don't have pane KV store
-	)
-	llm.SetAgentName(name) // attribute usage to this humanoid (design 003 "by agent")
-	if s.Metrics != nil {
-		llm.SetMetricsSink(s.Metrics)
-	}
-	llm.SetScopeResolver(s.agentScopeResolver())
-	// Grounding: humanoids get the ADVISORY protocol (prompt mode).
 	llm.SetGroundingMode(s.agentGroundingMode())
 	return llm
 }

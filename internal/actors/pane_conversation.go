@@ -297,6 +297,8 @@ func snapshotToConvMsg(s domain.ConversationMessageSnapshot) msg.ConversationMes
 		SubjectToShare:   s.SubjectToShare,
 		Role:             s.Role,
 		Streaming:        s.Streaming,
+		ProviderName:     s.ProviderName,
+		Model:            s.Model,
 	}
 }
 
@@ -393,6 +395,8 @@ func convertConvMsgs(msgs []*msg.ConversationMessage) []domain.ConversationMessa
 			SubjectToShare:   m.SubjectToShare,
 			Role:             m.Role,
 			Streaming:        m.Streaming,
+			ProviderName:     m.ProviderName,
+			Model:            m.Model,
 		}
 	}
 	return out

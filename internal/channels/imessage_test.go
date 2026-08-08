@@ -607,15 +607,26 @@ func TestIMessagePollLoop(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	// Poll queries must be parameterized by the tracked lastRowID.
-	mu.Lock()
-	if len(pollQueries) == 0 {
+	// Poll queries must be parameterized by the tracked lastRowID. lastRowID
+	// flipping to 103 only proves the rows were PROCESSED — the next poll
+	// (the one that queries "> 103") fires on its own tick, so wait for it
+	// the same way we waited for the row ID, or this races under load.
+	var firstQ, lastQ string
+	for {
+		mu.Lock()
+		if len(pollQueries) > 0 {
+			firstQ = pollQueries[0]
+			lastQ = pollQueries[len(pollQueries)-1]
+		}
 		mu.Unlock()
-		t.Fatal("no poll queries recorded")
+		if strings.Contains(lastQ, "m.ROWID > 103") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no poll query advanced past ROWID 103 before deadline (last: %q)", lastQ)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	firstQ := pollQueries[0]
-	lastQ := pollQueries[len(pollQueries)-1]
-	mu.Unlock()
 	if !strings.Contains(firstQ, "m.ROWID > 100") {
 		t.Errorf("first poll query should start after ROWID 100: %s", firstQ)
 	}

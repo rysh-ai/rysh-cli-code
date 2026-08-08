@@ -44,8 +44,16 @@ func TestSeedListAddGet(t *testing.T) {
 	if !spec.Executable() {
 		t.Errorf("anthropic model should be executable")
 	}
-	if got, _ := s.Get("openai", "gpt-5.1"); got.Executable() {
-		t.Errorf("openai model should not be executable")
+	// openai and gemini became runnable when the executor learned their
+	// dialects; grok never did.
+	if got, _ := s.Get("openai", "gpt-4o"); !got.Executable() {
+		t.Errorf("openai models are runnable — rysh speaks the Responses API")
+	}
+	if got, _ := s.Get("gemini", "gemini-2.5-flash"); !got.Executable() {
+		t.Errorf("gemini models are runnable via the OpenAI-compat surface")
+	}
+	if got, _ := s.Get("grok", "grok-4"); got.Executable() {
+		t.Errorf("grok has no rysh executor — it must stay declaration-only")
 	}
 
 	// Seeding again must not duplicate or overwrite.

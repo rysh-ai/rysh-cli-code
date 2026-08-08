@@ -60,6 +60,7 @@ func (w *WorkspaceActor) cmdWorkspaceCwd(out *strings.Builder, arg string) {
 	info, err := os.Stat(dir)
 	if err != nil || !info.IsDir() {
 		fmt.Fprintf(out, "\n[rysh] not a directory: %s\n", dir)
+		w.failRysh("not a directory: %s", dir)
 		fmt.Fprintf(out, "  usage: ##workspace cwd <path>\n")
 		return
 	}

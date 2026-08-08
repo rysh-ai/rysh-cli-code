@@ -125,10 +125,8 @@ func (t *AgentsListTool) Execute(ctx context.Context, params json.RawMessage) (*
 // collectPanes extracts all panes from a tab snapshot.
 func collectPanes(tab domain.TabSnapshot) []domain.PaneSnapshot {
 	var panes []domain.PaneSnapshot
-	for _, lane := range tab.Lanes {
-		for _, group := range lane.PaneGroups {
-			panes = append(panes, group.Panes...)
-		}
+	for p := range domain.PanesInTab(&tab) {
+		panes = append(panes, *p)
 	}
 	return panes
 }

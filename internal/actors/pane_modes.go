@@ -133,7 +133,7 @@ func (p *PaneActor) handleEnableMode(mode, webProfile, webURL string, humanoid b
 			return
 		}
 		_ = p.pub.SendPaneRyshOutput(p.id,
-			fmt.Sprintf("[rysh] error: invalid mode %q (valid: shell, prompt, rysh, chat, external, web)\n", mode))
+			fmt.Sprintf("[rysh] error: invalid mode %q (valid: shell, prompt, rysh, chat, external, email, web)\n", mode))
 		return
 	}
 
@@ -196,7 +196,7 @@ func (p *PaneActor) handleDisableMode(mode string, humanoid bool) {
 	dynamic := humanoid || p.humanoidModes[mode]
 	if !validPaneModes[mode] && !dynamic {
 		_ = p.pub.SendPaneRyshOutput(p.id,
-			fmt.Sprintf("[rysh] error: invalid mode %q (valid: prompt, rysh, chat, external, web)\n", mode))
+			fmt.Sprintf("[rysh] error: invalid mode %q (valid: prompt, rysh, chat, external, email, web)\n", mode))
 		return
 	}
 

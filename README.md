@@ -13,21 +13,64 @@ This repository holds the CLI itself. It depends on
 Makefile, the Go workspace, and CI, and wires this module to a local checkout of
 the shared one.
 
+## Secrets stay on your machine
+
+<!-- HOSTING DECISION PENDING — DO NOT replace this block with an <img> until a URL is settled.
+     The GIF exists and is committed in the private monorepo at
+       marketing/assets/videos/secretnat-readme-loop.gif
+     but this README is injected into a PUBLIC repo by scripts/export-oss.sh, and that export
+     copies prose only — it ships no binary assets. So a relative path cannot resolve here, and
+     no public URL for this asset exists yet. rysh.ai already serves ~111 tutorial videos under
+     /video-tutorials-assets/, so the hosting mechanism exists; using it needs a deploy, which is
+     a founder gate. Substituting a guessed URL would render as a broken image on github.com,
+     which is worse than this block. See new_roadmap/tracks/fleet/epic01-launch-readiness.md. -->
+
+SecretNAT is on by default. Secrets are substituted with tokens in the request body
+before it leaves the machine, and a response carrying a live credential in plaintext
+is reported into the pane. Responses are not rewritten — by design.
+
+The mapping is reversible locally, so `##snat get <token>` hands you back the real
+value in your own pane, and the model only ever saw the token.
+
 ## Install
+
+Two builds exist and they are **not the same binary**:
+
+| | this repository | the prebuilt distribution |
+| --- | --- | --- |
+| binary name | `rysh` | `ry` |
+| licence | Apache-2.0 | proprietary |
+| how you get it | `go install`, below | Homebrew / curl, below |
+
+**The open-source build, from this repository:**
 
 ```sh
 go install github.com/rysh-ai/rysh-cli-code/cmd/rysh@latest
 ```
 
-The binary lands in `$(go env GOPATH)/bin` as `rysh`. To build from source
-instead:
+The binary lands in `$(go env GOPATH)/bin` as `rysh`. Requires Go 1.25.3 or newer.
+To build from the parent repo instead:
 
 ```sh
 git clone --recursive https://github.com/rysh-ai/rysh-cli-parent
 cd rysh-cli-parent && make install
 ```
 
-Requires Go 1.25.3 or newer.
+**The prebuilt distribution.** These are faster, and on macOS and Linux they are
+the supported path — but they install `ry`, a **proprietary** build that is not
+this repository and tracks a different version. Use them if you want the packaged
+product; use `go install` above if you want the open-source one.
+
+```sh
+brew install rysh-ai/rysh/ry
+```
+
+```sh
+curl -fsSL https://packages.rysh.ai/install.sh | sh
+```
+
+APT and RPM repositories are served from the same host. The Windows binary is
+CLI-only — WSL2 is the supported path on Windows.
 
 ## First run
 

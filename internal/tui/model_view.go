@@ -133,6 +133,11 @@ func (m Model) renderWorkspaceStrip() string {
 }
 
 func (m Model) renderBody() string {
+	// The `##llm select` picker takes the whole body. See renderLLMPicker for
+	// why it replaces the pane grid instead of floating over it.
+	if m.mode == modeLLMPicker && m.llmPicker != nil {
+		return m.renderLLMPicker(max(20, m.width), max(10, m.height-6))
+	}
 	tab := m.activeTab()
 	if tab == nil {
 		return panelStyle.Width(max(20, m.width)).Height(max(10, m.height-6)).Render("no active tab, create one with ctrl+t n")
@@ -326,6 +331,9 @@ func (m Model) keyHelp() string {
 		}
 		return "mode: email | j/k move  tab switch column  enter open  r answer  c compose  g refresh  esc back  ctrl+o prefix"
 	}
+	if m.mode == modeLLMPicker {
+		return m.llmPickerFooter()
+	}
 	if m.mode == modeApproval {
 		desc := ""
 		if m.pendingApproval != nil {
@@ -442,16 +450,11 @@ var (
 	activePaneStyle = panelStyle.
 			BorderForeground(lipgloss.Color("44")).
 			Padding(0, 1)
-	metaStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	completionHintStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	completionSelStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Background(lipgloss.Color("62")).Bold(true)
-	selectionStyle       = lipgloss.NewStyle().Reverse(true)
-	promptAnchorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true) // cyan < anchor
-	rightMsgStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true) // cyan for right-aligned prompt echo
-	stackedTitleBarStyle = lipgloss.NewStyle().
-				Background(lipgloss.Color("238")).
-				Foreground(lipgloss.Color("252")).
-				Padding(0, 1)
+	metaStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	completionHintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	completionSelStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Background(lipgloss.Color("62")).Bold(true)
+	selectionStyle      = lipgloss.NewStyle().Reverse(true)
+	promptAnchorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true) // cyan < anchor
 
 	// Border colours — mid-tone accents that stay legible on both light and
 	// dark terminal backgrounds. The pane title text itself does NOT set a
@@ -818,25 +821,10 @@ func visibleRowWindow(rows []string, maxLines, scrollOffset int) []string {
 func buildDisplayLines(pane domain.PaneSnapshot, tab domain.TabSnapshot, textWidth, height int, inputValue string, scrollOffset int, inputMode string) []string {
 	metaText := paneMetaText(pane)
 
-	output := pane.Output
-	switch inputMode {
-	case "prompt":
-		// AI mode shows only the AI stream, never the merged shell/## output.
-		output = pane.AIOutput
-	case "rysh":
-		output = pane.RyshOutput
-	case "chat":
-		output = pane.ChatOutput
-	case "external", "email":
-		output = pane.ExternalOutput
-	case "shell", "web", "":
-		// handled by default output / web placeholder elsewhere
-	default:
-		// Dynamic per-humanoid mode: render that humanoid's own buffer.
-		if v, ok := pane.ModeOutputs[inputMode]; ok {
-			output = v
-		}
-	}
+	// One selector for every render path (see paneModeOutput) — these lines must
+	// match what the live view draws, or selection and copy would return text
+	// the user never saw.
+	output := paneModeOutput(pane, inputMode)
 	// Wrap to display rows first, then take the visible window, so scrollback is
 	// measured in on-screen rows and wrapped lines cannot overflow the pane.
 	maxLines := height - 4
@@ -1008,21 +996,18 @@ func (m Model) buildPanePanel(pane domain.PaneSnapshot, tab domain.TabSnapshot, 
 		return m.buildEmailPanel(pane, paneWidth, height)
 	}
 
-	output := pane.Output
 	// Switch output based on THIS pane's own input mode (not the active pane's),
-	// so a chat/prompt/rysh pane keeps showing its own buffer when another pane is
-	// focused instead of reverting to the merged shell/AI Output.
-	switch m.paneInputModeFor(pane.ID) {
-	case "prompt":
-		// AI mode shows only the AI stream, never the merged shell/## output.
-		output = pane.AIOutput
-	case "rysh":
-		output = pane.RyshOutput
-	case "chat":
-		output = pane.ChatOutput
-	case "external", "email":
-		output = pane.ExternalOutput
-	}
+	// so a chat/prompt/rysh pane keeps showing its own buffer when another pane
+	// is focused instead of reverting to the merged shell/AI Output.
+	//
+	// This used to be an inline switch that handled neither "web" nor dynamic
+	// per-humanoid modes, so those panes fell through to the merged shell buffer
+	// — a web pane in a terminal rendered shell output while claiming to be a
+	// browser. It now shares the one selector with the scroll math and the
+	// copy-line builder, which is where the "this surface is not painted here"
+	// placeholders live.
+	output := paneModeOutput(pane, m.paneInputModeFor(pane.ID))
+
 	// In pipeline mode, replace output only for the active pane.
 	if tab.PipelineActive && pane.ID == m.snapshot.ActivePaneID {
 		if liveOutput, ok := m.pipelineOutputs[tab.ID]; ok && liveOutput != "" {

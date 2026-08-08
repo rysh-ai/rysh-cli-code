@@ -144,6 +144,7 @@ func (w *WorkspaceActor) handleSnatSubcommand(out *strings.Builder, paneID strin
 	mgr := w.snatManager()
 	if mgr == nil {
 		fmt.Fprintf(out, "\n[snat] SecretNAT is unavailable (agentic setup not initialized)\n")
+		w.failRysh("SecretNAT is unavailable (agentic setup not initialized)")
 		return
 	}
 	sub := ""
@@ -169,7 +170,8 @@ func (w *WorkspaceActor) handleSnatSubcommand(out *strings.Builder, paneID strin
 
 	case "mode":
 		if len(parts) < 2 {
-			fmt.Fprintf(out, "\n[snat] usage: ##snat mode semantic|private   (current: %s)\n", mgr.Mode())
+			ryshWriter(out).UsageLineIn("snat", fmt.Sprintf("##snat mode semantic|private   (current: %s)", mgr.Mode()))
+			w.failRyshUsage("usage: %s", fmt.Sprintf("##snat mode semantic|private   (current: %s)", mgr.Mode()))
 			return
 		}
 		mode := secretnat.ParseMode(parts[1])
@@ -193,7 +195,8 @@ func (w *WorkspaceActor) handleSnatSubcommand(out *strings.Builder, paneID strin
 
 	case "get", "show", "reveal":
 		if len(parts) < 2 {
-			fmt.Fprintf(out, "\n[snat] usage: ##snat get <token>   (e.g. sk_live_SNAT000001 or ${NAME})\n")
+			ryshWriter(out).UsageLineIn("snat", "##snat get <token>   (e.g. sk_live_SNAT000001 or ${NAME})")
+			w.failRyshUsage("usage: %s", "##snat get <token>   (e.g. sk_live_SNAT000001 or ${NAME})")
 			return
 		}
 		token := parts[1]
@@ -244,7 +247,8 @@ func (w *WorkspaceActor) handleSnatSubcommand(out *strings.Builder, paneID strin
 		snatHelp(out)
 
 	default:
-		fmt.Fprintf(out, "\n[snat] unknown subcommand: %q\n", sub)
+		ryshWriter(out).UnknownIn("snat", sub)
+		w.failRyshUsage("unknown %s subcommand: %q", "snat", sub)
 		snatHelp(out)
 	}
 }

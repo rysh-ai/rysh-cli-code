@@ -718,7 +718,7 @@ func (c *imapClient) getUIDNext() (int, error) {
 			rest := line[idx+len("UIDNEXT"):]
 			rest = strings.TrimLeft(rest, " ")
 			var uid int
-			fmt.Sscanf(rest, "%d", &uid)
+			_, _ = fmt.Sscanf(rest, "%d", &uid)
 			if uid > 0 {
 				return uid, nil
 			}
@@ -1124,7 +1124,7 @@ func (e *EmailAdapter) ListEmails(count int, search string) ([]msg.EmailSummary,
 	if err := imap.command("LOGIN", fmt.Sprintf(`"%s" "%s"`, cfg.Username, cfg.Password)); err != nil {
 		return nil, fmt.Errorf("email: ListEmails login: %w", err)
 	}
-	defer imap.command("LOGOUT", "")
+	defer func() { _ = imap.command("LOGOUT", "") }()
 
 	if err := imap.command("SELECT", "INBOX"); err != nil {
 		return nil, fmt.Errorf("email: ListEmails select: %w", err)
@@ -1203,7 +1203,7 @@ func (e *EmailAdapter) ReadEmail(uid int) (*msg.EmailDetail, error) {
 	if err := imap.command("LOGIN", fmt.Sprintf(`"%s" "%s"`, cfg.Username, cfg.Password)); err != nil {
 		return nil, fmt.Errorf("email: ReadEmail login: %w", err)
 	}
-	defer imap.command("LOGOUT", "")
+	defer func() { _ = imap.command("LOGOUT", "") }()
 
 	if err := imap.command("SELECT", "INBOX"); err != nil {
 		return nil, fmt.Errorf("email: ReadEmail select: %w", err)

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/asynkron/protoactor-go/actor"
+
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 )
@@ -24,7 +26,7 @@ import (
 // includeConversations additionally populates the structured-conversation
 // buffers, consumed only by restoreConversations (KV restore); only the
 // 2s-gated persistence path passes true.
-func (p *PaneActor) buildSnapshot(includeContent, includeConversations bool) domain.PaneSnapshot {
+func (p *PaneActor) buildSnapshot(includeContent, includeConversations, includeHistories bool) domain.PaneSnapshot {
 	snap := domain.PaneSnapshot{
 		ID:                    p.id,
 		Title:                 p.title,
@@ -35,12 +37,17 @@ func (p *PaneActor) buildSnapshot(includeContent, includeConversations bool) dom
 		WebProfile:            p.webProfile,
 		WebTitle:              p.webTitle,
 		WebActivateSeq:        p.webActivateSeq,
+		PTYRows:               int(p.ptyRows),
+		PTYCols:               int(p.ptyCols),
+		SizeViewports:         len(p.sizeClaims),
 		Status:                p.status,
 		LastCommand:           p.lastCommand,
 		ProviderName:          p.providerName,
 		ProviderOverride:      p.providerOverride,
 		ProviderOverrideModel: p.providerOverrideModel,
 		GivenName:             p.givenName,
+		Program:               p.Program(),
+		Meta:                  p.metaCopy(),
 		ListeningToID:         p.listeningToID,
 		RegisteredHumanoid:    p.registeredHumanoid,
 		Sharing:               p.sharing,
@@ -63,15 +70,24 @@ func (p *PaneActor) buildSnapshot(includeContent, includeConversations bool) dom
 		snap.SnatEnabled = p.agSetup.SecretNAT.Session(p.id).Enabled()
 	}
 
-	// Command history is small (capped command lists) and the TUI needs it for
-	// arrow-key recall — there is no separate content stream for it — so keep it
-	// in layout-only snapshots. Only the heavy display buffers are gated.
-	snap.MergedHistory = p.mergedHistory
-	snap.ShellHistory = p.shellHistory
-	snap.PromptHistory = p.promptHistory
-	snap.RyshHistory = p.ryshHistory
-	snap.ChatHistory = p.chatHistory
-	snap.ExternalHistory = p.externalHistory
+	// Command history rides layout-only snapshots because the TUI's
+	// activeHistory() reads it straight out of them for arrow-key recall, and
+	// there is no separate content stream for it.
+	//
+	// It is NOT small, though this comment once said so. "Capped" means 1000
+	// ENTRIES (defaultShellHistorySize), not a byte budget, and every pane seeds
+	// the same shared session history file — so 50 panes each carried an
+	// identical 28.9 KB copy, 97.5% of a 29.9 KB layout-only pane snapshot,
+	// re-serialized on every cascade (F-7c). Callers that read no history at all
+	// pass includeHistories=false; see MsgGetPaneSnapshot.NoHistories.
+	if includeHistories {
+		snap.MergedHistory = p.mergedHistory
+		snap.ShellHistory = p.shellHistory
+		snap.PromptHistory = p.promptHistory
+		snap.RyshHistory = p.ryshHistory
+		snap.ChatHistory = p.chatHistory
+		snap.ExternalHistory = p.externalHistory
+	}
 
 	// Heavy display buffers — omitted for layout-only snapshots; the TUI streams
 	// this content directly per-pane and accumulates it locally.
@@ -155,6 +171,7 @@ func (p *PaneActor) buildSnapshot(includeContent, includeConversations bool) dom
 		// leaving the terminal obscured and in an inconsistent state.
 		snap.FullScreen = p.rawMode || p.cursorHidden
 		snap.MouseEnabled = p.vtermEmu.IsMouseEnabled()
+		snap.MouseProto, snap.MouseSGR = p.vtermEmu.MouseProtocol()
 		snap.AppCursorKeys = p.vtermEmu.IsAppCursorKeys()
 		// The VT screen is heavy and replaces wholesale; include it only when
 		// content is requested. The RawMode flag above stays in layout-only
@@ -297,6 +314,56 @@ func (p *PaneActor) History(mode string) []string {
 // KV persistence
 // ---------------------------------------------------------------------------
 
+// panePersistInterval is the safety-net cadence for the pane's debounced KV
+// state. It mirrors the workspace's cron-tick flush and exists for the same
+// reason: the PRIMARY flush is maybePersist on a snapshot request, and snapshot
+// requests only happen while a client (TUI / web) is polling. A DETACHED daemon
+// has no such heartbeat, so a pane's dirty state would sit unwritten until
+// shutdown — and be lost outright on SIGKILL (a crash, an OOM, or `rysh stop`
+// hitting its ~1s kill fallback on a wedged actor).
+//
+// One minute matches the workspace's bound. Panes start their tickers when they
+// start, so the fleet is naturally staggered rather than all rebuilding
+// snapshots on the same instant.
+const panePersistInterval = time.Minute
+
+// panePersistTickMsg is delivered to the PaneActor mailbox once per interval.
+// In-process only, like cronTickMsg — it is never published to NATS and needs
+// no codec registration.
+type panePersistTickMsg struct{}
+
+// startPersistTicker launches the safety-net ticker. Idempotent: a second call
+// stops the previous one first, so a restart cannot leak goroutines.
+func (p *PaneActor) startPersistTicker(ctx actor.Context) {
+	p.stopPersistTicker()
+	stop := make(chan struct{})
+	p.persistTickStop = stop
+	self := ctx.Self()
+	system := ctx.ActorSystem()
+	go func() {
+		t := time.NewTicker(panePersistInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				if self != nil && system != nil {
+					system.Root.Send(self, &panePersistTickMsg{})
+				}
+			}
+		}
+	}()
+}
+
+// stopPersistTicker halts the ticker goroutine (idempotent).
+func (p *PaneActor) stopPersistTicker() {
+	if p.persistTickStop != nil {
+		close(p.persistTickStop)
+		p.persistTickStop = nil
+	}
+}
+
 // maybePersist writes pane state to KV at most once per 2s. It builds the full
 // (conversation-bearing) snapshot itself, and only when it actually writes, so
 // the heavy conversation snapshotting happens ~once per 2s rather than on every
@@ -306,7 +373,7 @@ func (p *PaneActor) maybePersist() {
 		return
 	}
 	if p.kvDirty {
-		p.persistNow(p.buildSnapshot(true, true))
+		p.persistNow(p.buildSnapshot(true, true, true))
 	}
 	if p.kvBuffersDirty {
 		p.persistBuffers()
@@ -339,7 +406,7 @@ func (p *PaneActor) persistBuffers() {
 }
 
 func (p *PaneActor) flushKV() {
-	p.persistNow(p.buildSnapshot(true, true))
+	p.persistNow(p.buildSnapshot(true, true, true))
 	p.persistBuffers()
 }
 
@@ -387,6 +454,7 @@ func (p *PaneActor) RestoreState(snap domain.PaneSnapshot) {
 	p.status = snap.Status
 	p.lastCommand = snap.LastCommand
 	p.givenName = snap.GivenName
+	p.meta = snap.Meta
 	// `##pane provider` override: only the name/model pair is recorded here.
 	// The live provider is rebuilt in *actor.Started (installProviderOverride),
 	// after the holder exists but before the executor spawns.
@@ -449,4 +517,20 @@ func (p *PaneActor) SetTitle(title string) {
 // GivenName returns the user-assigned given-name for this pane.
 func (p *PaneActor) GivenName() string {
 	return p.givenName
+}
+
+// metaCopy returns a copy of the pane's metadata for a snapshot, or nil when
+// there is none. A copy because a snapshot travels to other goroutines (KV
+// persistence, the CLI, sharing) while the pane keeps mutating its own map on
+// the mailbox goroutine — handing out the live map would be a data race that
+// only shows up under -race on a busy session.
+func (p *PaneActor) metaCopy() map[string]string {
+	if len(p.meta) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(p.meta))
+	for k, v := range p.meta {
+		out[k] = v
+	}
+	return out
 }

@@ -1,9 +1,14 @@
 package actors
 
 import (
+	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rysh-ai/rysh-cli-code/internal/msg"
+	"github.com/rysh-ai/rysh-cli-code/internal/webauto"
 )
 
 // TestBuildConcatFileUsesRealGaps is the core of wall-clock-accurate playback:
@@ -114,5 +119,140 @@ func TestLastLines(t *testing.T) {
 	}
 	if got := lastLines("solo", 3); got != "solo" {
 		t.Errorf("lastLines short input = %q", got)
+	}
+}
+
+// TestRecorderKeepsLateFrames is the regression test for a recorder that threw
+// away work the browser had already done.
+//
+// Capture is drop-don't-queue, and a stall guard stops the recorder waiting on
+// a screenshot that takes more than a few intervals so a dead peer cannot wedge
+// the run. Giving up on the WAIT used to mean discarding the ANSWER: the frame
+// was matched against the single outstanding request id, which the guard had
+// already cleared. On a machine where every screenshot ran longer than the
+// guard's window — a loaded one, which is exactly when a long automation is
+// worth recording — every capture succeeded, every one arrived a moment late,
+// and the run reported "no frames captured".
+//
+// A late screenshot is a real picture of the page at the moment it was asked
+// for. It is kept, and stamped with its REQUEST time so it lands at the right
+// point in the video rather than bunched against whatever came back next.
+func TestRecorderKeepsLateFrames(t *testing.T) {
+	r := newFrameTestRecorder(t)
+
+	// Two captures issued back to back, the first stalled out before either
+	// answers — the shape a slow machine produces on every single frame.
+	first := r.issueCapture(10 * time.Millisecond)
+	r.inFlight = "" // the stall guard gave up waiting on `first`
+	r.timedOut++
+	second := r.issueCapture(300 * time.Millisecond)
+
+	// The answers arrive out of order, the abandoned one last.
+	r.handleFrame(fakeScreenshot(second))
+	r.handleFrame(fakeScreenshot(first))
+
+	if len(r.frames) != 2 {
+		t.Fatalf("kept %d frames, want 2 — a late frame is still a frame", len(r.frames))
+	}
+	// Stamped by request time, so ordering by `at` restores real chronology
+	// even though the answers came back the other way round.
+	var earliest, latest time.Duration
+	earliest, latest = r.frames[0].at, r.frames[0].at
+	for _, f := range r.frames {
+		if f.at < earliest {
+			earliest = f.at
+		}
+		if f.at > latest {
+			latest = f.at
+		}
+	}
+	if earliest != 10*time.Millisecond || latest != 300*time.Millisecond {
+		t.Errorf("frame timestamps = [%v, %v], want [10ms, 300ms] — frames must carry "+
+			"their request time, not their arrival time", earliest, latest)
+	}
+	if r.failed != 0 {
+		t.Errorf("failed = %d, want 0 — these captures succeeded, just slowly", r.failed)
+	}
+}
+
+// TestRecorderIgnoresForeignAndDuplicateFrames keeps the widened matching
+// honest: accepting late frames must not mean accepting anything at all. The
+// browser_action tool shares this response subject, and a duplicate delivery
+// must not be counted twice.
+func TestRecorderIgnoresForeignAndDuplicateFrames(t *testing.T) {
+	r := newFrameTestRecorder(t)
+	id := r.issueCapture(0)
+
+	// Another component's browser_action response on the same subject.
+	r.handleFrame(fakeScreenshot("browser-action-42"))
+	if len(r.frames) != 0 {
+		t.Fatalf("kept a response that was not ours: %+v", r.frames)
+	}
+
+	r.handleFrame(fakeScreenshot(id))
+	r.handleFrame(fakeScreenshot(id)) // redelivery
+	if len(r.frames) != 1 {
+		t.Errorf("kept %d frames from one capture, want 1", len(r.frames))
+	}
+}
+
+// TestRecorderPrunesAbandonedCaptures bounds the memory a peer that answers
+// nothing can cost: ids stay claimable long enough to accept a very late
+// answer, then are forgotten.
+func TestRecorderPrunesAbandonedCaptures(t *testing.T) {
+	r := newFrameTestRecorder(t)
+	retention := sentAtRetention(r.spec.Interval)
+	stale := r.issueCapture(0)
+	fresh := r.issueCapture(retention * 3 / 2)
+
+	// Rewind the start so "now" is 2x the retention window in: the cutoff
+	// lands at 1x, leaving the first capture clearly outside it and the second
+	// clearly inside. Neither sits on the boundary, where a few microseconds
+	// of clock drift would decide the result.
+	r.startedAt = time.Now().Add(-2 * retention)
+	r.pruneSentAt()
+
+	if _, ok := r.sentAt[stale]; ok {
+		t.Error("an abandoned capture was never forgotten — sentAt grows without bound")
+	}
+	if _, ok := r.sentAt[fresh]; !ok {
+		t.Error("a recent capture was pruned — its answer would be discarded")
+	}
+}
+
+// newFrameTestRecorder builds a recorder wired to a scratch frames dir, with
+// no bus and no ticker — enough to exercise capture bookkeeping directly.
+func newFrameTestRecorder(t *testing.T) *WebRecorderActor {
+	t.Helper()
+	return &WebRecorderActor{
+		paneID:    "p1",
+		framesDir: t.TempDir(),
+		startedAt: time.Now(),
+		reqPrefix: "rec-p1-1-",
+		spec:      webauto.RecordSpec{Interval: 200 * time.Millisecond, Format: "jpeg"},
+	}
+}
+
+// issueCapture records a request as if capture() had sent it at the given
+// offset from the start of recording, and returns its id.
+func (r *WebRecorderActor) issueCapture(at time.Duration) string {
+	r.reqSeq++
+	id := r.reqPrefix + fmt.Sprint(r.reqSeq)
+	if r.sentAt == nil {
+		r.sentAt = make(map[string]time.Duration, 4)
+	}
+	r.sentAt[id] = at
+	r.inFlight = id
+	r.inFlightAt = time.Now()
+	return id
+}
+
+// fakeScreenshot is a successful response carrying one minimal JPEG.
+func fakeScreenshot(requestID string) *msg.MsgBrowserActionResponse {
+	// SOI + EOI is enough for frameExt to identify it as a JPEG.
+	return &msg.MsgBrowserActionResponse{
+		RequestID:  requestID,
+		Success:    true,
+		Screenshot: base64.StdEncoding.EncodeToString([]byte{0xFF, 0xD8, 0xFF, 0xD9}),
 	}
 }

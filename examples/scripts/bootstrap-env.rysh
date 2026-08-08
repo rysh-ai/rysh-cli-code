@@ -1,0 +1,52 @@
+#!/usr/bin/env rysh-script
+#
+# Seed a workspace's variables and secrets from the environment, idempotently.
+# Safe to re-run: every step checks first.
+#
+#   PROJECT_ENV=staging DEPLOY_TOKEN=xyz rysh script bootstrap-env.rysh
+#
+# ##variable is visible to the LLM; ##secret is not, and is redacted from
+# prompts by SecretNAT. Choosing the right one is the point of this script.
+
+set -euo pipefail
+
+# name=env-var pairs. Variables the agent may read.
+VARS=(PROJECT_ENV REGION)
+# Secrets the agent may USE but never see.
+SECRETS=(DEPLOY_TOKEN NPM_TOKEN)
+
+seeded=0 skipped=0
+
+##variable list
+existing="${RYSH_OUT:-}"
+
+for name in "${VARS[@]}"; do
+  value="${!name:-}"
+  if [[ -z "$value" ]]; then
+    echo "  skip $name (not set in the environment)"; skipped=$((skipped + 1)); continue
+  fi
+  if [[ "$existing" == *"$name"* ]]; then
+    echo "  keep $name (already present)"; skipped=$((skipped + 1)); continue
+  fi
+  : ##variable new "$name" "$value"
+  seeded=$((seeded + 1))
+done
+
+##secret list
+existing="${RYSH_OUT:-}"
+
+for name in "${SECRETS[@]}"; do
+  value="${!name:-}"
+  if [[ -z "$value" ]]; then
+    echo "  skip $name (not set in the environment)"; skipped=$((skipped + 1)); continue
+  fi
+  if [[ "$existing" == *"$name"* ]]; then
+    echo "  keep $name (already present)"; skipped=$((skipped + 1)); continue
+  fi
+  # The value never appears in pane output or history — rysh masks the echo of
+  # a ##secret line before it is recorded.
+  : ##secret new "$name" "$value"
+  seeded=$((seeded + 1))
+done
+
+echo "== seeded $seeded, left $skipped alone =="

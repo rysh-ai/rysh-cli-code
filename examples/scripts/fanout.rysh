@@ -1,0 +1,24 @@
+#!/usr/bin/env rysh-script
+#
+# Run one command in every pane of a scope.
+#
+#   rysh script fanout.rysh                       # every pane in the lane
+#   rysh script fanout.rysh tab 'git status -s'
+#   rysh script fanout.rysh ws  'pwd'
+#
+# Note what ISN'T here: no check that the fan-out reached anything. `set -e`
+# covers it, because a ##cmd that matches no panes exits non-zero. Shared panes
+# and pipeline tabs are excluded by design, so a scope can be non-empty and
+# still reach nothing — which used to print "ran in 0 pane(s)" and exit 0.
+
+set -euo pipefail
+
+SCOPE="${1:-lane}"
+COMMAND="${2:-git status --short}"
+
+echo "== running \"$COMMAND\" across the $SCOPE =="
+##cmd $SCOPE $COMMAND
+
+# Output goes to each PANE, not here — that is what makes this a multiplexer
+# command rather than a shell loop. $RYSH_OUT holds the dispatch summary.
+echo "== dispatched; watch the panes =="

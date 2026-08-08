@@ -58,7 +58,7 @@ func (t *WhatsAppDraftTool) Execute(ctx context.Context, params json.RawMessage)
 		return ErrOutput(ErrKindValidation, "to and body are required"), nil
 	}
 
-	id := t.drafts.Create(p.To, "", p.Body, "")
+	id := t.drafts.Create("whatsapp", p.To, "", p.Body, "")
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Draft created: %s\n\n", id))

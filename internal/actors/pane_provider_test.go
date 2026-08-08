@@ -76,7 +76,7 @@ func TestPaneProviderOverrideSurvivesSnapshotRoundtrip(t *testing.T) {
 	p := newProviderTestPane()
 	p.handleSetProviderOverride(&msg.MsgPaneSetProvider{Provider: "claude-cli"})
 
-	snap := p.buildSnapshot(false, false)
+	snap := p.buildSnapshot(false, false, true)
 	if snap.ProviderOverride != "claude-cli" {
 		t.Fatalf("snapshot ProviderOverride = %q", snap.ProviderOverride)
 	}
@@ -89,8 +89,8 @@ func TestPaneProviderOverrideSurvivesSnapshotRoundtrip(t *testing.T) {
 	if restored.providerOverride != "claude-cli" {
 		t.Fatalf("restored override = %q", restored.providerOverride)
 	}
-	// Started runs installProviderOverride for restored panes; simulate it.
-	restored.installProviderOverride()
+	// Started runs applyEffectiveProvider for restored panes; simulate it.
+	restored.applyEffectiveProvider()
 	ov := restored.providerHolder.Get()
 	if ov == nil || ov.Name() != "claude-cli" {
 		t.Fatalf("restored holder = %v, want claude-cli", ov)

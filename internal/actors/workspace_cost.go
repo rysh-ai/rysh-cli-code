@@ -34,6 +34,7 @@ func (w *WorkspaceActor) handleCostCommand(out *strings.Builder, paneID string, 
 		w.renderCostWindow(out, "week")
 	default:
 		fmt.Fprintf(out, "usage: ##cost [today|week] | ##cost budget <tokens>\n")
+		w.failRyshUsage("unknown ##cost subcommand: %q", sub)
 	}
 }
 
@@ -41,6 +42,7 @@ func (w *WorkspaceActor) renderCostWindow(out *strings.Builder, window string) {
 	reply, err := w.pub.Request(msg.UsageInboxSubject(), &msg.MsgUsageSnapshotRequest{Window: window}, 3*time.Second)
 	if err != nil {
 		fmt.Fprintf(out, "cost: usage ledger unavailable (%v)\n", err)
+		w.failRysh("usage ledger unavailable")
 		return
 	}
 	snap, ok := reply.(*msg.MsgUsageSnapshotReply)
@@ -117,10 +119,12 @@ func (w *WorkspaceActor) handleCostBudget(out *strings.Builder, paneID string, a
 	n, err := parseTokenCount(args[0])
 	if err != nil {
 		fmt.Fprintf(out, "cost: invalid token count %q: %v\n", args[0], err)
+		w.failRysh("cost: invalid token count %q: %v", args[0], err)
 		return
 	}
 	if err := w.pub.Send(msg.UsageInboxSubject(), &msg.MsgUsageBudgetSet{PaneID: paneID, CeilingTokens: n}); err != nil {
 		fmt.Fprintf(out, "cost: failed to set budget: %v\n", err)
+		w.failRysh("cost: failed to set budget: %v", err)
 		return
 	}
 	if n == 0 {

@@ -58,14 +58,14 @@ func TestIsToolGovernedChannel(t *testing.T) {
 func TestGenericGovernanceInit(t *testing.T) {
 	h := NewHumanoidActor("tg-bot", "sp", map[string]msg.ChannelConfig{
 		"telegram": {Governance: "human"},
-	}, config.Config{}, nil, nil, nil)
+	}, config.Config{}, nil, nil, nil, nil)
 	if got := h.govMode("telegram"); got != "human" {
 		t.Errorf("expected telegram governance human, got %q", got)
 	}
 
 	h2 := NewHumanoidActor("tg-bot2", "sp", map[string]msg.ChannelConfig{
 		"telegram": {},
-	}, config.Config{}, nil, nil, nil)
+	}, config.Config{}, nil, nil, nil, nil)
 	if got := h2.govMode("telegram"); got != "ai" {
 		t.Errorf("expected default telegram governance ai, got %q", got)
 	}
@@ -83,7 +83,7 @@ func TestApplyGovernanceModeFlipsEveryChannel(t *testing.T) {
 		"slack":    {},
 		"telegram": {},
 		"signal":   {},
-	}, config.Config{}, nil, nil, nil)
+	}, config.Config{}, nil, nil, nil, nil)
 
 	switched := h.applyGovernanceMode("human")
 	want := []string{"signal", "slack", "telegram"}
@@ -102,7 +102,7 @@ func TestApplyGovernanceModeFlipsEveryChannel(t *testing.T) {
 	}
 
 	// A humanoid with no channels reports nothing switched.
-	empty := NewHumanoidActor("empty", "sp", map[string]msg.ChannelConfig{}, config.Config{}, nil, nil, nil)
+	empty := NewHumanoidActor("empty", "sp", map[string]msg.ChannelConfig{}, config.Config{}, nil, nil, nil, nil)
 	if got := empty.applyGovernanceMode("human"); len(got) != 0 {
 		t.Errorf("empty humanoid should switch nothing, got %v", got)
 	}

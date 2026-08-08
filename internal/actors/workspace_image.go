@@ -39,12 +39,14 @@ var ImageMaxBytes int64 = 5 * 1024 * 1024
 // content block on the workspace for the active pane.
 func (w *WorkspaceActor) handleImageCommand(out *strings.Builder, paneID string, args []string) {
 	if len(args) == 0 {
-		fmt.Fprintf(out, "\n[image] usage: ##image <path>\n")
+		ryshWriter(out).UsageLineIn("image", "##image <path>")
+		w.failRyshUsage("usage: %s", "##image <path>")
 		fmt.Fprintf(out, "  attaches the image at <path> to the next prompt in this pane\n")
 		return
 	}
 	if paneID == "" {
 		fmt.Fprintf(out, "\n[image] no active pane\n")
+		w.failRysh("no active pane")
 		return
 	}
 	if args[0] == "clear" {
@@ -63,6 +65,7 @@ func (w *WorkspaceActor) handleImageCommand(out *strings.Builder, paneID string,
 	info, err := os.Stat(path)
 	if err != nil {
 		fmt.Fprintf(out, "\n[image] cannot read %s: %v\n", path, err)
+		w.failRysh("cannot read %s: %v", path, err)
 		return
 	}
 	if info.IsDir() {
@@ -77,6 +80,7 @@ func (w *WorkspaceActor) handleImageCommand(out *strings.Builder, paneID string,
 	data, err := os.ReadFile(path)
 	if err != nil {
 		fmt.Fprintf(out, "\n[image] cannot read %s: %v\n", path, err)
+		w.failRysh("cannot read %s: %v", path, err)
 		return
 	}
 

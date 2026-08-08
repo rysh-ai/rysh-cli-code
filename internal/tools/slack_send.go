@@ -69,34 +69,11 @@ func (t *SlackSendTool) Execute(ctx context.Context, params json.RawMessage) (*T
 		return nil, fmt.Errorf("invalid slack_send params: %w", err)
 	}
 
-	// The draft-and-confirm gate.
-	//
-	// Enforced HERE rather than through the approval plumbing on purpose: a
-	// humanoid may legitimately run with auto-approve on (it is headless, with
-	// no one at the keyboard), which skips the orchestrator's approval check
-	// before RequiresApproval is ever consulted. Governance that depends on a
-	// flag another code path can switch off is not governance — and the system
-	// prompt telling the model "do not call slack_send unbidden" is an
-	// instruction, not an enforcement point.
-	//
-	// In human mode the ONLY way a message reaches Slack is a draft the owner
-	// explicitly confirmed.
-	if t.humanGoverned != nil && t.humanGoverned() {
-		if p.DraftID == "" {
-			return ErrOutput(ErrKindValidation,
-				"human governance is on: slack_send requires the draft_id of an owner-approved "+
-					"draft. Call slack_draft, show it to the owner, and wait for their confirmation "+
-					"— a direct channel+body send is not permitted in this mode."), nil
-		}
-		d, ok := t.drafts.Get(p.DraftID)
-		if !ok {
-			return ErrOutputf(ErrKindMissing, "draft %q not found", p.DraftID), nil
-		}
-		if !d.Approved() {
-			return ErrOutputf(ErrKindValidation,
-				"draft %q has not been approved by the owner yet — it stays unsent until they "+
-					"confirm it in the humanoid's pane.", p.DraftID), nil
-		}
+	// The draft-and-confirm gate, shared by all tool-governed channels — see
+	// requireApprovedDraft (draft_gate.go) for why it lives in the tool and
+	// not in the approval plumbing.
+	if out := requireApprovedDraft(t.humanGoverned, t.drafts, p.DraftID, "slack_send", "slack_draft"); out != nil {
+		return out, nil
 	}
 
 	var channel, threadTS, body string

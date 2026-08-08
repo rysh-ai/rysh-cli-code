@@ -73,7 +73,7 @@ func (r *PTYRelay) Run() error {
 	if err != nil {
 		return err
 	}
-	defer term.Restore(fd, oldState)
+	defer func() { _ = term.Restore(fd, oldState) }()
 
 	// Enter alt screen on the REAL terminal. The interactive program (vim,
 	// htop, etc.) already entered alt screen on the PTY side, but Bubble
@@ -82,6 +82,27 @@ func (r *PTYRelay) Run() error {
 	// screen and looks garbled.
 	_, _ = os.Stdout.Write([]byte("\x1b[?1049h\x1b[2J\x1b[H"))
 	defer os.Stdout.Write([]byte("\x1b[?1049l"))
+
+	// Stop the terminal from reporting mouse events for the duration of the
+	// relay, and restore the TUI's own tracking on the way out.
+	//
+	// Bubble Tea's ReleaseTerminal already disables mouse before Run() is
+	// called, but that is a single write on a link we do not control: over a
+	// laggy or lossy connection (mosh, ssh on a bad uplink) the disable lands
+	// late, and every report that slips through in the meantime is pumped
+	// straight into the child's stdin by the loop below. The child never asked
+	// for mouse input — the relay is entered for any full-screen app regardless
+	// of its mouse mode — so a wheel tick surfaces as literal "<65;50;54M" text.
+	// Repeating the disable here is idempotent and narrows that window; the
+	// mouseReportFilter on the stdin pump catches whatever was already in
+	// flight.
+	//
+	// The re-enable is not symmetry for its own sake: Bubble Tea's
+	// RestoreTerminal (v1.3.4) restores the alt screen, bracketed paste and
+	// focus reporting but NOT mouse tracking, so without this the TUI comes back
+	// from a relay with click-to-focus and drag-to-copy dead.
+	_, _ = os.Stdout.Write([]byte(mouseTrackingOff))
+	defer os.Stdout.Write([]byte(mouseTrackingOn))
 
 	// Get terminal size for relay activation (the daemon will resize the
 	// PTY to match the real terminal).
@@ -97,14 +118,14 @@ func (r *PTYRelay) Run() error {
 	if err != nil {
 		return err
 	}
-	defer dataSub.Unsubscribe()
+	defer func() { _ = dataSub.Unsubscribe() }()
 
 	exitCh := make(chan *nats.Msg, 1)
 	exitSub, err := r.nc.ChanSubscribe(exitSubj, exitCh)
 	if err != nil {
 		return err
 	}
-	defer exitSub.Unsubscribe()
+	defer func() { _ = exitSub.Unsubscribe() }()
 
 	// Activate relay mode on the daemon. The PaneActor's rawReadLoop will
 	// start publishing raw PTY bytes to the data subject, and the daemon
@@ -153,10 +174,20 @@ func (r *PTYRelay) Run() error {
 		buf := make([]byte, 4096)
 		rawinputSubj := msgpkg.T("pane", r.paneID, "rawinput")
 		var lastEsc time.Time // time of the previous lone-Esc keypress (double-Esc gesture)
+		var mouse mouseReportFilter
 		for {
 			n, readErr := stdinDup.Read(buf)
 			if n > 0 {
-				data := buf[:n]
+				// Mouse reporting is off for the whole relay (see above), so any
+				// report arriving here is stale and must not reach the child.
+				data := mouse.filter(buf[:n])
+				if len(data) == 0 {
+					if readErr != nil {
+						finish(readErr)
+						return
+					}
+					continue
+				}
 				// A fast Esc double-tap can land both 0x1b bytes in ONE read (the
 				// kernel coalesced the presses). That is the double-Esc "switch
 				// modes" gesture arriving whole — escape to the TUI immediately so it
@@ -172,7 +203,7 @@ func (r *PTYRelay) Run() error {
 				// rawEscWindow are the double-Esc "switch modes" gesture. Forward
 				// the first Esc to the app (a single Esc must still reach it); on
 				// the second, escape to the TUI so it cycles the input mode.
-				if n == 1 && data[0] == 0x1b {
+				if len(data) == 1 && data[0] == 0x1b {
 					now := time.Now()
 					if !lastEsc.IsZero() && now.Sub(lastEsc) <= rawEscWindow {
 						finish(ErrRelayModeSwitch)
@@ -191,7 +222,7 @@ func (r *PTYRelay) Run() error {
 				}
 				lastEsc = time.Time{}
 				escaped := false
-				for i := 0; i < n; i++ {
+				for i := 0; i < len(data); i++ {
 					// Ctrl+O (0x0f) escapes to prefix mode; Ctrl+L (0x0c)
 					// escapes to layout mode. Both are intercepted here so the
 					// rysh multiplexer controls stay reachable from a maximized
@@ -218,7 +249,7 @@ func (r *PTYRelay) Run() error {
 				}
 				_ = r.pub.Send(rawinputSubj, &msgpkg.MsgRawKeyInput{
 					PaneID: r.paneID,
-					Data:   data[:n],
+					Data:   data,
 				})
 			}
 			if readErr != nil {

@@ -13,28 +13,37 @@ import (
 // writeWebUsage prints the `##rysh web` usage block. Kept in one place so the
 // bare-`##rysh web`, unknown-action and top-level ##help surfaces cannot drift.
 func writeWebUsage(out io.Writer) {
-	fmt.Fprintf(out, "\n[rysh] usage:\n")
-	fmt.Fprintf(out, "  ##rysh web start [bind] [port] [flags]  start the web UI server (token-protected by default)\n")
-	fmt.Fprintf(out, "      --bind <addr>  bind address (default: %s, this machine only; 0.0.0.0 exposes it on your network)\n", web.DefaultHost)
-	fmt.Fprintf(out, "      --port <n>     TCP port (default: %d, or [web] port in rysh.config.yaml)\n", defaultWebPort)
-	fmt.Fprintf(out, "      --token <t>    use access token <t> instead of a generated one (open with ?token=<t>)\n")
-	fmt.Fprintf(out, "      --no-token     start without any access token (bind to 127.0.0.1 if you do this)\n")
-	fmt.Fprintf(out, "      --control      enable channel/pairing/humanoid management from the dashboard (loopback only)\n")
-	fmt.Fprintf(out, "    e.g. ##rysh web start --bind 127.0.0.1 --port 8080 --token s3cret\n")
-	fmt.Fprintf(out, "         ##rysh web start 0.0.0.0:8080\n")
-	fmt.Fprintf(out, "  ##rysh web stop            stop the web UI server\n")
-	fmt.Fprintf(out, "  ##rysh web status          show bind address, port + access token\n")
-	fmt.Fprintf(out, "  ##rysh web token           print the access token + open URL\n")
-	fmt.Fprintf(out, "  config: [web] host/port/token in rysh.config.yaml, or RYSH_WEB_HOST/RYSH_WEB_PORT/RYSH_WEB_TOKEN\n\n")
+	ryshWriter(out).Usage(
+		"##rysh web start [bind] [port] [flags]  start the web UI server (sign-in required)",
+		"    --username <u>  login username (also: username=<u>)",
+		"    --password <p>  login password (also: password=<p>)",
+		fmt.Sprintf("    --bind <addr>   bind address (default: %s, this machine only; 0.0.0.0 exposes it on your network)", web.DefaultHost),
+		fmt.Sprintf("    --port <n>      TCP port (default: %d, or [web] port in rysh.config.yaml)", defaultWebPort),
+		"    --control       enable channel/pairing/humanoid management from the dashboard (loopback only)",
+		"  the login is stored for this workspace, so later starts need no flags",
+		"  e.g. ##rysh web start --username alice --password s3cret",
+		"  when the server is ALREADY running (the desktop app starts one), naming an",
+		"  address SHARES this session there instead — same UI, always behind the login,",
+		"  while the app keeps its own connection:",
+		"       ##rysh web start --bind 127.0.0.1 --port 23001 --username alice --password s3cret",
+		"       ##rysh web start --bind 0.0.0.0 --port 23001 --username alice --password s3cret   (phone)",
+		"##rysh web stop [--force|--shared]  stop the server (--shared closes only the shared address)",
+		"##rysh web status          show bind address, port, login + shared address",
+		"##rysh web auth username=<u> password=<p>  set or replace the login",
+		"    the browser keeps the issued token for 30 days, then asks again",
+		"    ##rysh web auth        show whether a login is configured",
+		"    ##rysh web auth clear  remove the login (the UI will not start without one)",
+		"config: [web] host/port in rysh.config.yaml, or RYSH_WEB_HOST/RYSH_WEB_PORT",
+	)
 }
 
-// Argument parsing for `##rysh web start`. The command takes three parameters —
-// bind address, port and access token — each settable on the command line, in
-// rysh.config.yaml ([web] host/port/token) or via the environment
-// (RYSH_WEB_HOST / RYSH_WEB_PORT / RYSH_WEB_TOKEN). Command-line flags win over
+// Argument parsing for `##rysh web start`. The command takes the bind address
+// and port — settable on the command line, in rysh.config.yaml ([web]
+// host/port) or via the environment (RYSH_WEB_HOST / RYSH_WEB_PORT) — plus the
+// username/password login that guards the UI. Command-line flags win over
 // config, which wins over the built-in defaults.
 //
-//	##rysh web start [bind] [port] [--bind <addr>] [--port <n>] [--token <t>|--no-token]
+//	##rysh web start [bind] [port] [--bind <addr>] [--port <n>] [--username <u> --password <p>]
 //
 // Parsing lives here (not inline in the ##rysh switch) so it is unit-testable
 // without standing up a WorkspaceActor.
@@ -46,38 +55,44 @@ type webStartOpts struct {
 	Host string
 	// Port is the TCP port to listen on.
 	Port int
-	// Token is the access token to require, or "" when NoToken is set.
-	Token string
-	// NoToken records an explicit --no-token, so the caller knows not to
-	// generate a random token.
-	NoToken bool
+	// Username and Password set (or replace) the workspace's web login. Both
+	// empty means "use the stored login" — the common case after the first
+	// start. Only one of the two is a usage error, caught by the caller.
+	Username string
+	Password string
 	// Control enables the mutating control-plane endpoints (channel start/stop,
 	// pairing approve/allow, humanoid governance) and forces a loopback bind
 	// (R2, --control).
 	Control bool
+	// Explicit records that the command line named an address or a port, rather
+	// than falling back to config and defaults. On a server that is ALREADY
+	// running it is the difference between "you forgot it is up" and "serve this
+	// session at this address too" — the second opens a shared door.
+	Explicit bool
 }
 
-// parseWebStartArgs resolves the bind address, port and token for
-// `##rysh web start`. defHost/defPort/defToken carry the config-resolved
-// defaults (cfg.WebHost / cfg.WebPort / cfg.WebToken).
+// parseWebStartArgs resolves the bind address, port and login for
+// `##rysh web start`. defHost/defPort carry the config-resolved defaults
+// (cfg.WebHost / cfg.WebPort).
 //
 // Accepted forms, in any order:
 //
-//	--bind <addr>   --bind=<addr>    (aliases: --host, --address, --addr)
-//	--port <n>      --port=<n>
-//	--token <t>     --token=<t>
-//	--no-token      --no-auth        start with no access token
-//	--auth          --token-auto     no-op, kept for backward compatibility
-//	<n>                              bare port     (backward compatible)
-//	<addr>                           bare bind address
+//	--bind <addr>     --bind=<addr>       (aliases: --host, --address, --addr)
+//	--port <n>        --port=<n>
+//	--username <u>    --username=<u>      username=<u>   (aliases: --user)
+//	--password <p>    --password=<p>      password=<p>   (aliases: --pass)
+//	<n>                                   bare port     (backward compatible)
+//	<addr>                                bare bind address
 //
 // An address may be a bare host (127.0.0.1, 0.0.0.0, ::1, localhost) or a
 // host:port pair (127.0.0.1:8080, :8080, [::1]:8080); when it carries a port
 // that port is applied too. Unrecognised arguments are returned as warnings
 // rather than failing the command, so a typo never leaves the user without a
-// running server or an explanation.
-func parseWebStartArgs(args []string, defHost string, defPort int, defToken string) (webStartOpts, []string) {
-	opts := webStartOpts{Host: strings.TrimSpace(defHost), Port: defPort, Token: defToken}
+// running server or an explanation. The retired access-token flags are warned
+// about by name rather than as "unknown flag", so a stale command line says
+// what replaced them.
+func parseWebStartArgs(args []string, defHost string, defPort int) (webStartOpts, []string) {
+	opts := webStartOpts{Host: strings.TrimSpace(defHost), Port: defPort}
 	if opts.Port <= 0 {
 		opts.Port = defaultWebPort
 	}
@@ -94,6 +109,7 @@ func parseWebStartArgs(args []string, defHost string, defPort int, defToken stri
 			warnf("ignoring %s %q: %v", flag, spec, err)
 			return
 		}
+		opts.Explicit = true
 		opts.Host = host
 		if port > 0 {
 			opts.Port = port
@@ -127,7 +143,7 @@ func parseWebStartArgs(args []string, defHost string, defPort int, defToken stri
 				if p, err := parsePort(v); err != nil {
 					warnf("ignoring %s %q: %v", a, v, err)
 				} else {
-					opts.Port = p
+					opts.Port, opts.Explicit = p, true
 				}
 			}
 		case strings.HasPrefix(a, "--port="):
@@ -135,31 +151,50 @@ func parseWebStartArgs(args []string, defHost string, defPort int, defToken stri
 			if p, err := parsePort(v); err != nil {
 				warnf("ignoring --port %q: %v", v, err)
 			} else {
-				opts.Port = p
+				opts.Port, opts.Explicit = p, true
 			}
 
-		case a == "--token":
+		case a == "--username", a == "--user":
 			if v, ok := next(); ok {
-				opts.Token = v
-				opts.NoToken = false
+				opts.Username = v
 			}
-		case strings.HasPrefix(a, "--token="):
-			opts.Token = strings.TrimPrefix(a, "--token=")
-			opts.NoToken = false
+		case strings.HasPrefix(a, "--username="), strings.HasPrefix(a, "--user="):
+			_, v, _ := strings.Cut(a, "=")
+			opts.Username = v
 
-		case a == "--auth", a == "--token-auto":
-			// A random token is generated by default now; these flags are kept
-			// for backward compatibility and are no-ops.
+		case a == "--password", a == "--pass":
+			if v, ok := next(); ok {
+				opts.Password = v
+			}
+		case strings.HasPrefix(a, "--password="), strings.HasPrefix(a, "--pass="):
+			_, v, _ := strings.Cut(a, "=")
+			opts.Password = v
 
-		case a == "--no-token", a == "--no-auth":
-			opts.NoToken = true
-			opts.Token = ""
+		case a == "--token", a == "--no-token", a == "--auth", a == "--no-auth",
+			a == "--token-auto", strings.HasPrefix(a, "--token="):
+			// Access tokens are gone (internal/web/auth.go): the UI is guarded by
+			// a username/password login. Say so by name — a stale command line
+			// deserves better than "unknown flag".
+			if a == "--token" {
+				// Swallow its value so it is not re-read as a bind address.
+				_, _ = next()
+			}
+			warnf("%s is no longer supported — the web UI uses a login: --username <u> --password <p>", a)
 
 		case a == "--control":
 			opts.Control = true
 
 		case strings.HasPrefix(a, "-"):
 			warnf("ignoring unknown flag %q", a)
+
+		case strings.HasPrefix(a, "username="), strings.HasPrefix(a, "user="):
+			// The `key=value` form `##rysh web auth` uses, accepted here too so
+			// one habit works for both commands.
+			_, v, _ := strings.Cut(a, "=")
+			opts.Username = v
+		case strings.HasPrefix(a, "password="), strings.HasPrefix(a, "pass="):
+			_, v, _ := strings.Cut(a, "=")
+			opts.Password = v
 
 		default:
 			// Bare positional: a port when it is all digits, otherwise a bind
@@ -169,7 +204,7 @@ func parseWebStartArgs(args []string, defHost string, defPort int, defToken stri
 				if p <= 0 || p > 65535 {
 					warnf("ignoring port %q: out of range (1-65535)", a)
 				} else {
-					opts.Port = p
+					opts.Port, opts.Explicit = p, true
 				}
 				continue
 			}
@@ -177,9 +212,6 @@ func parseWebStartArgs(args []string, defHost string, defPort int, defToken stri
 		}
 	}
 
-	if opts.NoToken {
-		opts.Token = ""
-	}
 	return opts, warnings
 }
 
@@ -300,23 +332,48 @@ func webBaseURL(host string, port int) string {
 	return fmt.Sprintf("http://%s:%d", webURLHost(host), port)
 }
 
-// autoStartWebToken resolves the access token for the auto-started web server
-// ([web] auto_start / RYSH_WEB_AUTO_START). A configured token is used as-is.
-// With no token configured one is GENERATED, mirroring `##rysh web start`, so
-// an auto-started UI is never accidentally exposed without access control
-// (e.g. [web] host 0.0.0.0 + auto_start with no token). Retrieve it with
-// `##rysh web token`.
+// webLoginRequired reports whether a web server about to start must have a
+// username/password login configured.
 //
-// Control mode is the exception and stays token-less: the Electron sidecar
-// spawns the daemon with RYSH_WEB_CONTROL=true and connects without a token,
-// and control mode already forces the bind onto 127.0.0.1 — the same trust
-// boundary as the TUI.
-func autoStartWebToken(configured string, control bool) string {
-	if t := strings.TrimSpace(configured); t != "" {
-		return t
+// Every server does, with one exception: control mode. The Electron sidecar
+// spawns its daemon with RYSH_WEB_CONTROL=true and connects with no
+// credentials, and control mode already forces the bind onto 127.0.0.1 — the
+// same trust boundary as the TUI, and a client that is the very process that
+// started the daemon. Demanding a password there would only lock the desktop
+// app out of its own sidecar.
+func webLoginRequired(control bool) bool { return !control }
+
+// webStopNeedsForce reports whether `##rysh web stop` should refuse and ask for
+// --force: it would cut off clients that are connected right now.
+//
+// The test is the live client count, NOT whether the server is the desktop
+// app's (control mode). Control mode answers a different question — "may this
+// server manage channels and pairings" — and using it here was wrong in both
+// directions: it nagged about a control-mode server nobody was attached to, and
+// stayed silent about a plain `##rysh web start` serving a phone.
+func webStopNeedsForce(clients int32, args []string) bool {
+	return clients > 0 && !hasWebForce(args)
+}
+
+// hasWebForce reports whether --force (or -f) is present, the opt-out for
+// `##rysh web stop` when clients are connected.
+func hasWebForce(args []string) bool {
+	for _, a := range args {
+		switch strings.TrimSpace(a) {
+		case "--force", "-f":
+			return true
+		}
 	}
-	if control {
-		return ""
+	return false
+}
+
+// hasWebShared reports whether --shared is present: `##rysh web stop --shared`
+// closes the shared address without stopping the server behind it.
+func hasWebShared(args []string) bool {
+	for _, a := range args {
+		if strings.TrimSpace(a) == "--shared" {
+			return true
+		}
 	}
-	return web.GenerateToken()
+	return false
 }

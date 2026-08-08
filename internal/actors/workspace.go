@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/asynkron/protoactor-go/actor"
@@ -15,6 +16,7 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/bridge"
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
+	"github.com/rysh-ai/rysh-cli-code/internal/gateway"
 	"github.com/rysh-ai/rysh-cli-code/internal/limits"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 	"github.com/rysh-ai/rysh-cli-code/internal/policy"
@@ -39,6 +41,10 @@ type tabInfo struct {
 //
 // All fields are unguarded -- the proto.actor mailbox guarantees sequential Receive().
 type WorkspaceActor struct {
+	// ryshFail is the failure recorded by the ## command currently in flight,
+	// or nil. Set by failRysh, drained by handleRyshCommand — see the failure
+	// section of workspace_out.go for why it lives here and why that is safe.
+	ryshFail   error
 	cfg        config.Config
 	pub        *msg.NATSPublisher
 	agSetup    *agentic.Setup
@@ -54,8 +60,22 @@ type WorkspaceActor struct {
 	// ("provider/name"), "" when the session runs on the config default. The
 	// actual model override lives in agSetup.SessionLLM; this is display state.
 	sessionLLMRef string
-	br            *bridge.NATSBridge
-	sessionName   string
+	// modelBindings holds the workspace/tab/lane/stack levels of the model
+	// hierarchy, keyed by modelScopeKey (see model_scope.go). The session
+	// level lives in agSetup.SessionLLM and the pane level in the PaneActor,
+	// each next to the seam that applies it; these four have no seam of their
+	// own, so they are resolved per pane and pushed into pane override
+	// holders. paneInheritedModel remembers the last pushed selection per
+	// pane so a re-bind only touches the panes it actually moves.
+	// modelFanoutDirty is set by persistToKV (every structural change) and
+	// cleared on the next snapshot tick, so a pane created under an
+	// already-bound scope inherits its model without paying for a re-resolve
+	// on every focus/move.
+	modelBindings      map[string]modelBinding
+	paneInheritedModel map[string]string
+	modelFanoutDirty   bool
+	br                 *bridge.NATSBridge
+	sessionName        string
 	// autoLoops tracks the active loop-engineering controllers, one per
 	// executing LLM actor ID (pane or agent/humanoid name). A new ##auto run
 	// on the same exec ID replaces (stops) the previous loop. See
@@ -132,6 +152,15 @@ type WorkspaceActor struct {
 	snapLayoutCacheTime  time.Time
 	snapLayoutCacheValid bool
 
+	// Structural snapshot cache: like the layout cache but WITHOUT per-pane
+	// command history (MsgGetWorkspaceSnapshot{LayoutOnly:true, NoHistories:true}).
+	// Serves the web server's 10Hz streamPaneVT poll, which reads only pane ids
+	// and the RawMode/RemoteInteractive flags. Held separately because the point
+	// is to keep the histories off the per-pane cascade entirely (F-7c).
+	snapStructCache      domain.WorkspaceSnapshot
+	snapStructCacheTime  time.Time
+	snapStructCacheValid bool
+
 	// Workspace-wide unique alias registry.
 	usedAliases map[string]struct{}
 
@@ -145,6 +174,19 @@ type WorkspaceActor struct {
 
 	// Web UI server (started via ##rysh web start).
 	webServer *web.Server
+
+	// richClients is the number of connected renderers that can paint the
+	// surfaces the terminal cannot — the desktop app and the browser UI, both
+	// of which reach the daemon over the web server's WebSocket. Maintained by
+	// the web hub via wireWebPresence, so it is written from web goroutines and
+	// read from the actor goroutine: atomic, not a plain int.
+	//
+	// It exists so commands that only pay off in a rich renderer — `##mode new
+	// web` above all — can say so at the moment they run, instead of appearing
+	// to succeed while nothing visible happens. That is the same "degrade
+	// visibly, never silently" rule internal/web/webpane.go states for the
+	// browser renderer's own missing capabilities.
+	richClients atomic.Int32
 
 	// Share registry actor for upstream sharing (spawned if upstream enabled).
 	shareRegistryPID *actor.PID
@@ -179,6 +221,14 @@ type WorkspaceActor struct {
 	// Governance proxy (design 001) — loopback proxy for wrapped-CLI provider
 	// traffic. Owned directly (HTTP server on its own goroutines); nil when off.
 	proxyServer *proxy.Server
+
+	// ledger is the org-wide control-plane client (design 023): usage batches,
+	// leases and central policy. nil unless upstream.governance is on, and every
+	// consumer treats nil as "per-machine only" — the OSS standalone behaviour.
+	ledger *gateway.LedgerClient
+	// centralPolicyPath is where the policy document pulled from rysh-server is
+	// cached (design 023 §4.7). Empty until one has been pulled.
+	centralPolicyPath string
 
 	// Policy-as-code (design 013) — repo-level .rysh/policy.yaml, loaded at
 	// session start (fail-closed). Never nil after Started.
@@ -310,15 +360,30 @@ func NewWorkspaceActor(
 // wireWebPresence connects a web server's client-count events to this
 // session's registry record (Record.AppClients), so `rysh list-sessions` and
 // `##session list/info` can render app sessions as "attached (app)" while a
-// desktop-app window is actually connected. The closure captures immutable
-// values only (config copy, session name) — it runs on the web hub goroutine,
-// never touching actor state.
+// desktop-app window is actually connected, and to the live rich-renderer count
+// this actor consults before promising a pane will be visible.
+//
+// The closure captures immutable values only (config copy, session name) and
+// writes richClients atomically — it runs on the web hub goroutine and must
+// never touch ordinary actor state.
 func (w *WorkspaceActor) wireWebPresence(srv *web.Server) {
 	cfg := w.cfg
 	name := w.sessionName
 	srv.SetClientCountListener(func(n int) {
+		w.richClients.Store(int32(n))
 		session.UpdateAppClients(cfg, name, n)
 	})
+}
+
+// hasRichRenderer reports whether a renderer able to paint app-only surfaces
+// (embedded browser panes, threaded chat) is connected right now — i.e. the
+// desktop app or the browser UI, both of which arrive over the web server.
+//
+// A terminal-only session answers false, which is the cue for commands to
+// explain what will and will not be visible rather than to refuse: the pane
+// state is set either way, and a desktop app attaching later picks it up.
+func (w *WorkspaceActor) hasRichRenderer() bool {
+	return w.richClients.Load() > 0
 }
 
 // Receive implements actor.Actor.
@@ -442,7 +507,7 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 			// Spawn humanoid registry actor for humanoids (agents with external channels).
 			if w.agSetup != nil {
 				humanoidRegProps := actor.PropsFromProducer(func() actor.Actor {
-					return NewHumanoidRegistryActor(w.sessionName, w.cfg, w.pub, w.nc, w.agSetup, w.agentKV)
+					return NewHumanoidRegistryActor(w.sessionName, w.cfg, w.pub, w.nc, w.agSetup, w.agentKV, w.childSecretResolver())
 				})
 				w.humanoidRegistryPID = ctx.Spawn(humanoidRegProps)
 			}
@@ -470,12 +535,30 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 				}
 				usage.SetOverrides(ov)
 			}
+			// Org-wide control plane (design 023). Inert unless BOTH
+			// upstream.enabled and the explicit upstream.governance opt-in are
+			// set — reporting spend to a server is a data-egress decision, and
+			// the OSS client must stay fully functional standalone.
+			w.startLedgerClient()
+
 			usageProps := actor.PropsFromProducer(func() actor.Actor {
 				ua := NewUsageActor(w.sessionName, w.pub, w.nc)
+				if w.ledger != nil {
+					// The org-wide reporter observes the same records the local
+					// ledger aggregates; it never supplies a local figure.
+					ua.SetUsageObserver(w.ledger)
+				}
 				if w.cfg.Usage.RetentionDays > 0 {
 					ua.SetRetentionDays(w.cfg.Usage.RetentionDays)
 				}
 				ua.SetCeilings(w.policy.BudgetCeilings) // policy-as-code budgets
+				// Per-tenant ceilings (design 022 §4.3), from [proxy] tenants
+				// and from policy keys of the form "tenant:<name>" — policy's
+				// BudgetCeilings is an opaque string map, so it needed no schema
+				// change to bind a tenant, and Merge's lower-wins rule already
+				// does the right thing across org and project policy.
+				ua.SetTenantCeilings(proxy.Ceilings(w.cfg.Proxy.Tenants))
+				ua.SetTenantCeilings(tenantCeilingsFromPolicy(w.policy.BudgetCeilings))
 				return ua
 			})
 			w.usagePID = ctx.Spawn(usageProps)
@@ -545,16 +628,36 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 			if w.cfg.WebHost != "" {
 				w.webServer.SetHost(w.cfg.WebHost)
 			}
-			if token := autoStartWebToken(w.cfg.WebToken, w.webServer.ControlEnabled()); token != "" {
-				w.webServer.SetAuthToken(token)
-			}
-			w.wireWebPresence(w.webServer)
-			if err := w.webServer.Start(); err != nil {
-				slog.Error("auto-start web server failed", "err", err)
+			// A `##rysh web auth` login set earlier in this workspace applies
+			// here too — there is no pane to report a broken file to, so a
+			// failure only skips the login. NewServer has already read
+			// RYSH_WEB_CONTROL, so setWebCredentials can see that this is the
+			// desktop app's own sidecar and leave it ungated: a stored login
+			// must never lock the app out of the daemon it just spawned.
+			w.applyWebCredentials(w.webServer, nil)
+			// Auto-start serves the desktop app's own sidecar (control mode,
+			// loopback), which runs without a login by design. Anywhere else,
+			// refuse to auto-start an unauthenticated UI rather than quietly
+			// exposing the workspace — [web] host 0.0.0.0 + auto_start with no
+			// `##rysh web auth` login is exactly the accident worth refusing.
+			if w.webServer.LoginUsername() == "" && webLoginRequired(w.webServer.ControlEnabled()) {
+				slog.Error("auto-start web server skipped: no web login configured",
+					"hint", "##rysh web auth username=<u> password=<p>")
 				w.webServer = nil
 			} else {
-				slog.Info("web server auto-started", "host", w.cfg.WebHost, "port", port,
-					"auth", w.webServer.AuthEnabled(), "token_hint", "##rysh web token")
+				w.wireWebPresence(w.webServer)
+				w.configureWebParity(w.webServer)
+				if err := w.webServer.Start(); err != nil {
+					slog.Error("auto-start web server failed", "err", err)
+					w.webServer = nil
+				} else {
+					// Advertise the endpoint on the session record so any local
+					// front-end — including a desktop app that did not spawn this
+					// daemon — can discover and adopt it.
+					w.recordWebEndpoint(w.webServer)
+					slog.Info("web server auto-started", "host", w.cfg.WebHost, "port", port,
+						"login", w.webServer.LoginUsername())
+				}
 			}
 		}
 
@@ -577,11 +680,21 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 	case *cronTickMsg:
 		w.handleCronTick(ctx)
 
+	case *centralPolicyMsg:
+		// A central policy document arrived (design 023 §4.7). Handed to the
+		// mailbox by the ledger client rather than applied on its goroutine,
+		// because applying it rewrites actor state.
+		w.applyCentralPolicy(m.body)
+
 	case *actor.Stopping:
 		w.shuttingDown = true
 		w.persistToKVNow()
 		w.stopCron()
 		w.stopProxy()
+		// Flush the last usage batch before the process goes away (023 §4.4):
+		// spend that never reached the server is spend the org-wide ceiling
+		// silently forgives.
+		w.stopLedgerClient()
 		if w.replayPlayer != nil {
 			w.replayPlayer.Stop()
 			w.replayPlayer = nil
@@ -966,12 +1079,17 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 	case *msg.MsgExecRyshOnPane:
 		// A #### command relayed from a remote subscriber: run it on the named
 		// source pane exactly as if "##<command>" had been typed there.
-		w.runRyshCommand(ctx, m.PaneID, "", "##"+m.Command)
+		w.runRyshCommandOut(ctx, m.PaneID, "", "##"+m.Command)
 
 	case *msg.MsgMirrorTabOp:
 		// A structural op relayed from a mirror-tab subscriber: apply it to the
 		// shared source tab (alias generated here; targeted by tab id).
 		w.applyMirrorTabOp(m)
+
+	case *msg.MsgLaunchClaudeInPane:
+		// The second half of `##pane new --claude`, once the pane it created
+		// exists (see workspace_pane_claude.go).
+		w.handleLaunchClaudeInPane(m)
 
 	case *msg.MsgSwitchWorkspace:
 		// Fire-and-forget switch (no snapshot reply). The request/reply path
@@ -1032,9 +1150,12 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 				w.invalidateSnapshotCaches()
 			}
 			var snap domain.WorkspaceSnapshot
-			if inner.LayoutOnly {
+			switch {
+			case inner.LayoutOnly && inner.NoHistories:
+				snap = w.cachedStructuralSnapshot()
+			case inner.LayoutOnly:
 				snap = w.cachedLayoutSnapshot()
-			} else {
+			default:
 				snap = w.cachedSnapshot()
 			}
 			// The TUI refreshes after every change that can alter which mirror
@@ -1059,7 +1180,7 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 			// subscribed and ready).
 			target, ok := w.resolveSwitchTarget(inner)
 			if !ok || target == w.workspaceIdx {
-				_ = m.Reply(&msg.MsgWorkspaceSnapshotReply{Snapshot: w.collectSnapshot(false)})
+				_ = m.Reply(&msg.MsgWorkspaceSnapshotReply{Snapshot: w.collectSnapshot(false, false)})
 			} else {
 				ctx.Send(ctx.Parent(), &switchWorkspaceMsg{index: target, replyTo: m.ReplyTo})
 			}

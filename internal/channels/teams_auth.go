@@ -216,7 +216,7 @@ func (a *teamsAuth) verifyActivityToken(ctx context.Context, authHeader, service
 		return fmt.Errorf("no Authorization header (Bot Framework always signs activities)")
 	}
 	if !strings.HasPrefix(strings.ToLower(raw), "bearer ") {
-		return fmt.Errorf("Authorization header is not a Bearer token")
+		return fmt.Errorf("authorization header is not a Bearer token")
 	}
 	raw = strings.TrimSpace(raw[len("bearer "):])
 

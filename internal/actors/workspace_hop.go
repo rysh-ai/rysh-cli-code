@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 )
 
@@ -20,11 +21,12 @@ func (w *WorkspaceActor) handleHopCommand(out *strings.Builder, paneID string, a
 	}
 
 	if arg == "" {
-		fmt.Fprintf(out, "\n[rysh] usage:\n")
-		fmt.Fprintf(out, "  ##hop <pane-name|pane-id>   hop this pane's output + agent memory to another pane (fork)\n")
-		fmt.Fprintf(out, "  ##hop resume                resume the target's AI with the hopped session\n")
-		fmt.Fprintf(out, "  ##hop status                show hop state\n")
-		fmt.Fprintf(out, "  ##hop clear                 clear hopped content\n\n")
+		ryshWriter(out).Usage(
+			"##hop <pane-name|pane-id>   hop this pane's output + agent memory to another pane (fork)",
+			"##hop resume                resume the target's AI with the hopped session",
+			"##hop status                show hop state",
+			"##hop clear                 clear hopped content",
+		)
 		return
 	}
 
@@ -48,16 +50,19 @@ func (w *WorkspaceActor) cmdHopTo(out *strings.Builder, sourcePaneID, targetArg 
 	targetID := w.resolvePaneID(targetArg)
 	if targetID == "" {
 		fmt.Fprintf(out, "\n[hop] pane not found: %s\n", targetArg)
+		w.failRysh("pane not found: %s", targetArg)
 		return
 	}
 	if targetID == sourcePaneID {
 		fmt.Fprintf(out, "\n[hop] cannot hop to self\n")
+		w.failRysh("cannot hop to self")
 		return
 	}
 
 	tab := w.currentTab()
 	if tab == nil {
 		fmt.Fprintf(out, "\n[hop] no active tab\n")
+		w.failRysh("no active tab")
 		return
 	}
 	content := tab.actor.PanePrivateOutput(sourcePaneID)
@@ -93,6 +98,7 @@ func (w *WorkspaceActor) cmdHopTo(out *strings.Builder, sourcePaneID, targetArg 
 
 	if trimmedContent == "" && trimmedChat == "" && memoryTurns == 0 {
 		fmt.Fprintf(out, "\n[hop] source pane output and agent memory are empty — nothing to hop\n")
+		w.failRysh("source pane output and agent memory are empty — nothing to hop")
 		return
 	}
 
@@ -131,6 +137,7 @@ func (w *WorkspaceActor) cmdHopStatus(out *strings.Builder, paneID string) {
 	tab := w.currentTab()
 	if tab == nil {
 		fmt.Fprintf(out, "\n[hop] no active tab\n")
+		w.failRysh("no active tab")
 		return
 	}
 	hoppedInfo := tab.actor.PaneHoppedInfo(paneID)
@@ -170,14 +177,8 @@ func (w *WorkspaceActor) resolvePaneAlias(paneID string) string {
 		if tabSnap == nil {
 			continue
 		}
-		for _, lane := range tabSnap.Lanes {
-			for _, g := range lane.PaneGroups {
-				for _, ps := range g.Panes {
-					if ps.ID == paneID {
-						return ps.Title
-					}
-				}
-			}
+		if p := domain.FindPaneInTab(tabSnap, paneID); p != nil {
+			return p.Title
 		}
 	}
 	if len(paneID) > 8 {

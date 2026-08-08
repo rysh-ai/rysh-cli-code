@@ -65,7 +65,8 @@ func (w *WorkspaceActor) handleAutoCommand(out *strings.Builder, paneID string, 
 	case "runs":
 		w.cmdAutoRunsList(out, "")
 	default:
-		fmt.Fprintf(out, "\n[auto] unknown subcommand: %q\n", args[0])
+		ryshWriter(out).UnknownIn("auto", args[0])
+		w.failRyshUsage("unknown %s subcommand: %q", "auto", args[0])
 		w.autoUsage(out)
 	}
 }
@@ -74,7 +75,8 @@ func (w *WorkspaceActor) handleAutoCommand(out *strings.Builder, paneID string, 
 // inline (the original subcommand); the other kinds get one-liners plus a
 // pointer to their own help.
 func (w *WorkspaceActor) autoUsage(out *strings.Builder) {
-	fmt.Fprintf(out, "\n[rysh] usage: ##auto <subcommand>  — reusable automations\n")
+	ryshWriter(out).UsageLine("##auto <subcommand>  — reusable automations")
+	w.failRyshUsage("usage: %s", "##auto <subcommand>  — reusable automations")
 	fmt.Fprintf(out, "  ##auto web ...       prompt-based web automations (recipes)\n")
 	fmt.Fprintf(out, "  ##auto task ...      plain prompt automations on the active pane (##auto task help)\n")
 	fmt.Fprintf(out, "  ##auto agent ...     automations that drive a named agent (##auto agent help)\n")
@@ -101,59 +103,62 @@ func (w *WorkspaceActor) handleWebCommand(out *strings.Builder, paneID string, a
 	case "import-google-session":
 		w.handleImportGoogleSession(out, paneID, args[1:])
 	default:
-		fmt.Fprintf(out, "\n[web] unknown subcommand: %q\n", args[0])
+		ryshWriter(out).UnknownIn("web", args[0])
+		w.failRyshUsage("unknown %s subcommand: %q", "web", args[0])
 		w.webUsage(out)
 	}
 }
 
 // webUsage prints the ##web usage (headless browser management).
 func (w *WorkspaceActor) webUsage(out *strings.Builder) {
-	fmt.Fprintf(out, "\n[rysh] usage:\n")
-	fmt.Fprintf(out, "  ##web headless on [--profile P] [url]  run this pane's browser in CLI-owned headless Chromium\n")
-	fmt.Fprintf(out, "  ##web headless off|status            stop / inspect the headless browser\n")
-	fmt.Fprintf(out, "  ##web headless login <profile> [url] open a HEADED Chromium on the profile to log in once\n")
-	fmt.Fprintf(out, "  ##web import-google-session <profile>  copy a real-Chrome Google login into the app's web profile\n")
-	fmt.Fprintf(out, "        (so third-party \"Sign in with Google\" works in web panes; log in first via `##web headless login`)\n")
-	fmt.Fprintf(out, "  (web automations moved: ##auto web — see ##auto help)\n\n")
+	ryshWriter(out).Usage(
+		"##web headless on [--profile P] [url]  run this pane's browser in CLI-owned headless Chromium",
+		"##web headless off|status            stop / inspect the headless browser",
+		"##web headless login <profile> [url] open a HEADED Chromium on the profile to log in once",
+		"##web import-google-session <profile>  copy a real-Chrome Google login into the app's web profile",
+		"      (so third-party \"Sign in with Google\" works in web panes; log in first via `##web headless login`)",
+		"(web automations moved: ##auto web — see ##auto help)",
+	)
 }
 
 func (w *WorkspaceActor) autoWebUsage(out *strings.Builder) {
-	fmt.Fprintf(out, "\n[rysh] usage:\n")
-	fmt.Fprintf(out, "  ##auto web list                      list saved web automations\n")
-	fmt.Fprintf(out, "  ##auto web show <name>               show a recipe (profile, url, prompt)\n")
-	fmt.Fprintf(out, "  ##auto web save <name> <prompt...>   save active pane's web binding + prompt as a recipe\n")
-	fmt.Fprintf(out, "  ##auto web run [--headless] [--step-interval N] [--max-iterations N] [--max-duration D] [--budget-size Np|Nb|Ns] [--takeover-when P] <name> [args...]\n")
-	fmt.Fprintf(out, "        run a recipe ({{args}}/{{arg1}}/{{output_dir}} substituted); flags override the recipe budget\n")
-	fmt.Fprintf(out, "  ##auto web resume [flags] <name> [args...]    fresh budget + load the latest result into context, then rerun\n")
-	fmt.Fprintf(out, "  ##auto web continue [flags] <name> [args...]  resume a cancelled/stopped run from its last checkpoint (budget re-armed)\n")
-	fmt.Fprintf(out, "  ##auto web results <name> [file]     list the recipe's saved results (or print one file)\n")
-	fmt.Fprintf(out, "  ##auto web check <name>              lint a recipe; ##auto web status|stop [name] inspect/stop live loops\n")
-	fmt.Fprintf(out, "  ##auto web runs [list]               list runs still executing (time consumed, loop pass, tokens consumed)\n")
-	fmt.Fprintf(out, "  ##auto web schedule|unschedule <name>  register the recipe's schedule: key as a ##cron job\n")
-	fmt.Fprintf(out, "  ##auto web delete <name>             delete a recipe\n")
-	fmt.Fprintf(out, "  --dry-run on run/resume prints the resolved plan without dispatching; web_read: text|screenshot picks the observation method\n")
-	fmt.Fprintf(out, "  loop flags: --no-loop --passes N --while-duration D --while-budget Nb; --each \"a,b,c\" fans out sequentially\n")
-	fmt.Fprintf(out, "  record flags: --record captures a browser screenshot every %s for the whole run and encodes one video (needs ffmpeg);\n", webauto.DefaultRecordInterval)
-	fmt.Fprintf(out, "        --recording-path <file|dir> sets the destination (default output_dir/recordings/<name>-<stamp>.mp4),\n")
-	fmt.Fprintf(out, "        --record-interval D changes the cadence, --no-record overrides a recipe/config that records by default;\n")
-	fmt.Fprintf(out, "        recipe block `record: {enabled, path, interval, format, quality, max_frames}`, config `automation.web.record`;\n")
-	fmt.Fprintf(out, "        a looped run records ALL passes into one video; recordings stay on local disk and are never shared or sent upstream\n")
-	fmt.Fprintf(out, "  on_success: [<kind>:]<name> chains the next recipe on completion; notify: {humanoid, channel, to} pings a channel on run end\n")
-	fmt.Fprintf(out, "  recipes live in .rysh/automations/webs/<name>.md (top-level: web_profile, url, description, args, output_dir;\n")
-	fmt.Fprintf(out, "        step: {interval, max_iterations, max_duration, auto_continue, auto_approve, budget: {size, watch: {takeover_when, takeover_prompt}}})\n")
-	fmt.Fprintf(out, "  step.auto_approve (default true) runs tool calls without the approval dialog; set false to be prompted\n")
-	fmt.Fprintf(out, "  step.budget.watch.takeover_when (default %d): once that %% of every ceiling is consumed the takeover leg starts with the rest\n", webauto.DefaultTakeoverWhen)
-	fmt.Fprintf(out, "        (a thin takeover share — <1m / <50 steps / <0.3 book — is floored at >=5m / >=100 steps / >=1 book so the wrap-up can finish)\n")
-	fmt.Fprintf(out, "  long runs auto-continue past each step.interval leg (default 50) until done or a ceiling is hit\n")
-	fmt.Fprintf(out, "        (defaults ~300 steps / 20m / 3 books; budget.size takes p/b/s units — page=%d tok, book=200 pages, shelf=20 books);\n", webauto.TokensPerPage)
-	fmt.Fprintf(out, "        when a ceiling is hit, step.budget.watch.takeover_prompt runs a graceful wrap-up\n")
-	fmt.Fprintf(out, "  loop: {do, while} is the loop-engineering layout: `do` = the per-pass budget (same fields as `step`; loop.do wins over step),\n")
-	fmt.Fprintf(out, "        `while` {enabled, max_iterations, max_duration, budget, prompts: {until, iterate_with}} repeats the pass until an LLM judge\n")
-	fmt.Fprintf(out, "        deems `until` fulfilled (default %d passes). while.max_duration/budget are TOTALS: bigger than the per-pass value → split\n", webauto.DefaultLoopIterations)
-	fmt.Fprintf(out, "        evenly across passes (do.X = while.X / max_iterations); smaller → ignored. enabled:false runs the pass once, loop off\n")
-	fmt.Fprintf(out, "  config-level defaults: automation.web.step in rysh.config.yaml (same shape as the recipe step block,\n")
-	fmt.Fprintf(out, "        incl. budget.watch.floor); precedence: run flags > recipe > config > built-ins\n")
-	fmt.Fprintf(out, "  results save to output_dir (default .rysh/automations/webs/<name>/results)\n\n")
+	forms := []string{}
+	forms = append(forms, "##auto web list                      list saved web automations")
+	forms = append(forms, "##auto web show <name>               show a recipe (profile, url, prompt)")
+	forms = append(forms, "##auto web save <name> <prompt...>   save active pane's web binding + prompt as a recipe")
+	forms = append(forms, "##auto web run [--headless] [--step-interval N] [--max-iterations N] [--max-duration D] [--budget-size Np|Nb|Ns] [--takeover-when P] <name> [args...]")
+	forms = append(forms, "      run a recipe ({{args}}/{{arg1}}/{{output_dir}} substituted); flags override the recipe budget")
+	forms = append(forms, "##auto web resume [flags] <name> [args...]    fresh budget + load the latest result into context, then rerun")
+	forms = append(forms, "##auto web continue [flags] <name> [args...]  resume a cancelled/stopped run from its last checkpoint (budget re-armed)")
+	forms = append(forms, "##auto web results <name> [file]     list the recipe's saved results (or print one file)")
+	forms = append(forms, "##auto web check <name>              lint a recipe; ##auto web status|stop [name] inspect/stop live loops")
+	forms = append(forms, "##auto web runs [list]               list runs still executing (time consumed, loop pass, tokens consumed)")
+	forms = append(forms, "##auto web schedule|unschedule <name>  register the recipe's schedule: key as a ##cron job")
+	forms = append(forms, "##auto web delete <name>             delete a recipe")
+	forms = append(forms, "--dry-run on run/resume prints the resolved plan without dispatching; web_read: text|screenshot picks the observation method")
+	forms = append(forms, "loop flags: --no-loop --passes N --while-duration D --while-budget Nb; --each \"a,b,c\" fans out sequentially")
+	forms = append(forms, fmt.Sprintf("record flags: --record captures a browser screenshot every %s for the whole run and encodes one video (needs ffmpeg);", webauto.DefaultRecordInterval))
+	forms = append(forms, "      --recording-path <file|dir> sets the destination (default output_dir/recordings/<name>-<stamp>.mp4),")
+	forms = append(forms, "      --record-interval D changes the cadence, --no-record overrides a recipe/config that records by default;")
+	forms = append(forms, "      recipe block `record: {enabled, path, interval, format, quality, max_frames}`, config `automation.web.record`;")
+	forms = append(forms, "      a looped run records ALL passes into one video; recordings stay on local disk and are never shared or sent upstream")
+	forms = append(forms, "on_success: [<kind>:]<name> chains the next recipe on completion; notify: {humanoid, channel, to} pings a channel on run end")
+	forms = append(forms, "recipes live in .rysh/automations/webs/<name>.md (top-level: web_profile, url, description, args, output_dir;")
+	forms = append(forms, "      step: {interval, max_iterations, max_duration, auto_continue, auto_approve, budget: {size, watch: {takeover_when, takeover_prompt}}})")
+	forms = append(forms, "step.auto_approve (default true) runs tool calls without the approval dialog; set false to be prompted")
+	forms = append(forms, fmt.Sprintf("step.budget.watch.takeover_when (default %d): once that %% of every ceiling is consumed the takeover leg starts with the rest", webauto.DefaultTakeoverWhen))
+	forms = append(forms, "      (a thin takeover share — <1m / <50 steps / <0.3 book — is floored at >=5m / >=100 steps / >=1 book so the wrap-up can finish)")
+	forms = append(forms, "long runs auto-continue past each step.interval leg (default 50) until done or a ceiling is hit")
+	forms = append(forms, fmt.Sprintf("      (defaults ~300 steps / 20m / 3 books; budget.size takes p/b/s units — page=%d tok, book=200 pages, shelf=20 books);", webauto.TokensPerPage))
+	forms = append(forms, "      when a ceiling is hit, step.budget.watch.takeover_prompt runs a graceful wrap-up")
+	forms = append(forms, "loop: {do, while} is the loop-engineering layout: `do` = the per-pass budget (same fields as `step`; loop.do wins over step),")
+	forms = append(forms, "      `while` {enabled, max_iterations, max_duration, budget, prompts: {until, iterate_with}} repeats the pass until an LLM judge")
+	forms = append(forms, fmt.Sprintf("      deems `until` fulfilled (default %d passes). while.max_duration/budget are TOTALS: bigger than the per-pass value → split", webauto.DefaultLoopIterations))
+	forms = append(forms, "      evenly across passes (do.X = while.X / max_iterations); smaller → ignored. enabled:false runs the pass once, loop off")
+	forms = append(forms, "config-level defaults: automation.web.step in rysh.config.yaml (same shape as the recipe step block,")
+	forms = append(forms, "      incl. budget.watch.floor); precedence: run flags > recipe > config > built-ins")
+	forms = append(forms, "results save to output_dir (default .rysh/automations/webs/<name>/results)")
+	ryshWriter(out).Usage(forms...)
 }
 
 // handleWebHeadlessCmd processes ##web headless subcommands.
@@ -168,6 +173,7 @@ func (w *WorkspaceActor) handleWebHeadlessCmd(out *strings.Builder, paneID strin
 		if profile != "" {
 			if _, err := browserinstance.EnsureProfile(w.browserWorkDir(), profile); err != nil {
 				fmt.Fprintf(out, "\n[web] could not prepare profile %q: %v\n", profile, err)
+				w.failRysh("could not prepare profile %q: %v", profile, err)
 				return
 			}
 		}
@@ -181,7 +187,8 @@ func (w *WorkspaceActor) handleWebHeadlessCmd(out *strings.Builder, paneID strin
 
 	case "login":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[web] usage: ##web headless login <profile> [url]\n")
+			ryshWriter(out).UsageLineIn("web", "##web headless login <profile> [url]")
+			w.failRyshUsage("usage: %s", "##web headless login <profile> [url]")
 			return
 		}
 		profile := browserinstance.SanitizeProfile(args[1])
@@ -192,11 +199,13 @@ func (w *WorkspaceActor) handleWebHeadlessCmd(out *strings.Builder, paneID strin
 		dir, err := browserinstance.EnsureProfile(w.browserWorkDir(), profile)
 		if err != nil {
 			fmt.Fprintf(out, "\n[web] could not prepare profile %q: %v\n", profile, err)
+			w.failRysh("could not prepare profile %q: %v", profile, err)
 			return
 		}
 		pid, err := cdp.LaunchInteractive(filepath.Join(dir, "headless"), url)
 		if err != nil {
 			fmt.Fprintf(out, "\n[web] could not open login browser: %v\n", err)
+			w.failRysh("could not open login browser: %v", err)
 			return
 		}
 		fmt.Fprintf(out, "\n[web] opened a browser window (pid %d) on headless profile %q\n", pid, profile)
@@ -204,7 +213,8 @@ func (w *WorkspaceActor) handleWebHeadlessCmd(out *strings.Builder, paneID strin
 		fmt.Fprintf(out, "[web] subsequent `##web headless on --profile %s` / `##auto web run --headless` runs reuse it\n", profile)
 
 	default:
-		fmt.Fprintf(out, "\n[web] usage: ##web headless on [--profile P] [url] | off | status | login <profile> [url]\n")
+		ryshWriter(out).UsageLineIn("web", "##web headless on [--profile P] [url] | off | status | login <profile> [url]")
+		w.failRyshUsage("usage: %s", "##web headless on [--profile P] [url] | off | status | login <profile> [url]")
 	}
 }
 
@@ -238,7 +248,8 @@ func parseHeadlessOnArgs(args []string) (profile, url string) {
 // transfer the resulting session cookies. Read-only: we never sign in here.
 func (w *WorkspaceActor) handleImportGoogleSession(out *strings.Builder, paneID string, args []string) {
 	if len(args) < 1 || args[0] == "help" {
-		fmt.Fprintf(out, "\n[web] usage: ##web import-google-session <profile>\n")
+		ryshWriter(out).UsageLineIn("web", "##web import-google-session <profile>")
+		w.failRyshUsage("usage: %s", "##web import-google-session <profile>")
 		fmt.Fprintf(out, "  1) log in first, in real Chrome:  ##web headless login <profile> https://accounts.google.com/\n")
 		fmt.Fprintf(out, "  2) close that window, then:       ##web import-google-session <profile>\n")
 		fmt.Fprintf(out, "  3) use it:                        ##mode new web --profile <profile> <a \"Sign in with Google\" site>\n")
@@ -253,6 +264,7 @@ func (w *WorkspaceActor) handleImportGoogleSession(out *strings.Builder, paneID 
 	all, err := cdp.ExtractCookies(ctx, dir)
 	if err != nil {
 		fmt.Fprintf(out, "\n[web] could not read profile %q: %v\n", profile, err)
+		w.failRysh("could not read profile %q: %v", profile, err)
 		return
 	}
 	cookies := cdp.GoogleIdentityCookies(all)
@@ -295,40 +307,46 @@ func (w *WorkspaceActor) handleWebAuto(out *strings.Builder, paneID string, args
 		w.cmdWebAutoList(out)
 	case "show":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[web] usage: ##auto web show <name>\n")
+			ryshWriter(out).UsageLineIn("web", "##auto web show <name>")
+			w.failRyshUsage("usage: %s", "##auto web show <name>")
 			return
 		}
 		w.cmdWebAutoShow(out, args[1])
 	case "save":
 		if len(args) < 3 {
-			fmt.Fprintf(out, "\n[web] usage: ##auto web save <name> <prompt...>\n")
+			ryshWriter(out).UsageLineIn("web", "##auto web save <name> <prompt...>")
+			w.failRyshUsage("usage: %s", "##auto web save <name> <prompt...>")
 			return
 		}
 		w.cmdWebAutoSave(out, paneID, args[1], strings.Join(args[2:], " "))
 	case "run":
 		name, runArgs, headless, ov := parseWebAutoRunFlags(args[1:])
 		if name == "" {
-			fmt.Fprintf(out, "\n[web] usage: ##auto web run [--headless] [--step-interval N] [--max-iterations N] [--max-duration D] [--budget-size Np|Nb|Ns] [--takeover-when P] <name> [args...]\n")
+			ryshWriter(out).UsageLineIn("web", "##auto web run [--headless] [--step-interval N] [--max-iterations N] [--max-duration D] [--budget-size Np|Nb|Ns] [--takeover-when P] <name> [args...]")
+			w.failRyshUsage("usage: %s", "##auto web run [--headless] [--step-interval N] [--max-iterations N] [--max-duration D] [--budget-size Np|Nb|Ns] [--takeover-when P] <name> [args...]")
 			return
 		}
 		w.cmdWebAutoRun(out, paneID, name, runArgs, headless, ov, "")
 	case "resume":
 		name, runArgs, headless, ov := parseWebAutoRunFlags(args[1:])
 		if name == "" {
-			fmt.Fprintf(out, "\n[web] usage: ##auto web resume [flags] <name> [args...]  (fresh budget + loads the latest result into context)\n")
+			ryshWriter(out).UsageLineIn("web", "##auto web resume [flags] <name> [args...]  (fresh budget + loads the latest result into context)")
+			w.failRyshUsage("usage: %s", "##auto web resume [flags] <name> [args...]  (fresh budget + loads the latest result into context)")
 			return
 		}
 		w.cmdWebAutoResume(out, paneID, name, runArgs, headless, ov)
 	case "continue":
 		name, runArgs, _, ov := parseWebAutoRunFlags(args[1:])
 		if name == "" {
-			fmt.Fprintf(out, "\n[web] usage: ##auto web continue [flags] <name> [args...]  (resume a cancelled/stopped run from its last checkpoint)\n")
+			ryshWriter(out).UsageLineIn("web", "##auto web continue [flags] <name> [args...]  (resume a cancelled/stopped run from its last checkpoint)")
+			w.failRyshUsage("usage: %s", "##auto web continue [flags] <name> [args...]  (resume a cancelled/stopped run from its last checkpoint)")
 			return
 		}
 		w.cmdWebAutoContinue(out, paneID, name, runArgs, ov)
 	case "check":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[web] usage: ##auto web check <name>\n")
+			ryshWriter(out).UsageLineIn("web", "##auto web check <name>")
+			w.failRyshUsage("usage: %s", "##auto web check <name>")
 			return
 		}
 		w.cmdAutoCheck(out, webKindSpec(), args[1])
@@ -344,19 +362,22 @@ func (w *WorkspaceActor) handleWebAuto(out *strings.Builder, paneID string, args
 		w.cmdAutoLoopStop(out, webKindSpec(), name, paneID)
 	case "schedule":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[web] usage: ##auto web schedule <name> [args...]\n")
+			ryshWriter(out).UsageLineIn("web", "##auto web schedule <name> [args...]")
+			w.failRyshUsage("usage: %s", "##auto web schedule <name> [args...]")
 			return
 		}
 		w.cmdAutoSchedule(out, webKindSpec(), args[1], args[2:])
 	case "unschedule":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[web] usage: ##auto web unschedule <name>\n")
+			ryshWriter(out).UsageLineIn("web", "##auto web unschedule <name>")
+			w.failRyshUsage("usage: %s", "##auto web unschedule <name>")
 			return
 		}
 		w.cmdAutoUnschedule(out, webKindSpec(), args[1])
 	case "results":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[web] usage: ##auto web results <name> [file]\n")
+			ryshWriter(out).UsageLineIn("web", "##auto web results <name> [file]")
+			w.failRyshUsage("usage: %s", "##auto web results <name> [file]")
 			return
 		}
 		file := ""
@@ -366,16 +387,19 @@ func (w *WorkspaceActor) handleWebAuto(out *strings.Builder, paneID string, args
 		w.cmdWebAutoResults(out, args[1], file)
 	case "delete":
 		if len(args) < 2 {
-			fmt.Fprintf(out, "\n[web] usage: ##auto web delete <name>\n")
+			ryshWriter(out).UsageLineIn("web", "##auto web delete <name>")
+			w.failRyshUsage("usage: %s", "##auto web delete <name>")
 			return
 		}
 		if err := w.webAutoStore().Delete(args[1]); err != nil {
 			fmt.Fprintf(out, "\n[web] delete failed: %v\n", err)
+			w.failRysh("delete failed: %v", err)
 			return
 		}
 		fmt.Fprintf(out, "\n[web] deleted automation %q\n", args[1])
 	default:
 		w.autoWebUsage(out)
+		w.failRyshUsage("unknown ##auto web subcommand: %q", sub)
 	}
 }
 
@@ -405,6 +429,7 @@ func (w *WorkspaceActor) cmdWebAutoShow(out *strings.Builder, name string) {
 	a, err := w.webAutoStore().Load(name)
 	if err != nil {
 		fmt.Fprintf(out, "\n[web] automation %q not found\n", name)
+		w.failRysh("automation %q not found", name)
 		return
 	}
 	fmt.Fprintf(out, "\n[web] automation %q\n", a.Name)
@@ -472,6 +497,7 @@ func (w *WorkspaceActor) cmdWebAutoSave(out *strings.Builder, paneID, name, prom
 	}
 	if err := w.webAutoStore().Save(a); err != nil {
 		fmt.Fprintf(out, "\n[web] save failed: %v\n", err)
+		w.failRysh("save failed: %v", err)
 		return
 	}
 	fmt.Fprintf(out, "\n[web] saved automation %q (profile %s, url %s)\n",
@@ -746,12 +772,14 @@ func (w *WorkspaceActor) cmdWebAutoRun(out *strings.Builder, paneID, name string
 	a, err := w.webAutoStore().Load(name)
 	if err != nil {
 		fmt.Fprintf(out, "\n[web] automation %q not found — ##auto web list\n", name)
+		w.failRysh("automation %q not found — ##auto web list", name)
 		return
 	}
 
 	profile := browserinstance.SanitizeProfile(a.Profile)
 	if _, err := browserinstance.EnsureProfile(w.browserWorkDir(), profile); err != nil {
 		fmt.Fprintf(out, "\n[web] could not prepare browser profile %q: %v\n", profile, err)
+		w.failRysh("could not prepare browser profile %q: %v", profile, err)
 		return
 	}
 
@@ -764,6 +792,7 @@ func (w *WorkspaceActor) cmdWebAutoRun(out *strings.Builder, paneID, name string
 	outputDir := w.webAutoStore().ResolveOutputDir(a)
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		fmt.Fprintf(out, "\n[web] could not prepare results dir %q: %v\n", outputDir, err)
+		w.failRysh("could not prepare results dir %q: %v", outputDir, err)
 		return
 	}
 
@@ -888,6 +917,7 @@ func (w *WorkspaceActor) cmdWebAutoResume(out *strings.Builder, paneID, name str
 	a, err := w.webAutoStore().Load(name)
 	if err != nil {
 		fmt.Fprintf(out, "\n[web] automation %q not found — ##auto web list\n", name)
+		w.failRysh("automation %q not found — ##auto web list", name)
 		return
 	}
 	dir := w.webAutoStore().ResolveOutputDir(a)
@@ -914,6 +944,7 @@ func (w *WorkspaceActor) cmdWebAutoContinue(out *strings.Builder, paneID, name s
 	a, err := w.webAutoStore().Load(name)
 	if err != nil {
 		fmt.Fprintf(out, "\n[web] automation %q not found — ##auto web list\n", name)
+		w.failRysh("automation %q not found — ##auto web list", name)
 		return
 	}
 	// Fail-closed (design 013): resuming an automation restarts the tool loop
@@ -1012,6 +1043,8 @@ func renderAutoResults(out *strings.Builder, label string, store *webauto.Store,
 		path := filepath.Join(dir, safe)
 		data, err := os.ReadFile(path)
 		if err != nil {
+			// renderAutoResults is a free function with no actor to report to;
+			// its caller marks the failure.
 			fmt.Fprintf(out, "\n[%s] cannot read result %q: %v\n", label, safe, err)
 			fmt.Fprintf(out, "[%s] list results: ##auto %s results %s\n", label, label, name)
 			return

@@ -99,11 +99,7 @@ func (w *WorkspaceActor) initResourceCounts() {
 		if tabSnap == nil {
 			continue
 		}
-		for _, lane := range tabSnap.Lanes {
-			for _, g := range lane.PaneGroups {
-				w.resCounts.panes += len(g.Panes)
-			}
-		}
+		w.resCounts.panes += domain.CountPanesInTab(tabSnap)
 	}
 }
 

@@ -37,7 +37,7 @@ func GenerateForNewFile(content, filePath string) string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("--- /dev/null\n"))
+	sb.WriteString("--- /dev/null\n")
 	sb.WriteString(fmt.Sprintf("+++ b/%s\n", filePath))
 	sb.WriteString(fmt.Sprintf("@@ -0,0 +1,%d @@\n", len(lines)))
 
@@ -57,7 +57,7 @@ func GenerateForDelete(content, filePath string) string {
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("--- a/%s\n", filePath))
-	sb.WriteString(fmt.Sprintf("+++ /dev/null\n"))
+	sb.WriteString("+++ /dev/null\n")
 	sb.WriteString(fmt.Sprintf("@@ -1,%d +0,0 @@\n", len(lines)))
 
 	for _, line := range lines {
@@ -218,25 +218,17 @@ func groupIntoHunks(edits []edit, oldLen, newLen, contextLines int) []hunk {
 
 		hunkEdits := edits[hunkStart:hunkEnd]
 
-		// Calculate old/new start and count
+		// Count the lines each side contributes to this hunk.
+		//
+		// This loop used to also compute oldStart/newStart from the first edit,
+		// in a three-branch switch that assigned the same pair of expressions in
+		// every branch — and then the block below reset both to 0 and derived
+		// them again. The first computation could never be observed. Flagged by
+		// ineffassign (six reports, one per assignment); removed rather than
+		// silenced, since the surviving derivation is the one that was always
+		// in effect.
 		var oldStart, oldCount, newStart, newCount int
-		firstSet := false
 		for _, e := range hunkEdits {
-			if !firstSet {
-				switch e.kind {
-				case editEqual:
-					oldStart = e.oldIdx + 1
-					newStart = e.newIdx + 1
-				case editDelete:
-					oldStart = e.oldIdx + 1
-					newStart = e.newIdx + 1
-					// For delete, newIdx isn't set meaningfully; compute from context
-				case editInsert:
-					oldStart = e.oldIdx + 1
-					newStart = e.newIdx + 1
-				}
-				firstSet = true
-			}
 			switch e.kind {
 			case editEqual:
 				oldCount++
@@ -248,9 +240,7 @@ func groupIntoHunks(edits []edit, oldLen, newLen, contextLines int) []hunk {
 			}
 		}
 
-		// Fix start positions: find first valid old/new index
-		oldStart = 0
-		newStart = 0
+		// Start positions: the first edit on each side that occupies a line there.
 		for _, e := range hunkEdits {
 			if e.kind == editEqual || e.kind == editDelete {
 				oldStart = e.oldIdx + 1

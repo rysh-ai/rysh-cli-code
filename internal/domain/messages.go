@@ -33,6 +33,27 @@ type ConversationMessageSnapshot struct {
 	SubjectToShare   bool   `json:"subject_to_share,omitempty"`
 	Role             string `json:"role,omitempty"`
 	Streaming        bool   `json:"streaming,omitempty"`
+	// ProviderName / Model attribute an ANSWER to the model that produced it.
+	// MessageSource only says "ai"; once `##llm select` can change the model
+	// mid-conversation, a pane's stored turns can come from two different
+	// models and nothing else in this struct tells them apart. Empty on
+	// questions and on answers recorded before attribution existed.
+	ProviderName string `json:"provider_name,omitempty"`
+	Model        string `json:"model,omitempty"`
+}
+
+// Attribution renders an answer's producer for display, e.g. "openai
+// (gpt-5.6-luna)". Empty when the message carries no attribution.
+func (m ConversationMessageSnapshot) Attribution() string {
+	switch {
+	case m.ProviderName == "" && m.Model == "":
+		return ""
+	case m.Model == "":
+		return m.ProviderName
+	case m.ProviderName == "":
+		return m.Model
+	}
+	return m.ProviderName + " (" + m.Model + ")"
 }
 
 // ---------------------------------------------------------------------------
@@ -180,11 +201,31 @@ type PaneSnapshot struct {
 	// even with the same profile/url. The desktop app uses it as an explicit
 	// "show & (re)bind the browser now" signal, so re-running the command from
 	// another display mode reliably switches the pane back to web.
-	WebActivateSeq int    `json:"web_activate_seq,omitempty"`
-	Output         string `json:"output"`
-	Status         string `json:"status"`
-	LastCommand    string `json:"last_command"`
-	ProviderName   string `json:"provider_name"`
+	WebActivateSeq int `json:"web_activate_seq,omitempty"`
+	// PTYRows/PTYCols are the pane's live PTY grid, and SizeViewports is how
+	// many viewports are currently claiming a size on it (see
+	// msg.MsgPaneResize). A pane on screen in more than one place is sized to
+	// the SMALLEST claim, so a large window can legitimately render a small
+	// grid with space around it. These three fields are what let `##pane info`
+	// answer "why is this pane smaller than its box" instead of leaving it as
+	// a mystery.
+	PTYRows       int    `json:"pty_rows,omitempty"`
+	PTYCols       int    `json:"pty_cols,omitempty"`
+	SizeViewports int    `json:"size_viewports,omitempty"`
+	Output      string `json:"output"`
+	Status      string `json:"status"`
+	LastCommand string `json:"last_command"`
+	// Program is the pane's live FOREGROUND executable ("claude", "vim", …),
+	// empty when the pane is at its shell prompt or where it cannot be resolved
+	// (see processName). It answers "which panes are running an agent?" as a
+	// query over structure, rather than by rendering each pane's screen and
+	// looking for a TUI's box-drawing characters.
+	Program string `json:"program,omitempty"`
+	// Meta is free-form per-pane metadata owned by whoever is driving the pane
+	// (`##pane meta`). rysh never interprets it; it persists it, so a
+	// supervisor's notes about a pane outlive the supervisor.
+	Meta         map[string]string `json:"meta,omitempty"`
+	ProviderName string            `json:"provider_name"`
 	// ProviderOverride / ProviderOverrideModel persist the `##pane provider`
 	// runtime selection (design 002 §3.4) so it survives detach/attach.
 	// ProviderName above stays the EFFECTIVE provider (the override when set,
@@ -252,6 +293,16 @@ type PaneSnapshot struct {
 	// straight to the real stdout, which must never happen for plain commands.
 	FullScreen   bool `json:"full_screen,omitempty"`
 	MouseEnabled bool `json:"mouse_enabled,omitempty"` // child process has mouse tracking on
+	// MouseProto and MouseSGR describe HOW the child wants mouse events, not
+	// just whether it wants them: the tracking mode it asked for (one of the
+	// vterm.Mouse* constants) and whether it enabled SGR extended encoding
+	// (\x1b[?1006h). A child that enabled \x1b[?1000h alone expects the legacy
+	// X10 byte encoding and cannot parse an SGR report — sending the wrong one
+	// makes mouse events surface as literal text in the child's input line.
+	// Empty MouseProto with MouseEnabled set means the snapshot came from a peer
+	// that predates these fields; treat it as SGR, the previous behaviour.
+	MouseProto string `json:"mouse_proto,omitempty"`
+	MouseSGR   bool   `json:"mouse_sgr,omitempty"`
 	// Child process enabled DECCKM (application cursor keys): arrows must be
 	// sent as \x1bO[A-D], not \x1b[[A-D] (less ignores the CSI form).
 	AppCursorKeys bool     `json:"app_cursor_keys,omitempty"`

@@ -126,6 +126,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeEmail {
 			return m.updateEmailMode(msg)
 		}
+		// The `##llm select` picker is modal: it owns every key (including the
+		// arrows the shell readline would otherwise take for history) until a
+		// model is bound or the user escapes out.
+		if m.mode == modeLLMPicker {
+			return m.updateLLMPickerMode(msg)
+		}
 
 		// Raw mode: forward most keys to PTY, but intercept rysh
 		// multiplexer controls so the user can navigate, resize, and
@@ -552,6 +558,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// per-server map (footer renders it) and re-arm the listener.
 		m.applyMCPStatus(msg.st)
 		return m, m.listenMCPStatusCmd()
+
+	case llmPickerOpenMsg:
+		// The daemon answered a bare `##llm select`. Open the picker and re-arm
+		// the listener; openLLMPicker declines an empty payload, in which case
+		// the printed menu (with its reasons) is what the user is left with.
+		m.openLLMPicker(msg.open)
+		return m, m.listenLLMPickerCmd()
 
 	case emailEventMsg:
 		// A structured email push (list/detail/compose/changed) for some pane's

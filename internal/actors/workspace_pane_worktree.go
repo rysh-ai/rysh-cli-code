@@ -57,6 +57,11 @@ type groupWorktreeRef struct {
 // title), mirroring the agent path's agent/<name> convention — branch, pane
 // title and worktree directory all share one human-readable handle.
 func (w *WorkspaceActor) handlePaneNewCommand(ctx actor.Context, out *strings.Builder, paneID string, args []string) {
+	rest, withClaude := stripClaudeFlag(args)
+	if withClaude {
+		w.handlePaneNewClaude(ctx, out, paneID, rest)
+		return
+	}
 	rest, withWorktree := stripWorktreeFlag(args)
 	if !withWorktree {
 		// Plain `##pane new` is an alias of `##new pane`.
@@ -68,25 +73,30 @@ func (w *WorkspaceActor) handlePaneNewCommand(ctx actor.Context, out *strings.Bu
 	// loudly), here the worktree IS the point: fail closed, create no pane.
 	if !worktree.IsGitRepo(w.baseDir()) {
 		fmt.Fprintf(out, "\n[rysh] ##pane new --worktree: %s is not a git repository\n", w.baseDir())
+		w.failRysh("##pane new --worktree: %s is not a git repository", w.baseDir())
 		return
 	}
 	root, err := worktree.RepoRoot(w.baseDir())
 	if err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "\n[rysh] ##pane new --worktree: %v\n", err)
 		return
 	}
 	if err := w.checkLimits(1); err != nil {
+		w.failRysh("%v", err)
 		fmt.Fprintf(out, "\n[rysh] %v\n", err)
 		return
 	}
 	tab := w.resolveOriginTab(paneID)
 	if tab == nil {
 		fmt.Fprintf(out, "\n[rysh] no active tab\n")
+		w.failRysh("no active tab")
 		return
 	}
 	laneID := w.resolveLaneInTab(tab, "")
 	if laneID == "" {
 		fmt.Fprintf(out, "\n[rysh] no active lane\n")
+		w.failRysh("no active lane")
 		return
 	}
 
@@ -131,6 +141,7 @@ func (w *WorkspaceActor) provisionPaneWorktree(out *strings.Builder, root, branc
 	if info, statErr := os.Stat(path); statErr != nil || !info.IsDir() {
 		if err := worktree.Add(root, path, branch); err != nil {
 			fmt.Fprintf(out, "\n[rysh] ##pane new --worktree: create failed: %v\n", err)
+			w.failRysh("##pane new --worktree: create failed: %v", err)
 			return "", ""
 		}
 		fmt.Fprintf(out, "\n[rysh] created worktree %s (branch %s)\n", path, branch)

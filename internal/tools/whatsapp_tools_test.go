@@ -41,7 +41,7 @@ func TestWhatsAppDraftTool(t *testing.T) {
 }
 
 func TestWhatsAppSendToolRequiresApproval(t *testing.T) {
-	tool := NewWhatsAppSendTool(channels.NewWhatsAppAdapter(msg.ChannelConfig{}), channels.NewDraftStore())
+	tool := NewWhatsAppSendTool(channels.NewWhatsAppAdapter(msg.ChannelConfig{}), channels.NewDraftStore(), nil)
 	if !tool.RequiresApproval(nil) {
 		t.Error("whatsapp_send MUST require approval")
 	}
@@ -49,10 +49,10 @@ func TestWhatsAppSendToolRequiresApproval(t *testing.T) {
 
 func TestWhatsAppSendToolResolvesDraft(t *testing.T) {
 	drafts := channels.NewDraftStore()
-	id := drafts.Create("447700900123", "", "hello", "")
+	id := drafts.Create("whatsapp", "447700900123", "", "hello", "")
 	// Adapter is not connected, so Send fails — but this proves the tool resolves
 	// the draft (gets past the lookup) and surfaces the adapter error cleanly.
-	tool := NewWhatsAppSendTool(channels.NewWhatsAppAdapter(msg.ChannelConfig{}), drafts)
+	tool := NewWhatsAppSendTool(channels.NewWhatsAppAdapter(msg.ChannelConfig{}), drafts, nil)
 	out, err := tool.Execute(context.Background(),
 		json.RawMessage(`{"draft_id":"`+id+`"}`))
 	if err != nil {
@@ -70,7 +70,7 @@ func TestWhatsAppSendToolResolvesDraft(t *testing.T) {
 }
 
 func TestWhatsAppSendTemplateToolRequiresApproval(t *testing.T) {
-	tool := NewWhatsAppSendTemplateTool(channels.NewWhatsAppAdapter(msg.ChannelConfig{}))
+	tool := NewWhatsAppSendTemplateTool(channels.NewWhatsAppAdapter(msg.ChannelConfig{}), nil)
 	if !tool.RequiresApproval(nil) {
 		t.Error("whatsapp_send_template MUST require approval")
 	}
@@ -80,7 +80,7 @@ func TestWhatsAppSendTemplateToolRequiresApproval(t *testing.T) {
 }
 
 func TestWhatsAppSendTemplateToolValidation(t *testing.T) {
-	tool := NewWhatsAppSendTemplateTool(channels.NewWhatsAppAdapter(msg.ChannelConfig{}))
+	tool := NewWhatsAppSendTemplateTool(channels.NewWhatsAppAdapter(msg.ChannelConfig{}), nil)
 
 	// Missing template_name -> validation error output (not a hard error).
 	out, err := tool.Execute(context.Background(), json.RawMessage(`{"to":"447700900123"}`))
@@ -106,7 +106,7 @@ func TestWhatsAppSendTemplateToolValidation(t *testing.T) {
 func TestWhatsAppSendTemplateToolSurfacesAdapterError(t *testing.T) {
 	// Adapter is not connected, so the send fails — this proves the tool passes
 	// validation and surfaces the adapter error cleanly (mirrors whatsapp_send).
-	tool := NewWhatsAppSendTemplateTool(channels.NewWhatsAppAdapter(msg.ChannelConfig{}))
+	tool := NewWhatsAppSendTemplateTool(channels.NewWhatsAppAdapter(msg.ChannelConfig{}), nil)
 	out, err := tool.Execute(context.Background(),
 		json.RawMessage(`{"to":"447700900123","template_name":"hello_world","language":"en_US","params":["Alice"]}`))
 	if err != nil {

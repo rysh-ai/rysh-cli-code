@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 )
 
@@ -27,14 +28,8 @@ func (w *WorkspaceActor) mirrorScrollbackRows(mirrorPaneID string) []string {
 	// Append the source pane's VT screen carried in the snapshot so copy mode shows
 	// history then a frame at the bottom. The live screen itself is held by the
 	// TUI's vtframe stream (not the WorkspaceActor), so this is the doc seed only.
-	for _, lane := range mt.snap.Lanes {
-		for _, g := range lane.PaneGroups {
-			for _, p := range g.Panes {
-				if p.ID == srcID {
-					rows = append(rows, p.VTScreen...)
-				}
-			}
-		}
+	if p := domain.FindPaneInTab(&mt.snap, srcID); p != nil {
+		rows = append(rows, p.VTScreen...)
 	}
 	return rows
 }

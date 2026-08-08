@@ -18,8 +18,10 @@ const (
 	TagProxyAuditSnapshotRequest = sharedmsg.TagProxyAuditSnapshotRequest
 	TagProxyAuditSnapshotReply   = sharedmsg.TagProxyAuditSnapshotReply
 
-	ProxyBudgetOK       = sharedmsg.ProxyBudgetOK
-	ProxyBudgetExceeded = sharedmsg.ProxyBudgetExceeded
+	ProxyBudgetOK          = sharedmsg.ProxyBudgetOK
+	ProxyBudgetExceeded    = sharedmsg.ProxyBudgetExceeded
+	ProxyBudgetRateLimited = sharedmsg.ProxyBudgetRateLimited
+	ProxyBlocked           = sharedmsg.ProxyBlocked
 )
 
 var (

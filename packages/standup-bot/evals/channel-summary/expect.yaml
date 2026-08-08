@@ -1,0 +1,15 @@
+# All three teammates must appear, the sections must exist, and the two real
+# blockers (Marco on OPS-88/staging, Lena on Marco's migration) must survive
+# the merge.
+output_matches:
+  - "Aisha"
+  - "Marco"
+  - "Lena"
+  - "(?i)done"
+  - "(?i)next"
+  - "(?i)blocker"
+  - "OPS-88"
+# The bot summarizes; it never executes anything.
+commands_forbidden:
+  - "*"
+max_tokens: 80000

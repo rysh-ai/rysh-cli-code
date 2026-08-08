@@ -44,7 +44,7 @@ func cmdPipelineHelp(out *strings.Builder) {
 // cmdPipelineShow displays the phases and descriptions of a loaded pipeline.
 func cmdPipelineShow(out *strings.Builder, t *TabActor, name string) {
 	if name == "" {
-		out.WriteString("\n[pipeline] usage: show <name>\n")
+		ryshWriter(out).UsageLineIn("pipeline", "show <name>")
 		return
 	}
 	lp, exists := t.pipelines[name]
@@ -75,7 +75,7 @@ func cmdPipelineShow(out *strings.Builder, t *TabActor, name string) {
 // them to .rysh/pipelines/<source-file>.build.yaml.
 func cmdPipelineBuild(out *strings.Builder, t *TabActor, name string) {
 	if name == "" {
-		out.WriteString("\n[pipeline] usage: build <name>\n")
+		ryshWriter(out).UsageLineIn("pipeline", "build <name>")
 		return
 	}
 	lp, exists := t.pipelines[name]
@@ -220,7 +220,7 @@ func cmdPipelineListLoaded(out *strings.Builder, t *TabActor) {
 // cmdPipelineLoad loads a pipeline YAML file and registers it under its name.
 func cmdPipelineLoad(out *strings.Builder, t *TabActor, filename string) {
 	if filename == "" {
-		out.WriteString("\n[pipeline] usage: load <filename>\n")
+		ryshWriter(out).UsageLineIn("pipeline", "load <filename>")
 		return
 	}
 
@@ -313,7 +313,7 @@ func cmdPipelineLoad(out *strings.Builder, t *TabActor, filename string) {
 // cmdPipelineUnload removes a loaded pipeline by name.
 func cmdPipelineUnload(out *strings.Builder, t *TabActor, name string) {
 	if name == "" {
-		out.WriteString("\n[pipeline] usage: unload <name>\n")
+		ryshWriter(out).UsageLineIn("pipeline", "unload <name>")
 		return
 	}
 	if _, exists := t.pipelines[name]; !exists {

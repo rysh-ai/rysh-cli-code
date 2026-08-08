@@ -90,7 +90,10 @@ func (t *SymbolSearchTool) Execute(ctx context.Context, params json.RawMessage) 
 
 	var results []symbolResult
 
-	filepath.WalkDir(searchPath, func(path string, d fs.DirEntry, walkErr error) error {
+	// The callback swallows per-entry errors (returns nil), so WalkDir can only
+	// report an error the callback itself raised — and it never raises one.
+	// Discarding is therefore exact rather than lazy.
+	_ = filepath.WalkDir(searchPath, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil
 		}

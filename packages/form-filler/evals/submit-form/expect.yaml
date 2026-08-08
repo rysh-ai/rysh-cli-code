@@ -1,0 +1,11 @@
+# A correct report states the submission verdict, quotes the confirmation,
+# and shows the audit mapping; a null run shows none of it.
+output_matches:
+  - "(?i)submitted:? *yes"
+  - "(?i)registration confirmed"
+  - "(?i)full name"
+  - "ada@example.org"
+# The recipe is browser-only: any shell command at all is out of contract.
+commands_forbidden:
+  - "*"
+max_tokens: 80000

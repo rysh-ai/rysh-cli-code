@@ -1,0 +1,123 @@
+# golangci-lint configuration for rysh-cli.
+#
+# Added 2026-08-01. Until now nothing linted this module: CI ran build, vet and
+# test, so a structural regression only failed if a hand-written test happened
+# to catch it. The `##` command surface has three such tests guarding its output
+# vocabulary; everything else had nothing.
+#
+# The set below is deliberately small. A linter people turn off is worse than no
+# linter, so this enables the checks that find real defects — unchecked errors,
+# ineffectual assignments, dead code, and staticcheck's correctness rules — and
+# leaves the stylistic ones off. Widen it when the team wants to, not because a
+# default said so.
+#
+# Run locally with:  GOWORK=off golangci-lint run ./...
+# (rysh-cli is excluded from the repo's go.work — see CLAUDE.md.)
+#
+# The module is clean: `golangci-lint run ./...` reports 0 issues, and CI gates
+# the whole module rather than only new code. Keep it that way — if a change
+# needs an exclusion, add it here with the reason, don't weaken the gate.
+#
+# Clearing the original 53 findings turned up three real defects that the test
+# suite could not reach:
+#
+#   - internal/actors/store.go   namedStore.List dereferenced s.kind with no nil
+#     check while the tiers either side of it both checked s != nil. A nil store
+#     panicked instead of returning an empty list. (SA5011)
+#   - internal/diff/diff.go      a 17-line block computed oldStart/newStart and
+#     the code below reset both to 0 and derived them again, so the first
+#     computation could never be observed. (ineffassign)
+#   - internal/tui/model.go      sessionName was computed in two separate
+#     functions and never read in either — a consumer was removed at some point
+#     and the producer left behind. (ineffassign)
+#
+version: "2"
+
+run:
+  # The module is ~168k lines; the default 1m is not enough on a cold cache.
+  timeout: 10m
+
+linters:
+  default: none
+  enable:
+    - errcheck      # unchecked error returns
+    - govet         # the same vet CI already runs, kept here so one command covers everything
+    - ineffassign   # assignments never read
+    - staticcheck   # correctness (SA), simplification (S), style (ST), quickfix (QF)
+    - unused        # dead code
+
+  settings:
+    staticcheck:
+      # SA (correctness), S (simplification) and ST (style) are on; the whole QF
+      # family is off.
+      #
+      # QF is "quickfix" — editor-refactor advice, not defect detection. QF1001
+      # wants De Morgan's law applied to booleans that read fine as written, and
+      # QF1012 (WriteString(fmt.Sprintf(...)) -> Fprintf) alone accounts for 179
+      # sites here. Rewriting all of them is a large mechanical diff with real
+      # typo risk and no behaviour change; that trade is not worth making to
+      # satisfy a style preference.
+      checks:
+        - all
+        - -QF1001
+        - -QF1002
+        - -QF1003
+        - -QF1006
+        - -QF1007
+        - -QF1008
+        - -QF1009
+        - -QF1010
+        - -QF1011
+        - -QF1012
+
+    errcheck:
+      # Deferred Close on a read-only handle, and Fprintf to a strings.Builder,
+      # cannot meaningfully fail and checking them adds noise, not safety.
+      exclude-functions:
+        - (*strings.Builder).WriteString
+        - (*strings.Builder).WriteRune
+        - (*strings.Builder).WriteByte
+        - (*strings.Builder).Write
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      # Tests may ignore errors from setup helpers: a failed os.Setenv or
+      # tmpfile Close in a test surfaces as the test failing, and threading a
+      # check through every helper buys nothing.
+      - path: _test\.go
+        linters:
+          - errcheck
+
+      # Table-driven tests and fixtures legitimately declare helpers that only
+      # some builds use.
+      - path: _test\.go
+        linters:
+          - unused
+
+      # internal/msg/shared_aliases.go exists to alias types that rysh-shared
+      # has deprecated, so downstream code keeps compiling. Reporting SA1019
+      # there is reporting the file's purpose.
+      - path: internal/msg/shared_aliases\.go
+        text: "SA1019"
+        linters:
+          - staticcheck
+
+      # internal/forge/ingest/grpc_reflect.go speaks gRPC reflection v1alpha,
+      # which upstream has deprecated wholesale. Moving to v1 is a functional
+      # change to reflection support, not lint cleanup — it needs its own change
+      # with its own testing. Excluded until then rather than left red.
+      # TODO: migrate to grpc/reflection/v1 and drop this exclusion.
+      - path: internal/forge/ingest/grpc_reflect\.go
+        text: "SA1019"
+        linters:
+          - staticcheck
+
+issues:
+  # Report everything rather than the default 3-per-linter / 3-per-issue caps,
+  # so the count in CI is the real count.
+  max-issues-per-linter: 0
+  max-same-issues: 0

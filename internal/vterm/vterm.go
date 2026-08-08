@@ -797,6 +797,72 @@ func (v *VTerm) IsMouseEnabled() bool {
 	return v.term.Mode()&vt10x.ModeMouseMask != 0
 }
 
+// Mouse tracking protocols a child program can request. These name the tracking
+// MODE — which events the child wants reported. The wire ENCODING is a separate
+// axis, reported by MouseProtocol's sgr return.
+const (
+	MouseOff    = ""       // no tracking
+	MouseX10    = "x10"    // \x1b[?9h    — button presses only, no release, no wheel
+	MouseNormal = "normal" // \x1b[?1000h — press + release
+	MouseButton = "button" // \x1b[?1002h — press + release + motion while a button is held
+	MouseAny    = "any"    // \x1b[?1003h — press + release + all motion
+)
+
+// MouseProtocol reports what the child program actually asked for: its tracking
+// mode (one of the Mouse* constants, MouseOff when tracking is off) and whether
+// it also enabled SGR extended encoding (\x1b[?1006h).
+//
+// Both halves matter when synthesizing an event for the child. A program that
+// enabled \x1b[?1000h WITHOUT \x1b[?1006h expects the legacy X10 byte encoding
+// (\x1b[M Cb+32 Cx+32 Cy+32) and cannot parse an SGR report (\x1b[<0;5;7M) —
+// a line editor handed one typically eats the escape introducer and echoes the
+// rest into its input buffer as literal text.
+func (v *VTerm) MouseProtocol() (mode string, sgr bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	m := v.term.Mode()
+	sgr = m&vt10x.ModeMouseSgr != 0
+	// vt10x clears the whole tracking mask before setting a new mode, so at most
+	// one of these is ever set; the order is belt-and-braces.
+	switch {
+	case m&vt10x.ModeMouseMany != 0:
+		return MouseAny, sgr
+	case m&vt10x.ModeMouseMotion != 0:
+		return MouseButton, sgr
+	case m&vt10x.ModeMouseButton != 0:
+		return MouseNormal, sgr
+	case m&vt10x.ModeMouseX10 != 0:
+		return MouseX10, sgr
+	}
+	return MouseOff, sgr
+}
+
+// ResetMouseModes turns every mouse tracking and encoding mode off
+// (\x1b[?9l, ?1000l, ?1002l, ?1003l, ?1006l).
+//
+// The emulator outlives the programs that run in the pane: it is created once
+// and fed every byte that pane's PTY ever produces. A program that enables
+// tracking and dies without disabling it — killed with Ctrl+C, crashed, or
+// simply sloppy on teardown — therefore leaves the tracking bit set for the
+// rest of the pane's life, and every later program looks like it wants mouse
+// reports. The TUI then forwards wheel and click events into the PTY of
+// something that never asked for them (Claude Code, a bare shell), which shows
+// them as literal text like "<65;50;54M".
+//
+// Callers reset when the pane's foreground program changes; anything that wants
+// tracking re-enables it on startup.
+func (v *VTerm) ResetMouseModes() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	// Fed through the emulator's own parser rather than poking mode bits so this
+	// stays correct if vt10x changes how it tracks them. Written straight to the
+	// terminal instead of through VTerm.Write: mode changes touch no cells, so
+	// the pending partial-escape buffer, the dirty flag and the render caches
+	// must all stay as they are. vt10x only ever sees complete sequences (Write
+	// holds incomplete tails back), so injecting here lands on a parse boundary.
+	_, _ = v.term.Write([]byte("\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"))
+}
+
 // IsAppCursorKeys returns true while DECCKM (\x1b[?1h, terminfo smkx) is
 // active: the child program expects cursor keys in the SS3 "application"
 // encoding (\x1bOA..\x1bOD) instead of CSI (\x1b[A..\x1b[D). less and other

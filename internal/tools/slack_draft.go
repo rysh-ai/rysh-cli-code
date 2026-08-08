@@ -60,7 +60,7 @@ func (t *SlackDraftTool) Execute(ctx context.Context, params json.RawMessage) (*
 		return ErrOutput(ErrKindValidation, "channel and body are required"), nil
 	}
 
-	id := t.drafts.Create(p.Channel, "", p.Body, p.ThreadTS)
+	id := t.drafts.Create("slack", p.Channel, "", p.Body, p.ThreadTS)
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Draft created: %s\n\n", id))

@@ -128,6 +128,7 @@ func (w *WorkspaceActor) cmdAutoCheck(out *strings.Builder, spec autoKindSpec, n
 	a, err := store.Load(name)
 	if err != nil {
 		fmt.Fprintf(out, "\n[%s] automation %q not found — ##auto %s list\n", spec.label, name, spec.label)
+		w.failRysh("automation %q not found — ##auto %s list", name, spec.label)
 		return
 	}
 	var warns, notes []string
@@ -380,8 +381,10 @@ func (w *WorkspaceActor) cmdAutoLoopStop(out *strings.Builder, spec autoKindSpec
 	}
 	if name != "" {
 		fmt.Fprintf(out, "\n[%s] no active loop for recipe %q — ##auto %s status\n", spec.label, name, spec.label)
+		w.failRysh("no active loop for recipe %q — ##auto %s status", name, spec.label)
 	} else {
 		fmt.Fprintf(out, "\n[%s] no active loop on this pane — pass a recipe name (##auto %s status lists them)\n", spec.label, spec.label)
+		w.failRysh("no active loop on this pane — pass a recipe name (##auto %s status lists them)", spec.label)
 	}
 }
 
@@ -575,6 +578,7 @@ func (w *WorkspaceActor) cmdAutoSchedule(out *strings.Builder, spec autoKindSpec
 	a, err := store.Load(name)
 	if err != nil {
 		fmt.Fprintf(out, "\n[%s] automation %q not found — ##auto %s list\n", spec.label, name, spec.label)
+		w.failRysh("automation %q not found — ##auto %s list", name, spec.label)
 		return
 	}
 	if a.ScheduleOff() {
@@ -591,6 +595,7 @@ func (w *WorkspaceActor) cmdAutoSchedule(out *strings.Builder, spec autoKindSpec
 	input := autoJobInput(spec.label, a.Name, args)
 	if err := cron.Validate(jobName, a.Schedule, "", input); err != nil {
 		fmt.Fprintf(out, "\n[%s] schedule %q invalid: %v\n", spec.label, a.Schedule, err)
+		w.failRysh("schedule %q invalid: %v", a.Schedule, err)
 		return
 	}
 	if j := w.findCronJob(jobName); j != nil {

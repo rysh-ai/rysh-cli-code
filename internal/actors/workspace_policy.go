@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 
 	sharedagentic "github.com/rysh-ai/rysh-cli-shared/agentic"
@@ -17,7 +19,78 @@ import (
 // ##policy reload, so neither can skip the org file. LoadOrg fails closed on a
 // configured-but-missing org file; Merge fails closed on either side's error.
 func (w *WorkspaceActor) loadPolicy() *policy.Policy {
-	return policy.Merge(policy.LoadOrg(w.cfg.Policy.OrgFile), policy.Load(w.cfg.RyshDir))
+	return policy.Merge(policy.LoadOrg(w.orgPolicyFile()), policy.Load(w.cfg.RyshDir))
+}
+
+// centralPolicyFile is where a policy document pulled from rysh-server is
+// cached (design 023 §4.7). It is a normal org-policy FILE on purpose: LoadOrg +
+// Merge (strictest-wins, lower-ceiling-wins) already exist and are tested, so
+// central distribution only changes where the org file comes from — never what
+// it means, and never how it merges.
+const centralPolicyFile = "org-policy-central.yaml"
+
+// orgPolicyFile resolves which org policy the merge reads.
+//
+// An explicitly configured `policy.org_file` always wins: it is a deliberate
+// operator choice on this machine, and silently replacing it with a document
+// from the network would be the wrong kind of surprise. The central document is
+// used when no local org file is configured.
+func (w *WorkspaceActor) orgPolicyFile() string {
+	if p := strings.TrimSpace(w.cfg.Policy.OrgFile); p != "" {
+		return p
+	}
+	if w.centralPolicyPath == "" {
+		return ""
+	}
+	if _, err := os.Stat(w.centralPolicyPath); err != nil {
+		return ""
+	}
+	return w.centralPolicyPath
+}
+
+// applyCentralPolicy caches a pulled document and re-applies policy.
+//
+// It runs in the workspace mailbox (the ledger client hands it over rather than
+// touching actor state from its own goroutine), so the reload here is the same
+// one `##policy reload` performs — fail-closed on an unparseable document
+// included. A malformed CENTRAL policy must not be softer than a malformed
+// local one (023 §4.3).
+func (w *WorkspaceActor) applyCentralPolicy(body []byte) {
+	if len(body) == 0 || w.cfg.RyshDir == "" {
+		return
+	}
+	if p := strings.TrimSpace(w.cfg.Policy.OrgFile); p != "" {
+		slog.Info("policy: a central document was pulled but policy.org_file is "+
+			"configured locally, so the local file still governs", "org_file", p)
+		return
+	}
+	path := filepath.Join(w.cfg.RyshDir, centralPolicyFile)
+	if err := os.MkdirAll(w.cfg.RyshDir, 0o700); err != nil {
+		slog.Warn("policy: cannot create the rysh dir for the central document", "err", err)
+		return
+	}
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		slog.Warn("policy: cannot cache the central document", "path", path, "err", err)
+		return
+	}
+	w.centralPolicyPath = path
+	w.policy = w.loadPolicy()
+	w.syncPolicyGate()
+	if w.policy.Err != nil {
+		// Fail-closed, and say so where a user will see it: a central policy
+		// that does not parse is a policy failure, not an absence of policy.
+		slog.Error("policy: the central document did not parse — policy is failing closed",
+			"err", w.policy.Err)
+		// Every pane hears it: a policy failure is a session-wide condition,
+		// and the user is not necessarily looking at the pane that noticed.
+		for _, id := range w.collectAllPaneIDs() {
+			_ = w.pub.SendPaneRyshOutput(id,
+				"[policy] the central policy from rysh-server did not parse — "+
+					"failing closed: "+w.policy.Err.Error()+"\n")
+		}
+		return
+	}
+	slog.Info("policy: applied the central document from rysh-server", "path", path)
 }
 
 // handlePolicyCommand implements ##policy (design 013):
@@ -50,6 +123,7 @@ func (w *WorkspaceActor) handlePolicyCommand(out *strings.Builder, paneID string
 		w.renderRequiredSecretStatus(out)
 	default:
 		fmt.Fprintf(out, "usage: ##policy [show] | ##policy reload\n")
+		w.failRyshUsage("unknown ##policy subcommand: %q", sub)
 	}
 }
 
@@ -121,6 +195,7 @@ func (w *WorkspaceActor) renderRequiredSecretStatus(out *strings.Builder) {
 	}
 	if missing := w.missingRequiredSecrets(); len(missing) > 0 {
 		fmt.Fprintf(out, "  snat required: BLOCKED — missing %v (add with `##secret new <NAME> <VALUE>`)\n", missing)
+		w.failRysh("snat required: BLOCKED — missing %v (add with `##secret new <NAME> <VALUE>`)", missing)
 	} else {
 		fmt.Fprintf(out, "  snat required: all registered ✓\n")
 	}

@@ -3,12 +3,12 @@ package actors
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -109,49 +109,94 @@ func TestIntegration_WebRecorderProducesVideo(t *testing.T) {
 	waitBrowserReady(t, nc, pub, paneID)
 
 	// --- the recorder under test ---
+	//
+	// The recording is driven by frames actually CAPTURED, not by a wall-clock
+	// sleep. Recording for a fixed 3s and asserting "~15 frames arrived" makes
+	// the test a benchmark of the machine: on a loaded box Chromium managed 2
+	// screenshots in that window, sometimes 0, and the assertions below fired
+	// on a recorder that was working correctly. Waiting for real captures
+	// costs nothing when the machine is idle and simply takes longer when it
+	// is not.
 	const interval = 200 * time.Millisecond
-	const recordFor = 3 * time.Second
+	const wantCaptures = 6          // enough to encode, and to see the page change
+	const minSpan = 1 * time.Second // ...spread over enough real time to animate
+	const captureCeiling = 90 * time.Second
 	outPath := filepath.Join(t.TempDir(), "run.mp4")
 	spec := webauto.ResolveRecord(nil, nil, webauto.RecordFlags{On: true, Interval: interval})
+
+	// Watch the recorder's own capture traffic: every browser.response that is
+	// not our readiness probe is one frame it got back. This is the progress
+	// signal the test waits on, and it also gives the REAL capture span to
+	// check the video's duration against — the intended 3s was never the right
+	// yardstick once captures could be dropped.
+	captures := newCaptureCounter(t, nc, paneID)
+	// Subscribe to the recorder's completion report BEFORE it can be sent.
+	// It carries the encode error when there is one, which the old
+	// poll-for-a-file loop could only report as a blank 60-second timeout.
+	report := newRecorderReport(t, nc, paneID)
 
 	rec := NewWebRecorderActor(paneID, "e2e-recipe", spec, outPath, true /*supervised*/, pub, nc)
 	recPID := system.Root.Spawn(actor.PropsFromProducer(func() actor.Actor { return rec }))
 
-	time.Sleep(recordFor)
-	system.Root.Send(recPID, &recStop{reason: "test done"})
-
-	// --- the encode is asynchronous; wait for the file to appear and settle ---
-	var size int64
-	deadline := time.Now().Add(60 * time.Second)
-	for time.Now().Before(deadline) {
-		if fi, err := os.Stat(outPath); err == nil && fi.Size() > 0 {
-			size = fi.Size()
+	startedAt := time.Now()
+	deadline := time.Now().Add(captureCeiling)
+	for {
+		n, span := captures.state()
+		if n >= wantCaptures && time.Since(startedAt) >= minSpan {
 			break
 		}
-		time.Sleep(200 * time.Millisecond)
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d captures in %s (span %s) — the browser is not answering, "+
+				"not merely slow", n, captureCeiling, span.Round(time.Millisecond))
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	if size == 0 {
-		t.Fatalf("no video produced at %s after 60s", outPath)
+	system.Root.Send(recPID, &recStop{reason: "test done"})
+
+	nCaptures, span := captures.state()
+
+	// --- wait for the recorder to say it finished, and why ---
+	msgText := report.wait(t, 90*time.Second)
+	if strings.Contains(msgText, "could not encode") || strings.Contains(msgText, "no frames captured") {
+		t.Fatalf("recorder did not produce a video: %s", strings.TrimSpace(msgText))
 	}
+	fi, err := os.Stat(outPath)
+	if err != nil || fi.Size() == 0 {
+		t.Fatalf("recorder reported success but no video at %s (err=%v): %s",
+			outPath, err, strings.TrimSpace(msgText))
+	}
+	size := fi.Size()
 
 	// --- assert it is a real, playable video ---
 	nbFrames, duration := probeVideo(t, outPath)
-	t.Logf("video: %s (%d bytes, %d frames, %.2fs)", outPath, size, nbFrames, duration)
+	t.Logf("video: %s (%d bytes, %d frames, %.2fs) from %d captures over %s",
+		outPath, size, nbFrames, duration, nCaptures, span.Round(time.Millisecond))
 
-	// The recorder is drop-don't-queue, so the frame count is a range, not an
-	// equality: it can never EXCEED the tick count, and a large shortfall means
-	// captures were failing rather than merely being dropped.
-	maxFrames := int(recordFor/interval) + 2
-	minFrames := maxFrames / 3
-	if nbFrames > maxFrames {
-		t.Errorf("got %d frames, more than the %d ticks the interval allows", nbFrames, maxFrames)
+	// The encode must neither invent frames nor lose them, measured against
+	// what was actually captured rather than against the clock.
+	//
+	// The expected count is captures+1: buildConcatFile lists the final frame
+	// twice on purpose, because the concat demuxer ignores the last entry's
+	// duration and the repeat is what makes it stick. Anything above that is
+	// the bug -vsync vfr exists to prevent — ffmpeg resampling the concat list
+	// to a constant 25fps, duplicating every frame several times over — which
+	// would show up as tens of frames, not one. Anything below captures means
+	// frames were captured and dropped on the floor (one frame of slack: a
+	// capture can land after the count is read but before the recorder stops).
+	if nbFrames > nCaptures+1 {
+		t.Errorf("got %d frames from %d captures — the encode is duplicating frames "+
+			"(expected %d: every capture plus the deliberate final repeat)",
+			nbFrames, nCaptures, nCaptures+1)
 	}
-	if nbFrames < minFrames {
-		t.Errorf("got %d frames, want >=%d — captures are failing, not just dropping", nbFrames, minFrames)
+	if nbFrames < nCaptures {
+		t.Errorf("got %d frames from %d captures — the encode is losing frames", nbFrames, nCaptures)
 	}
-	// Per-frame durations should reconstruct real elapsed time, not fps*frames.
-	if duration < recordFor.Seconds()*0.5 {
-		t.Errorf("video is %.2fs, want roughly %.2fs — wall-clock timing is wrong", duration, recordFor.Seconds())
+	// Per-frame durations must reconstruct real elapsed time, not fps*frames.
+	// Measured against the captures' true span, so a loaded machine that
+	// spread them over 10s is judged against 10s rather than a fixed guess.
+	if want := span.Seconds() * 0.5; duration < want {
+		t.Errorf("video is %.2fs, want >=%.2fs — the %s capture span is not reflected "+
+			"in the frame timings", duration, want, span.Round(time.Millisecond))
 	}
 
 	// The video must show the run CHANGING. A recorder that captured one
@@ -164,6 +209,129 @@ func TestIntegration_WebRecorderProducesVideo(t *testing.T) {
 	framesDir := strings.TrimSuffix(outPath, ".mp4") + ".frames"
 	if _, err := os.Stat(framesDir); !os.IsNotExist(err) {
 		t.Errorf("frames dir %s should be removed after a successful encode", framesDir)
+	}
+}
+
+// captureCounter tallies the frames the recorder actually got back, by
+// watching the same browser.response subject the recorder consumes.
+//
+// It exists so the test can wait for real progress instead of sleeping for a
+// fixed wall-clock window and hoping. It also records when the first and last
+// capture landed, which is the only honest yardstick for the encoded video's
+// duration: the intended recording length stopped being meaningful the moment
+// captures could be dropped.
+type captureCounter struct {
+	mu    sync.Mutex
+	n     int
+	first time.Time
+	last  time.Time
+}
+
+// newCaptureCounter subscribes and starts counting. The subscription is
+// unsubscribed when the test ends.
+func newCaptureCounter(t *testing.T, nc *nats.Conn, paneID string) *captureCounter {
+	t.Helper()
+	c := &captureCounter{}
+	sub, err := nc.Subscribe(msg.T("pane", paneID, "browser", "response"), func(m *nats.Msg) {
+		var env struct {
+			TypeTag string          `json:"t"`
+			Payload json.RawMessage `json:"p"`
+		}
+		if json.Unmarshal(m.Data, &env) != nil || env.TypeTag != "MsgBrowserActionResponse" {
+			return
+		}
+		var resp msg.MsgBrowserActionResponse
+		if json.Unmarshal(env.Payload, &resp) != nil {
+			return
+		}
+		// Skip the readiness probe (waitBrowserReady) and anything that
+		// failed — only frames the recorder can actually encode count.
+		if resp.RequestID == "probe-1" || !resp.Success {
+			return
+		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.n++
+		now := time.Now()
+		if c.first.IsZero() {
+			c.first = now
+		}
+		c.last = now
+	})
+	if err != nil {
+		t.Fatalf("subscribe browser.response: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	return c
+}
+
+// state returns how many frames have been captured and the span they cover.
+func (c *captureCounter) state() (n int, span time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.n > 1 {
+		span = c.last.Sub(c.first)
+	}
+	return c.n, span
+}
+
+// recorderReport captures the recorder's own completion line from the pane's
+// rysh output — "[web] recording: <path>", or the reason it produced nothing.
+//
+// The test used to poll for the output file for 60 seconds and, on failure,
+// could say only "no video produced after 60s". The recorder knew exactly what
+// went wrong (an ffmpeg error, or zero frames to encode) and was saying so
+// into the pane the whole time; listening for that turns a blank minute-long
+// timeout into the actual reason, immediately.
+type recorderReport struct {
+	ch chan string
+}
+
+func newRecorderReport(t *testing.T, nc *nats.Conn, paneID string) *recorderReport {
+	t.Helper()
+	r := &recorderReport{ch: make(chan string, 4)}
+	sub, err := nc.Subscribe(msg.T("pane", paneID, "output", "rysh"), func(m *nats.Msg) {
+		var env struct {
+			TypeTag string          `json:"t"`
+			Payload json.RawMessage `json:"p"`
+		}
+		if json.Unmarshal(m.Data, &env) != nil {
+			return
+		}
+		var appended msg.MsgConversationAppend
+		if json.Unmarshal(env.Payload, &appended) != nil || appended.Message == nil {
+			return
+		}
+		// The recorder emits progress lines too; only the terminal report
+		// names the output file or says why there is none.
+		text := appended.Message.Content
+		if strings.Contains(text, "recording:") &&
+			(strings.Contains(text, ".mp4") ||
+				strings.Contains(text, "could not encode") ||
+				strings.Contains(text, "no frames captured")) {
+			select {
+			case r.ch <- text:
+			default:
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("subscribe pane rysh output: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	return r
+}
+
+// wait blocks for the recorder's completion report, failing the test if it
+// never arrives.
+func (r *recorderReport) wait(t *testing.T, timeout time.Duration) string {
+	t.Helper()
+	select {
+	case text := <-r.ch:
+		return text
+	case <-time.After(timeout):
+		t.Fatalf("recorder never reported finishing within %s", timeout)
+		return ""
 	}
 }
 
@@ -266,7 +434,7 @@ func probeVideo(t *testing.T, path string) (frames int, duration float64) {
 		t.Fatalf("duration %q: %v", fields[1], err)
 	}
 	if frames == 0 {
-		t.Fatal(fmt.Sprintf("%s decodes to zero frames", path))
+		t.Fatalf("%s decodes to zero frames", path)
 	}
 	return frames, duration
 }

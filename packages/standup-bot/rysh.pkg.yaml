@@ -1,0 +1,11 @@
+name: "@rysh/standup-bot"
+version: "0.1.0"
+type: humanoid
+description: "Slack humanoid that collects teammates' updates and posts the merged standup summary"
+entry: SKILL.md
+min_rysh: "0.1.26"
+declares_channels:
+  - slack
+declares_env:
+  - SLACK_BOT_TOKEN
+  - SLACK_APP_TOKEN

@@ -12,6 +12,9 @@ import (
 func TestRequirePTY_AllowsPtylessCommands(t *testing.T) {
 	for _, cmd := range []string{
 		"list-sessions", "send", "install", "eval", "help", "--version", "doctor",
+		// `rysh exec` and `rysh script` drive an existing session over NATS;
+		// like `send`, they never open a pane of their own.
+		"exec", "script",
 	} {
 		if err := requirePTY([]string{cmd}); err != nil {
 			t.Errorf("requirePTY(%q) = %v, want nil — this command needs no pane", cmd, err)

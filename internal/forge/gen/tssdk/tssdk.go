@@ -470,28 +470,6 @@ func splitParams(op ir.Operation) (path, query, header []ir.Param) {
 	return path, query, header
 }
 
-func tsType(s *ir.Schema) string {
-	if s == nil {
-		return "string"
-	}
-	switch s.Type {
-	case "integer", "number":
-		return "number"
-	case "boolean":
-		return "boolean"
-	case "array":
-		return tsType(s.Items) + "[]"
-	case "object":
-		return "Record<string, unknown>"
-	case "string":
-		return "string"
-	}
-	if len(s.Properties) > 0 {
-		return "Record<string, unknown>"
-	}
-	return "string"
-}
-
 // tsRefType is like tsType but resolves a $ref to the exported interface name
 // of the generated model, so models reference each other by name. Unknown refs
 // degrade to Record<string, unknown>. Used for model and body fields; params

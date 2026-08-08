@@ -361,12 +361,6 @@ func (s *namedStore) ExpandLayered(scopes []string, in string) string {
 	})
 }
 
-// expandFuncLayered returns ExpandLayered bound to an ordered scope chain as a
-// standalone, nil-safe function.
-func (s *namedStore) expandFuncLayered(scopes []string) func(string) string {
-	return func(in string) string { return s.ExpandLayered(scopes, in) }
-}
-
 // secretInfo is one row of the "##secret/##variable list" output. Sources holds
 // every tier the value exists in, highest precedence first (session → persist →
 // config): the value resolves from Sources[0]; any further entries are shadowed
@@ -414,16 +408,23 @@ func (s *namedStore) List(scope string) []secretInfo {
 			}
 		}
 	}
-	for _, root := range s.kind.readDirs() {
-		entries, err := os.ReadDir(filepath.Join(root, scope))
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if e.IsDir() || !validSecretName(e.Name()) {
+	// Guarded like the two tiers around it. This block dereferenced s.kind
+	// unconditionally while the session tier above and the config tier below
+	// both check s != nil, so a nil store panicked here instead of returning
+	// an empty list. Found by staticcheck SA5011, which inferred the
+	// inconsistency from those neighbouring checks.
+	if s != nil {
+		for _, root := range s.kind.readDirs() {
+			entries, err := os.ReadDir(filepath.Join(root, scope))
+			if err != nil {
 				continue
 			}
-			add(e.Name(), secretSourcePersist)
+			for _, e := range entries {
+				if e.IsDir() || !validSecretName(e.Name()) {
+					continue
+				}
+				add(e.Name(), secretSourcePersist)
+			}
 		}
 	}
 	if s != nil {
@@ -585,6 +586,7 @@ func (w *WorkspaceActor) handleNamedStoreSubcommand(out *strings.Builder, paneID
 		t := w.resolveTabArg(tabArg)
 		if t == nil {
 			fmt.Fprintf(out, "\n[%s] tab not found: %s  (see ##tab list)\n", label, tabArg)
+			w.failRysh("tab not found: %s  (see ##tab list)", tabArg)
 			return
 		}
 		tabLabel := t.title
@@ -619,12 +621,14 @@ func (w *WorkspaceActor) handleNamedStoreSubcommand(out *strings.Builder, paneID
 			pos = append(pos, a)
 		}
 		if len(pos) < 2 {
-			fmt.Fprintf(out, "\n[%s] usage: ##%s %s <NAME> <VALUE> [--no-persist] [--tab <tab>]\n", label, label, sub)
+			ryshWriter(out).UsageLineIn(label, fmt.Sprintf("##%s %s <NAME> <VALUE> [--no-persist] [--tab <tab>]", label, sub))
+			w.failRyshUsage("usage: %s", fmt.Sprintf("##%s %s <NAME> <VALUE> [--no-persist] [--tab <tab>]", label, sub))
 			return
 		}
 		name := pos[0]
 		value := strings.Join(pos[1:], " ")
 		if err := c.store.Set(scope, name, value, persist); err != nil {
+			w.failRysh("%v", err)
 			fmt.Fprintf(out, "\n[%s] %v\n", label, err)
 			return
 		}
@@ -657,7 +661,8 @@ func (w *WorkspaceActor) handleNamedStoreSubcommand(out *strings.Builder, paneID
 
 	case "get", "show":
 		if len(parts) < 2 {
-			fmt.Fprintf(out, "\n[%s] usage: ##%s get <NAME> [--tab <tab>]\n", label, label)
+			ryshWriter(out).UsageLineIn(label, fmt.Sprintf("##%s get <NAME> [--tab <tab>]", label))
+			w.failRyshUsage("usage: %s", fmt.Sprintf("##%s get <NAME> [--tab <tab>]", label))
 			return
 		}
 		name := parts[1]
@@ -670,18 +675,21 @@ func (w *WorkspaceActor) handleNamedStoreSubcommand(out *strings.Builder, paneID
 		v, src, fromScope, ok := c.store.GetLayered(chain, name)
 		if !ok {
 			fmt.Fprintf(out, "\n[%s] %q is not visible from this pane (tab/workspace session/persist/config) or the environment\n", label, name)
+			w.failRysh("%s %q is not visible from this pane or the environment", label, name)
 			return
 		}
 		fmt.Fprintf(out, "\n[%s] %s = %s   [%s, %s]\n", label, name, v, src, w.secretScopeLabel(fromScope, wsScope, wsLabel))
 
 	case "delete", "rm", "del":
 		if len(parts) < 2 {
-			fmt.Fprintf(out, "\n[%s] usage: ##%s delete <NAME> [--tab <tab>]\n", label, label)
+			ryshWriter(out).UsageLineIn(label, fmt.Sprintf("##%s delete <NAME> [--tab <tab>]", label))
+			w.failRyshUsage("usage: %s", fmt.Sprintf("##%s delete <NAME> [--tab <tab>]", label))
 			return
 		}
 		name := parts[1]
 		removedSession, removedPersist, err := c.store.Delete(scope, name)
 		if err != nil {
+			w.failRysh("%v", err)
 			fmt.Fprintf(out, "\n[%s] %v\n", label, err)
 			return
 		}
@@ -697,13 +705,15 @@ func (w *WorkspaceActor) handleNamedStoreSubcommand(out *strings.Builder, paneID
 			fmt.Fprintf(out, "\n[%s] deleted persisted %s file for %q in %s\n", label, label, name, scopeDesc)
 		default:
 			fmt.Fprintf(out, "\n[%s] no session or persisted %s named %q in %s (config/env tiers are read-only)\n", label, label, name, scopeDesc)
+			w.failRysh("no session or persisted %s named %q in %s", label, name, scopeDesc)
 		}
 
 	case "help":
 		namedStoreHelp(out, c.store.kind)
 
 	default:
-		fmt.Fprintf(out, "\n[%s] unknown subcommand: %q\n", label, sub)
+		ryshWriter(out).UnknownIn(label, sub)
+		w.failRyshUsage("unknown %s subcommand: %q", label, sub)
 		namedStoreHelp(out, c.store.kind)
 	}
 }

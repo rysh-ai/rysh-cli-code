@@ -17,6 +17,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
+	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 )
 
 type Record struct {
@@ -55,21 +56,40 @@ type Record struct {
 	// configuration and rysh state directory this session resolved at startup.
 	ConfigFile string `json:"config_file,omitempty"`
 	RyshDir    string `json:"rysh_dir,omitempty"`
-	// Source identifies the front-end that owns the session: "cli" (rysh command
-	// line) or "app" (rysh desktop app). It is stamped by the daemon at startup
-	// from cfg.SessionSource (RYSH_SESSION_SOURCE). The two front-ends refuse to
-	// open each other's sessions so the CLI TUI and the desktop app never drive
-	// the same saved layout. Empty means legacy/unknown and is treated as
-	// compatible with either front-end.
+	// Source identifies the front-end that CREATED the session: "cli" (rysh
+	// command line) or "app" (rysh desktop app). It is stamped once, by the
+	// daemon that first writes the record, from cfg.SessionSource
+	// (RYSH_SESSION_SOURCE), and preserved verbatim by every later daemon —
+	// restarting an app session from the terminal must not rewrite its
+	// provenance. Either front-end may open either kind; Source only tells
+	// EnsureCanOpen which render surfaces to warn about. Empty means
+	// legacy/unknown and opens cleanly from either front-end.
 	Source string `json:"source,omitempty"`
+	// WebPort is the daemon's live web-server port on loopback, or 0 when no
+	// web server is running. The desktop app's renderer reaches a daemon only
+	// over HTTP/WebSocket, so recording the endpoint here is what lets the app
+	// adopt a session it did not spawn — including one created from the command
+	// line, whose daemon starts its web server on demand (`##rysh web start`).
+	// Maintained live by the daemon on web-server start/stop (see
+	// UpdateWebEndpoint), read-modify-write so attach bookkeeping set by other
+	// writers is preserved.
+	//
+	// A web_token used to sit beside it, carrying the access token that guarded
+	// the port. Access tokens are gone (internal/web/auth.go): a UI served off
+	// this port asks for the workspace's login instead, so the port is the whole
+	// endpoint. Records written by older daemons may still carry the field; it
+	// is ignored.
+	WebPort int `json:"web_port,omitempty"`
 }
 
 // SourceCLI and SourceApp are the canonical session Source values: the rysh
-// command line vs the rysh desktop app. They are compared by the open guards so
-// the two front-ends never drive the same saved session/KV state.
+// command line vs the rysh desktop app. Source is PROVENANCE — which front-end
+// created the session — and is stamped once, at creation. Either front-end may
+// open either kind (see EnsureCanOpen); the value is used to describe what will
+// degrade, not to deny access.
 const (
-	SourceCLI = "cli"
-	SourceApp = "app"
+	SourceCLI = domain.FrontendCLI
+	SourceApp = domain.FrontendApp
 )
 
 // NormalizeSource maps a configured/recorded session source to its canonical
@@ -91,16 +111,51 @@ func FrontendName(source string) string {
 	return "rysh command line"
 }
 
-// EnsureSourceMatch refuses to open a session that belongs to a different
-// front-end. A blank record source is legacy/unknown and treated as compatible
-// with either front-end. want is the current invocation's source (normalized
-// internally).
-func EnsureSourceMatch(rec Record, want string) error {
-	if rec.Source == "" || NormalizeSource(rec.Source) == NormalizeSource(want) {
-		return nil
+// EnsureCanOpen decides whether the front-end identified by want may open rec,
+// and reports what will render differently if it does.
+//
+// Both front-ends drive the same daemon over the same subjects, and a workspace
+// layout is relative (flex weights, not pixels), so neither kind of session is
+// structurally off-limits to the other. What differs is the RENDERER: the
+// desktop app is a superset of the terminal, so it opens terminal sessions with
+// nothing lost, while the terminal opens app sessions with the app-only render
+// surfaces degraded to labelled placeholders.
+//
+// The returned notes describe exactly those degradations (empty when there are
+// none). Callers must surface them — a capability that vanishes silently is the
+// failure mode this whole path exists to avoid.
+//
+// The error return is reserved for a genuinely unopenable session. No
+// combination of front-ends produces one today; it stays in the signature so
+// the call sites keep handling the possibility rather than having to grow it
+// back later.
+//
+// A blank record source is legacy/unknown and opens cleanly from either
+// front-end. want is normalized internally.
+func EnsureCanOpen(rec Record, want string) ([]string, error) {
+	if rec.Source == "" {
+		return nil, nil
 	}
-	return fmt.Errorf("session %q belongs to the %s and cannot be opened from the %s",
-		rec.Name, FrontendName(rec.Source), FrontendName(want))
+	creator, opener := NormalizeSource(rec.Source), NormalizeSource(want)
+	if creator == opener {
+		return nil, nil
+	}
+	return domain.CapsFor(opener).MissingVersus(domain.CapsFor(creator)), nil
+}
+
+// DegradationSummary renders EnsureCanOpen's notes as a short block for a
+// terminal or a command's output, or "" when there is nothing to report. The
+// caller supplies the record so the summary can name the creating front-end.
+func DegradationSummary(rec Record, notes []string) string {
+	if len(notes) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "session %q was created by the %s; opening it here:\n", rec.Name, FrontendName(rec.Source))
+	for _, n := range notes {
+		fmt.Fprintf(&b, "  - %s\n", n)
+	}
+	return b.String()
 }
 
 // AddTUIPID adds a TUI PID to the active list (idempotent).
@@ -474,6 +529,34 @@ func UpdateProxyPort(cfg config.Config, name string, port int) {
 		return
 	}
 	rec.ProxyPort = port
+	_, _ = store.Upsert(rec)
+}
+
+// UpdateWebEndpoint records the daemon's live web-server port on the session
+// record, read-modify-write so attach bookkeeping (TUIPIDs, state, app-client
+// count, proxy port) set by other writers is preserved. port 0 clears it (web
+// server stopped).
+//
+// This is the hand-off the desktop app adopts a running daemon through: the
+// renderer speaks only HTTP/WebSocket, so without a recorded endpoint the app
+// can reach only daemons it spawned itself and knows the port of. Failures are
+// silent — recording the endpoint must never break the daemon.
+func UpdateWebEndpoint(cfg config.Config, name string, port int) {
+	store, err := NewStore(cfg)
+	if err != nil {
+		return
+	}
+	rec, err := store.Get(name)
+	if err != nil {
+		return
+	}
+	if port < 0 {
+		port = 0
+	}
+	if rec.WebPort == port {
+		return
+	}
+	rec.WebPort = port
 	_, _ = store.Upsert(rec)
 }
 
