@@ -112,6 +112,10 @@ type WorkspaceActor struct {
 	active          bool
 	spawnRegistries bool
 
+	// ansaPID is the session's ANSA router (see ansa.go). Always spawned on
+	// the primary workspace.
+	ansaPID *actor.PID
+
 	// Unguarded state.
 	tabs         []*tabInfo
 	activeTabIdx int
@@ -167,9 +171,12 @@ type WorkspaceActor struct {
 	// groupWorktrees maps pane-group ID -> the rysh-managed git worktree the
 	// group runs in (design 008 cleanup-on-close). Populated by ##pane new
 	// --worktree, ##worktree cwd and ##agent spawn --worktree; consumed by
-	// releaseGroupWorktree when the group is torn down. In-memory only: after a
-	// session restart untracked worktrees are simply never auto-removed
-	// (fail-safe keep; ##worktree remove is the manual path).
+	// releaseGroupWorktree when the group is torn down. Round-tripped through
+	// the workspace KV (persistGroupWorktrees / restoreGroupWorktreesFromKV) so
+	// ownership survives a daemon restart, exactly as the agent registry's
+	// worktree records do. A record that cannot be restored is simply absent,
+	// and an absent record means the close keeps the worktree (fail-safe keep;
+	// ##worktree remove is the manual path).
 	groupWorktrees map[string]groupWorktreeRef
 
 	// Web UI server (started via ##rysh web start).
@@ -249,6 +256,14 @@ type WorkspaceActor struct {
 	// controls (MsgReplayControl) are honoured only for this pane. One replay
 	// pane at a time — matching the single replayPlayer field.
 	replayPaneID string
+
+	// boardPaneID is the agents-board pane for this session (design 025), or
+	// "" when the board is not open. One board per session: it is a single
+	// view over every agent, and a second copy would only halve the screen
+	// each gets. Not persisted deliberately -- on restart the pane comes back
+	// through the normal KV pane-restore path with its PaneType intact, and
+	// the id is re-learned rather than trusted from a stale field.
+	boardPaneID string
 
 	// Local share tracking: paneID/entityID → shareID.
 	// Maintained by the workspace so subscribe can resolve without querying the registry.
@@ -429,6 +444,14 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 		// Runs after restore/bootstrap so tab scopes are enumerable.
 		w.pushKnownSecrets()
 
+		// Pane-group worktree ownership (design 008): restore which group owns
+		// which rysh-managed worktree, so a group that survives this restart
+		// still cleans its worktree up when it closes instead of orphaning it.
+		// Runs after restore/bootstrap, alongside the workspace's other KV
+		// restores; a failed or unreadable read restores nothing, which leaves
+		// the close path on its fail-safe "keep".
+		w.restoreGroupWorktreesFromKV()
+
 		// Worktree hygiene (design 008 orphan sweep): drop stale git
 		// administrative entries for worktrees whose directory vanished
 		// (crashed agent, manual rm -rf). Prune never touches an existing
@@ -496,6 +519,18 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 		// spawned them. Until that cascade is implemented, only the primary
 		// workspace spawns them (terminals-first).
 		if w.spawnRegistries {
+			// ANSA — the session's router. Always on, one per SESSION (the
+			// founder's ruling: fleet is metadata on a message, never a
+			// boundary on an actor), so it is spawned unconditionally here
+			// rather than when some feature first needs it. A router that is
+			// only sometimes running is a control channel agents cannot rely
+			// on. Session-scoped subjects, so like the other registries it
+			// belongs to the primary workspace only.
+			ansaProps := actor.PropsFromProducer(func() actor.Actor {
+				return NewAgentNervousSystemActor(w.pub, w.nc)
+			})
+			w.ansaPID = ctx.Spawn(ansaProps)
+
 			// Spawn agent registry actor for autonomous agents.
 			if w.agSetup != nil {
 				agentRegProps := actor.PropsFromProducer(func() actor.Actor {
@@ -1245,6 +1280,22 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 
 		case *msg.MsgCLIRyshCommand:
 			resp := w.handleCLIRyshCommand(ctx, inner)
+			_ = m.Reply(resp)
+
+		// The agents-board post is its OWN CLI message rather than a ##board
+		// run through MsgCLIRyshCommand above, because that path focuses the
+		// target pane and echoes the command line into its buffers before
+		// dispatching. See workspace_board.go for the three hazards; the point
+		// of this case is that it does not reach runRyshCommand at all.
+		case *msg.MsgCLIBoardPost:
+			resp := w.handleCLIBoardPost(inner)
+			_ = m.Reply(resp)
+
+		// Likewise its own CLI message rather than a ##ansa through
+		// MsgCLIRyshCommand: a control channel used by dozens of agents must
+		// not focus a pane or echo into one as a side effect of routing.
+		case *msg.MsgCLIAnsaSend:
+			resp := w.handleCLIAnsaSend(inner)
 			_ = m.Reply(resp)
 		}
 	}

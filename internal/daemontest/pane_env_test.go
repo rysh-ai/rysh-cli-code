@@ -27,10 +27,20 @@ var (
 // rendering and not a stream to parse.
 func readPaneIdentity(t *testing.T, s *daemontest.Session, dump string) []string {
 	t.Helper()
-	// printenv rather than `env`: it prints these five and nothing else, in the
-	// order asked, so a missing one shortens the output instead of hiding in a
-	// dump of the daemon's whole environment.
-	cmd := "##cmd ws printenv RYSH_SESSION RYSH_TAB RYSH_LANE RYSH_STACK RYSH_PANE > " + dump
+	// printf rather than `printenv`, and this is not a style preference: BSD
+	// printenv takes ONE name and ignores the rest, so on macOS
+	// `printenv A B C D E` prints only A. This test asked for five values, got
+	// one, and reported "the pane never wrote all five" — which reads as a
+	// missing environment when the environment was fine all along. It was red
+	// on every Mac in the fleet for exactly that reason.
+	//
+	// printf '%s\n' with five arguments cycles the format and is POSIX, so it
+	// prints five lines on BSD and GNU alike. An UNSET variable still yields an
+	// empty line, which strings.Fields drops — so the original property holds:
+	// a missing one shortens the output rather than hiding in a dump of the
+	// daemon's whole environment.
+	cmd := "##cmd ws printf '%s\\n' \"$RYSH_SESSION\" \"$RYSH_TAB\" \"$RYSH_LANE\" " +
+		"\"$RYSH_STACK\" \"$RYSH_PANE\" > " + dump
 
 	deadline := time.Now().Add(30 * time.Second)
 	for attempt := 0; time.Now().Before(deadline); attempt++ {

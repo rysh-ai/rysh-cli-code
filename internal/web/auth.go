@@ -1,7 +1,9 @@
 package web
 
 import (
+	"errors"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -52,11 +54,91 @@ func (s *Server) LoginUsername() string {
 	return ""
 }
 
-// credentials snapshots the current credentials under the read lock.
+// credsFileStamp is the cheap identity of web-auth.json — enough to notice a
+// rewrite without reading and parsing the file on every request.
+type credsFileStamp struct {
+	mod  time.Time
+	size int64
+}
+
+// TrackCredentialsFile tells the server which workspace rysh dir holds its
+// web-auth.json, making that FILE the source of truth rather than whatever
+// snapshot was installed at start.
+//
+// This exists because credentials are per-workspace state shared by every
+// daemon rooted there, while `creds` is per-process. A second daemon running
+// `##rysh web auth` rewrites the file and mints a fresh signing key — correctly,
+// that is how changing the password logs old browsers out — and this process,
+// still verifying against the superseded key, then rejects every client with a
+// 401 that no user can diagnose or fix (F-9). Restarting the listener "fixed"
+// it precisely because a restart is the only thing that re-read the file.
+//
+// Not a watcher: a stat per auth decision costs a syscall, needs no goroutine
+// and no lifecycle, and cannot leak a watch when the server stops.
+func (s *Server) TrackCredentialsFile(ryshDir string) {
+	s.credsMu.Lock()
+	s.credsDir = ryshDir
+	s.credsStat = credsFileStamp{}
+	s.credsMu.Unlock()
+}
+
+// credentials returns the credentials in force, re-reading web-auth.json first
+// if it has changed since we last looked.
 func (s *Server) credentials() *Credentials {
+	s.credsMu.RLock()
+	dir := s.credsDir
+	s.credsMu.RUnlock()
+	if dir != "" {
+		s.refreshCredentials(dir)
+	}
+
 	s.credsMu.RLock()
 	defer s.credsMu.RUnlock()
 	return s.creds
+}
+
+// refreshCredentials reloads web-auth.json if its mtime or size moved.
+//
+// Three failure modes are deliberately NOT treated the same, because collapsing
+// them is how a credentials bug becomes a security bug:
+//
+//   - the file is GONE: login is not configured, which is what LoadCredentials
+//     already means by (nil, nil). The shared door then refuses everything, and
+//     only control mode's private loopback door stays open — the same posture as
+//     `##rysh web auth clear`.
+//   - the file is UNREADABLE OR CORRUPT: keep what we have. A half-written file
+//     (SaveCredentials truncates in place) must never be read as "no login" —
+//     that would downgrade the gate to nothing at exactly the wrong moment.
+//   - the file is FINE: adopt it, key and password hash together.
+func (s *Server) refreshCredentials(dir string) {
+	path := CredentialsPath(dir)
+	var stamp credsFileStamp
+	if info, err := os.Stat(path); err == nil {
+		stamp = credsFileStamp{mod: info.ModTime(), size: info.Size()}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return // cannot tell; keep what we have rather than guess
+	}
+
+	s.credsMu.RLock()
+	unchanged := s.credsStat == stamp
+	s.credsMu.RUnlock()
+	if unchanged {
+		return
+	}
+
+	creds, err := LoadCredentials(dir)
+	if err != nil {
+		// Corrupt or half-written. Do not adopt it, and do not re-read it on
+		// every request either — the next real change moves the stamp again.
+		s.credsMu.Lock()
+		s.credsStat = stamp
+		s.credsMu.Unlock()
+		return
+	}
+	s.credsMu.Lock()
+	s.creds = creds
+	s.credsStat = stamp
+	s.credsMu.Unlock()
 }
 
 // bearerToken extracts the JWT from an `Authorization: Bearer …` header.

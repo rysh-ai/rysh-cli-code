@@ -289,6 +289,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+		// Dedicated agents-board pane (design 025): while focused, its keys
+		// scroll the threaded stream. Claimed here for the same reason as
+		// replay — so ↑/↓ reach the board instead of the input line — and it
+		// claims just as narrowly: esc, [ / ] and the multiplexer chords fall
+		// through, so the user is never trapped in the board.
+		if handled, cmd := m.updateBoardPaneInput(msg); handled {
+			return m, cmd
+		}
+
 		// Voice prompting: the configured hotkey toggles recording. While
 		// recording, Esc cancels (handled in the "esc" case below). Disabled
 		// in raw mode (handled earlier — raw keys go to the PTY) and, for the
@@ -571,6 +580,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// email client. Fold it in and re-arm the listener.
 		cmd := m.applyEmailEvent(msg.ev)
 		return m, tea.Batch(cmd, m.listenEmailEventCmd())
+
+	case boardEventMsg:
+		// A live agents-board post or registration. File it into the session
+		// store and re-arm the listener; every agents-board pane renders from
+		// that store on the next frame, so there is nothing per-pane to update.
+		m.applyBoardEvent(msg.ev)
+		return m, m.listenBoardEventCmd()
+
+	case boardRecorderMsg:
+		// Record the answer and ask again later. Re-arming here rather than on
+		// a shared tick keeps the question off the render path entirely: the
+		// view always draws from the last answer and never waits for one.
+		m.boardRecorder = msg.state
+		return m, tea.Tick(recorderAskInterval, func(time.Time) tea.Msg {
+			return recorderAskTick{}
+		})
+
+	case recorderAskTick:
+		return m, m.askRecorderCmd()
 
 	case activateModeMsg:
 		// Backend asked a pane to switch its visible mode (register-output). Apply

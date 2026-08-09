@@ -45,3 +45,36 @@ func SendPaneRawDirty(p *NATSPublisher, paneID string) error {
 func SendMirrorPaneVTFrame(p *NATSPublisher, mirrorID string, f *MsgMirrorPaneVTFrame) error {
 	return p.Send(T("pane", mirrorID, "vtframe"), f)
 }
+
+// --- agents-board (design 025) ---------------------------------------------
+//
+// Subjects are built with T(...) and never written as literals. T's prefix is
+// the SESSION NAME, not the constant "rysh" (rysh-shared/msg/topics.go) — the
+// "rysh.*" subjects quoted in older docs are just the default-session
+// rendering, and a literal would break the board the moment a session is named
+// anything else.
+
+// BoardPostSubject is the subject every agent posts to and the board view
+// subscribes to.
+func BoardPostSubject() string { return T("board", "post") }
+
+// BoardRegisterSubject carries persona announcements.
+func BoardRegisterSubject() string { return T("board", "register") }
+
+// SendBoardPost publishes one board message.
+//
+// Package-level, not a method, for the reason given at the top of this file:
+// NATSPublisher is a type alias for a rysh-shared type and Go does not allow
+// methods on aliased external types.
+//
+// The caller stamps V and TS via NewBoardPost rather than having them filled in
+// here, so that a post relayed from elsewhere keeps its original clock.
+func SendBoardPost(p *NATSPublisher, post *MsgBoardPost) error {
+	return p.Send(BoardPostSubject(), post)
+}
+
+// SendBoardRegister publishes a persona announcement. Advisory: the board
+// renders posts from unregistered panes too.
+func SendBoardRegister(p *NATSPublisher, reg *MsgBoardRegister) error {
+	return p.Send(BoardRegisterSubject(), reg)
+}

@@ -280,6 +280,14 @@ func (m Model) keyHelp() string {
 	if activeTab := m.activeTab(); activeTab != nil && activeTab.PipelineActive {
 		return "mode: pipeline | esc×2→exit  ctrl+p p→exit  enter submit  arrows navigate"
 	}
+	// Agents-board is a PaneType, not a mode, so its footer keys off the
+	// focused pane rather than m.mode — and only in modeNormal, so entering
+	// pane/tab/layout mode from a board pane still shows that mode's own keys.
+	if m.mode == modeNormal {
+		if snap := m.focusedPaneSnapshot(); snap != nil && snap.PaneType == domain.PaneTypeAgentsBoard {
+			return m.boardKeyHelp()
+		}
+	}
 	if m.mode == modeRaw {
 		if m.activePaneNative() {
 			return "mode: native shell | esc esc→ai mode  ctrl+o prefix  ##native off to leave"
@@ -889,6 +897,14 @@ func (m Model) buildPanePanel(pane domain.PaneSnapshot, tab domain.TabSnapshot, 
 	metaText := paneMetaText(pane)
 
 	renderWidth := max(8, paneWidth-4)
+
+	// Agents-board pane (design 025): a shell-less PaneType whose content is
+	// the threaded board, built here rather than read from a buffer. Dispatched
+	// FIRST because none of the branches below can apply — the pane has no PTY,
+	// no VT screen and no output buffer for them to render.
+	if pane.PaneType == domain.PaneTypeAgentsBoard {
+		return m.buildBoardPanel(pane, paneWidth, height)
+	}
 
 	// Scrollback (copy) mode: render the frozen history window for the active
 	// interactive pane instead of its live VT screen. Rows are truncated to the

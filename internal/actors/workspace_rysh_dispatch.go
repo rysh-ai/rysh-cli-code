@@ -230,6 +230,7 @@ func init() {
 			help: []string{
 				"  ##pane                       show active pane details (default: info)\n",
 				"  ##pane info                  show active pane details\n",
+				"  ##pane info <pane>           show that pane (id, title or given-name)\n",
 				"  ##pane new [--worktree [branch]]  new pane; --worktree runs it in its own git worktree\n",
 				"                               (branch pane/<alias>; removed on close if clean, KEPT if dirty)\n",
 				"  ##pane new --claude [prompt] new pane running an interactive claude, session id recorded\n",
@@ -278,6 +279,7 @@ func init() {
 		{
 			name: "upstream",
 			help: []string{
+				"  ##upstream connect <url> <api-key>  connect to a rysh server (resolves the workspace id, writes the config)\n",
 				"  ##upstream status             show upstream configuration and status\n",
 				"  ##upstream my-shares          list shares published from this session\n",
 				"  ##upstream list-remote        list all shares in the workspace (from server)\n",
@@ -567,6 +569,30 @@ func init() {
 			},
 			statusAware: true,
 			run:         func(w *WorkspaceActor, c *ryshCmd) { w.handleWorktreeCommand(c.out, c.paneID, c.args) },
+		},
+		{
+			name: "board",
+			help: []string{
+				"  ##board open                  open the agents board pane\n",
+				"  ##board post <text>           post a milestone to the agents board\n",
+				"  ##board reply <thread> <text> reply under an existing thread\n",
+				"  (agents post silently instead: rysh board post --as <pane-id> <text>)\n",
+			},
+			helpRewrite: []bool{false, false, false, true},
+			statusAware: true,
+			run:         func(w *WorkspaceActor, c *ryshCmd) { c.err = w.handleBoardCommand(c.out, c.paneID, c.args) },
+		},
+		{
+			name: "ansa",
+			help: []string{
+				"  ##ansa send <@name|id> <text> deliver a shell line to another pane (agent nervous system)\n",
+				"  ##ansa prompt <@name|id> <t>  deliver a prompt to another pane\n",
+				"  ##ansa who                    list addressable panes + ids (duplicate names flagged)\n",
+				"  (agents route silently instead: rysh ansa send --to <@name|id> <text>)\n",
+			},
+			helpRewrite: []bool{false, false, false, true},
+			statusAware: true,
+			run:         func(w *WorkspaceActor, c *ryshCmd) { c.err = w.handleAnsaCommand(c.out, c.paneID, c.args) },
 		},
 		{
 			name: "mcp",

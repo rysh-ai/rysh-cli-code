@@ -14,6 +14,7 @@ import (
 	"github.com/muesli/termenv"
 	"github.com/nats-io/nats.go"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/board"
 	"github.com/rysh-ai/rysh-cli-code/internal/bus"
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
@@ -325,6 +326,22 @@ type Model struct {
 	emailViews     map[string]*emailViewState
 	emailEventCh   chan emailEvent
 	activateModeCh chan activateModeItem
+
+	// agents-board (board_view.go, design 025): the session-wide threaded store,
+	// its live feed, and per-pane scroll state. The board is a PaneType, not a
+	// mode, so `board` is shared by every agents-board pane while `boardViews`
+	// holds only what is genuinely per-pane.
+	board        *board.Store
+	boardEventCh <-chan board.Event
+	boardSub     *board.Subscriber
+	// boardConn asks the recorder whether it is recording. A request, not a
+	// heartbeat: liveness is answered by the recorder itself rather than
+	// inferred from a trace it left (design 026).
+	boardConn *nats.Conn
+	// boardRecorder is the last liveness answer. The view renders from this and
+	// never blocks on the question.
+	boardRecorder RecorderState
+	boardViews   map[string]*boardViewState
 	// pendingActivate remembers a backend activate-mode push (register-output)
 	// whose target mode is not yet enabled in this snapshot; syncPaneInputs
 	// applies it as soon as the mode-enable propagates. Keyed by pane ID.
@@ -523,6 +540,10 @@ func NewModel(cfg config.Config, logger *slog.Logger, b *bus.Bus) (Model, error)
 	emailEventCh, activateModeCh := setupEmailSubscriptions(b)
 	llmPickerCh := setupLLMPickerSubscription(b)
 
+	// Agents-board (design 025): restores KV history, then subscribes to the
+	// live feed. Returns a usable store on every failure path.
+	boardStore, boardEventCh, boardSub := setupBoardSubscriptions(b)
+
 	m := Model{
 		cfg:                cfg,
 		logger:             logger,
@@ -566,6 +587,11 @@ func NewModel(cfg config.Config, logger *slog.Logger, b *bus.Bus) (Model, error)
 		emailViews:         make(map[string]*emailViewState),
 		emailEventCh:       emailEventCh,
 		activateModeCh:     activateModeCh,
+		board:              boardStore,
+		boardConn:          boardNATSConn(b),
+		boardEventCh:       boardEventCh,
+		boardSub:           boardSub,
+		boardViews:         make(map[string]*boardViewState),
 		llmPickerCh:        llmPickerCh,
 		pendingActivate:    make(map[string]string),
 	}
@@ -658,7 +684,7 @@ func (m Model) activePaneIsAgenticInFlight() bool {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.refreshCmd(), tickCmd(), m.reconcileWorkspacesCmd(), m.listenApprovalRequests(), m.listenPipelineOutput(), m.listenAttentionEvents(), m.listenMirrorDirty(), m.listenRemoteFullscreen(), m.listenContentCmd(), m.listenLayoutDirty(), m.listenRawDirtyCmd(), m.listenVTFrameCmd(), m.listenMCPStatusCmd(), m.listenEmailEventCmd(), m.listenActivateModeCmd(), m.listenLLMPickerCmd(), reconcileTickCmd())
+	return tea.Batch(m.refreshCmd(), tickCmd(), m.reconcileWorkspacesCmd(), m.listenApprovalRequests(), m.listenPipelineOutput(), m.listenAttentionEvents(), m.listenMirrorDirty(), m.listenRemoteFullscreen(), m.listenContentCmd(), m.listenLayoutDirty(), m.listenRawDirtyCmd(), m.listenVTFrameCmd(), m.listenMCPStatusCmd(), m.listenEmailEventCmd(), m.listenActivateModeCmd(), m.listenLLMPickerCmd(), m.listenBoardEventCmd(), m.askRecorderCmd(), reconcileTickCmd())
 }
 
 // reconcileWorkspacesCmd asks the daemon (once, at startup/attach) to reconcile

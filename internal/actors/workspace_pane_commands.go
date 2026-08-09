@@ -47,13 +47,57 @@ func (w *WorkspaceActor) handlePaneCommand(ctx actor.Context, out *strings.Build
 		w.cmdPaneListInTabWithMeta(out, tab, withMeta)
 
 	case "info":
+		// ##pane info              -> the ambient pane
+		// ##pane info <pane-ref>   -> THAT pane, in whichever tab holds it
+		//
+		// F-16: this arm used to ignore args entirely. `##pane info <id>` read
+		// w.currentTab() and the ambient paneID, so it answered — confidently,
+		// in full, with no warning — about a pane the caller had not asked
+		// about. It was found live: a query for pane 22299ff7 returned
+		// f3a6c5cd, a different agent's pane, and nothing in the output said so.
+		//
+		// Three rules hold here, and each of them is a way the old behaviour was
+		// wrong rather than merely incomplete:
+		//
+		//  1. REFUSE, DO NOT GUESS. An unresolvable ref is an error naming the
+		//     ref. Falling back to the active pane is what made the defect
+		//     invisible: a wrong answer that looks right is worse than a
+		//     refusal.
+		//  2. DO NOT FOCUS. A named pane may live in another tab, so this
+		//     resolves the pane's OWN tab and searches that. It deliberately
+		//     does NOT call focusPaneByID, which would switch the active tab and
+		//     move the human's cursor — ##pane info is a read, and a read must
+		//     not move anything.
+		//  3. NO ARGUMENT KEEPS WORKING. Bare `##pane info` still reports the
+		//     ambient pane. That is long-standing behaviour people rely on and
+		//     turning it into an error would be a second defect, not a fix.
+		target := paneID
 		tab := w.currentTab()
+		if ref := paneInfoRef(args); ref != "" {
+			resolved := w.resolvePaneID(ref)
+			if resolved == "" {
+				fmt.Fprintf(out, "\n[rysh] pane not found: %s\n", ref)
+				w.failRysh("pane not found: %s", ref)
+				break
+			}
+			owning := w.findPaneTab(resolved)
+			if owning == nil {
+				// resolvePaneID saw it, so a tab holds it; not finding that tab
+				// means a snapshot did not come back. Say that rather than
+				// searching the active tab and reporting "not found" — or worse,
+				// reporting the ambient pane.
+				fmt.Fprintf(out, "\n[rysh] could not locate the tab holding pane: %s\n", ref)
+				w.failRysh("could not locate the tab holding pane: %s", ref)
+				break
+			}
+			target, tab = resolved, owning
+		}
 		if tab == nil {
 			fmt.Fprintf(out, "\n[rysh] no active tab\n")
 			w.failRysh("no active tab")
 			break
 		}
-		if paneID == "" {
+		if target == "" {
 			fmt.Fprintf(out, "\n[rysh] no active pane\n")
 			w.failRysh("no active pane")
 			break
@@ -70,7 +114,7 @@ func (w *WorkspaceActor) handlePaneCommand(ctx actor.Context, out *strings.Build
 		for _, lane := range tabSnap.Lanes {
 			for _, g := range lane.PaneGroups {
 				for i := range g.Panes {
-					if g.Panes[i].ID == paneID {
+					if g.Panes[i].ID == target {
 						ps = &g.Panes[i]
 						laneFlex = lane.Flex
 						laneID = lane.ID
@@ -86,8 +130,8 @@ func (w *WorkspaceActor) handlePaneCommand(ctx actor.Context, out *strings.Build
 			}
 		}
 		if ps == nil {
-			fmt.Fprintf(out, "\n[rysh] pane not found: %s\n", paneID)
-			w.failRysh("pane not found: %s", paneID)
+			fmt.Fprintf(out, "\n[rysh] pane not found: %s\n", target)
+			w.failRysh("pane not found: %s", target)
 			break
 		}
 		givenNameDisplay := ps.GivenName
@@ -397,4 +441,18 @@ func (w *WorkspaceActor) handlePaneCommand(ctx actor.Context, out *strings.Build
 		)
 		w.failRyshUsage("unknown subcommand for ##%s: %q", "pane", sub)
 	}
+}
+
+// paneInfoRef returns the pane reference a `##pane info` invocation named, or ""
+// when it named none.
+//
+// args[0] is the subcommand ("info"), so the reference is args[1]. Split out so
+// the "no argument keeps working" rule is one testable function rather than a
+// condition buried in a switch arm: an empty or whitespace-only argument is the
+// same as no argument, and means the ambient pane.
+func paneInfoRef(args []string) string {
+	if len(args) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(args[1])
 }

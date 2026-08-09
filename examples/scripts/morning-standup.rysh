@@ -82,7 +82,13 @@ echo "== standup for ${#REPOS[@]} repo(s)${UNDER_RYSH:+ (under rysh)} =="
 # ---------------------------------------------------------------------------
 
 ##pane list
-mapfile -t PANE_IDS < <(
+# A read loop rather than mapfile: mapfile is bash 4, and macOS ships bash 3.2
+# as /bin/bash. This file claims to run under plain bash, so it has to run
+# under the plain bash people actually have.
+PANE_IDS=()
+while IFS= read -r id; do
+  PANE_IDS+=("$id")
+done < <(
   printf '%s\n' "${RYSH_OUT:-}" | grep -o 'id=[0-9a-f-]\{36\}' | sed 's/^id=//' | tail -n "${#REPOS[@]}"
 )
 

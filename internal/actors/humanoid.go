@@ -160,12 +160,26 @@ type HumanoidActor struct {
 	// entry means "ai". This is what makes ai|human governance available on
 	// telegram, signal, imessage, phone, discord, and chatbot without each
 	// needing bespoke draft/send tools: in human mode the LLM's reply is
-	// captured (pendingGenericDraft) and posted via the normal outbound path
+	// captured (pendingGenericDrafts) and posted via the normal outbound path
 	// only when the human types "send".
 	governance map[string]string
-	// pendingGenericDraft holds a reply captured in human mode for a
-	// generic-governed channel, awaiting the human's "send" (or "discard").
-	pendingGenericDraft *genericDraft
+	// pendingGenericDrafts is the FIFO queue of replies captured in human mode
+	// for generic-governed channels, each awaiting the human's "send" (or
+	// "discard"). "send"/"discard" act on the HEAD, so drafts are approved in
+	// the order the messages arrived.
+	//
+	// It is a queue and not a single slot because it must be (E-19): the
+	// inbound FIFO dispatches the next channel message as soon as the previous
+	// reply completes, so a second reply is captured while the first is still
+	// unapproved. A single slot made that second capture destroy the first
+	// draft — the owner never approved it, never discarded it, and was never
+	// told it was gone.
+	//
+	// Touched only on the actor goroutine (Receive and the helpers it calls),
+	// like every other mailbox-serialized field, so it carries no lock of its
+	// own. govMu guards the governance MODE fields, which escaped tool-closure
+	// goroutines genuinely do read; nothing off-actor reads this queue.
+	pendingGenericDrafts []*genericDraft
 
 	// pendingApprovals holds tool-use approvals the assistant profile is
 	// waiting on, keyed by RequestID (X5). Concurrent chat threads must never
@@ -599,7 +613,7 @@ func (h *HumanoidActor) Receive(ctx actor.Context) {
 		// phone, discord, chatbot): a reply is buffered as a pending draft and
 		// the human types "send" to post it, or "discard" to drop it. Any other
 		// text falls through and re-drafts via a fresh LLM prompt.
-		if h.pendingGenericDraft != nil {
+		if len(h.pendingGenericDrafts) > 0 {
 			switch strings.ToLower(strings.TrimSpace(m.Prompt)) {
 			case "send", "yes", "confirm", "send it", "go ahead", "ok", "do it":
 				h.flushGenericDraft()
@@ -886,59 +900,7 @@ func (h *HumanoidActor) Receive(ctx actor.Context) {
 		// When orchestrator reaches "done" or "error", flush buffered output
 		// to the originating channel adapter.
 		if h.outboundPending && (m.Phase == "done" || m.Phase == "error") {
-			content := strings.TrimSpace(h.outboundBuffer.String())
-			slog.Debug("humanoid: flushing outbound buffer to channel", "name", h.name,
-				"phase", m.Phase, "content_len", len(content),
-				"has_last_inbound", h.lastInbound != nil)
-
-			// Governance decides what happens to the finished reply.
-			govChannel := ""
-			govMode := "ai"
-			if h.lastInbound != nil {
-				govChannel = h.lastInbound.ChannelType
-				govMode = h.govMode(govChannel)
-			}
-			switch {
-			case govMode == "human" && isToolGovernedChannel(govChannel):
-				// slack/email/whatsapp: the human drives the send explicitly via
-				// the channel's own draft/send tools, so suppress the auto-send.
-				slog.Debug("humanoid: tool-governed human mode — suppressing auto-send",
-					"name", h.name, "channel", govChannel)
-				h.outboundBuffer.Reset()
-				h.outboundPending = false
-			case govMode == "human":
-				// Generic capture-as-draft: hold the reply as a pending draft and
-				// show it in the pane. Nothing reaches the channel until the human
-				// types "send" (flushGenericDraft) — or "discard" to drop it.
-				if content != "" {
-					h.pendingGenericDraft = &genericDraft{
-						channelType: govChannel,
-						content:     content,
-						inbound:     h.lastInbound,
-					}
-					h.streamToPane(fmt.Sprintf(
-						"\n--- Draft reply (%s) ---\n%s\n-------------------------\n[human-governed] type \"send\" to post, \"discard\" to drop\n",
-						govChannel, content))
-					slog.Debug("humanoid: generic human mode — captured draft", "name", h.name,
-						"channel", govChannel, "content_len", len(content))
-				}
-				h.outboundBuffer.Reset()
-				h.outboundPending = false
-			default:
-				if content != "" {
-					h.routeOutboundToChannel(content)
-				}
-				h.outboundBuffer.Reset()
-				h.outboundPending = false
-			}
-			// Restore chat output pane for future @humanoid-name prompts. It was
-			// cleared in handleInboundMessage to suppress pane chat output during
-			// channel-inbound responses. Applies to all three branches above.
-			if h.activeChatPaneID != "" {
-				_ = h.pub.Send(h.llmPromptExecInbox, &msg.MsgSetChatOutputPane{
-					PaneID: h.activeChatPaneID,
-				})
-			}
+			h.flushOutboundOnCompletion(m.Phase)
 		}
 		// Advance the inbound FIFO queue once the active prompt finishes, so the
 		// next queued channel message is processed in order (Problem 3). Runs
@@ -2730,36 +2692,163 @@ func (h *HumanoidActor) routeOutboundToChannel(content string) {
 	}
 }
 
-// flushGenericDraft posts the pending generic-governed draft to its channel via
-// the same generic outbound path used for ai-mode replies, then clears it. The
-// draft's originating inbound is restored around the call so the reply routes
-// to the correct channel/thread even if a newer inbound became h.lastInbound.
+// maxPendingGenericDrafts bounds the human-governed draft queue. Hitting it
+// means the owner has left that many replies unapproved, so the queue is not
+// draining. Growing without limit is not an option, and silently dropping is
+// the very defect the queue exists to fix — so the newest capture is refused
+// and the owner is told, loudly, in the pane.
+const maxPendingGenericDrafts = 50
+
+// enqueueGenericDraft appends a captured reply to the pending-draft queue and
+// shows it in the pane. When drafts are already waiting the banner says how
+// many and which end "send" acts on: a queued draft the owner cannot see is a
+// quieter version of the overwrite this queue replaced.
+func (h *HumanoidActor) enqueueGenericDraft(d *genericDraft) {
+	if len(h.pendingGenericDrafts) >= maxPendingGenericDrafts {
+		slog.Warn("humanoid: generic draft queue full — refusing capture", "name", h.name,
+			"channel", d.channelType, "depth", len(h.pendingGenericDrafts))
+		h.streamToPane(fmt.Sprintf(
+			"\n[human-governed] draft queue is FULL (%d awaiting you on %s) — this reply was NOT kept.\nApprove or drop some with \"send\"/\"discard\", then ask me to redraft it.\n",
+			maxPendingGenericDrafts, d.channelType))
+		return
+	}
+
+	h.pendingGenericDrafts = append(h.pendingGenericDrafts, d)
+	depth := len(h.pendingGenericDrafts)
+
+	banner := fmt.Sprintf("\n--- Draft reply (%s) ---\n%s\n-------------------------\n",
+		d.channelType, d.content)
+	if depth == 1 {
+		banner += "[human-governed] type \"send\" to post, \"discard\" to drop\n"
+	} else {
+		banner += fmt.Sprintf(
+			"[human-governed] %d drafts now awaiting you — \"send\"/\"discard\" acts on the OLDEST first, so this one is #%d in line\n",
+			depth, depth)
+	}
+	h.streamToPane(banner)
+
+	slog.Debug("humanoid: generic human mode — captured draft", "name", h.name,
+		"channel", d.channelType, "content_len", len(d.content), "queue_depth", depth)
+}
+
+// popGenericDraft removes and returns the oldest pending draft, or nil when the
+// queue is empty.
+func (h *HumanoidActor) popGenericDraft() *genericDraft {
+	if len(h.pendingGenericDrafts) == 0 {
+		return nil
+	}
+	d := h.pendingGenericDrafts[0]
+	// Re-slice off the front and clear the vacated cell so the drained draft
+	// (which retains its whole inbound message) is not pinned by the backing
+	// array.
+	h.pendingGenericDrafts[0] = nil
+	h.pendingGenericDrafts = h.pendingGenericDrafts[1:]
+	return d
+}
+
+// announceNextGenericDraft shows the owner the draft that "send"/"discard" will
+// act on now that the head has been cleared, so a backlog never goes unseen.
+func (h *HumanoidActor) announceNextGenericDraft() {
+	depth := len(h.pendingGenericDrafts)
+	if depth == 0 {
+		return
+	}
+	next := h.pendingGenericDrafts[0]
+	h.streamToPane(fmt.Sprintf(
+		"\n--- Next draft reply (%s) — %d still awaiting you ---\n%s\n-------------------------\n[human-governed] type \"send\" to post, \"discard\" to drop\n",
+		next.channelType, depth, next.content))
+}
+
+// flushOutboundOnCompletion applies the originating channel's governance to a
+// reply whose orchestrator run has just reached done/error, then clears the
+// outbound buffer. Called from the MsgAgenticStatus branch of Receive, so it
+// runs on the actor goroutine like every other reader of the draft queue.
+func (h *HumanoidActor) flushOutboundOnCompletion(phase string) {
+	content := strings.TrimSpace(h.outboundBuffer.String())
+	slog.Debug("humanoid: flushing outbound buffer to channel", "name", h.name,
+		"phase", phase, "content_len", len(content),
+		"has_last_inbound", h.lastInbound != nil)
+
+	// Governance decides what happens to the finished reply.
+	govChannel := ""
+	govMode := "ai"
+	if h.lastInbound != nil {
+		govChannel = h.lastInbound.ChannelType
+		govMode = h.govMode(govChannel)
+	}
+	switch {
+	case govMode == "human" && isToolGovernedChannel(govChannel):
+		// slack/email/whatsapp: the human drives the send explicitly via
+		// the channel's own draft/send tools, so suppress the auto-send.
+		slog.Debug("humanoid: tool-governed human mode — suppressing auto-send",
+			"name", h.name, "channel", govChannel)
+		h.outboundBuffer.Reset()
+		h.outboundPending = false
+	case govMode == "human":
+		// Generic capture-as-draft: hold the reply as a pending draft and
+		// show it in the pane. Nothing reaches the channel until the human
+		// types "send" (flushGenericDraft) — or "discard" to drop it.
+		if content != "" {
+			h.enqueueGenericDraft(&genericDraft{
+				channelType: govChannel,
+				content:     content,
+				inbound:     h.lastInbound,
+			})
+		}
+		h.outboundBuffer.Reset()
+		h.outboundPending = false
+	default:
+		if content != "" {
+			h.routeOutboundToChannel(content)
+		}
+		h.outboundBuffer.Reset()
+		h.outboundPending = false
+	}
+	// Restore chat output pane for future @humanoid-name prompts. It was
+	// cleared in handleInboundMessage to suppress pane chat output during
+	// channel-inbound responses. Applies to all three branches above.
+	if h.activeChatPaneID != "" {
+		_ = h.pub.Send(h.llmPromptExecInbox, &msg.MsgSetChatOutputPane{
+			PaneID: h.activeChatPaneID,
+		})
+	}
+}
+
+// flushGenericDraft posts the OLDEST pending generic-governed draft to its
+// channel via the same generic outbound path used for ai-mode replies, then
+// drops it from the queue and shows whatever is next. The draft's originating
+// inbound is restored around the call so the reply routes to the correct
+// channel/thread even if a newer inbound became h.lastInbound.
 func (h *HumanoidActor) flushGenericDraft() {
-	d := h.pendingGenericDraft
+	d := h.popGenericDraft()
 	if d == nil {
 		return
 	}
-	h.pendingGenericDraft = nil
 	if d.content == "" {
+		h.announceNextGenericDraft()
 		return
 	}
 	prev := h.lastInbound
 	h.lastInbound = d.inbound
 	h.routeOutboundToChannel(d.content)
 	h.lastInbound = prev
-	slog.Info("humanoid: sent human-approved draft", "name", h.name, "channel", d.channelType)
+	slog.Info("humanoid: sent human-approved draft", "name", h.name,
+		"channel", d.channelType, "queue_remaining", len(h.pendingGenericDrafts))
 	h.streamToPane(fmt.Sprintf("\n[human-governed] sent to %s\n", d.channelType))
+	h.announceNextGenericDraft()
 }
 
-// discardGenericDraft drops the pending generic-governed draft unsent.
+// discardGenericDraft drops the OLDEST pending generic-governed draft unsent,
+// leaving the rest of the queue intact, and shows whatever is next.
 func (h *HumanoidActor) discardGenericDraft() {
-	d := h.pendingGenericDraft
+	d := h.popGenericDraft()
 	if d == nil {
 		return
 	}
-	h.pendingGenericDraft = nil
-	slog.Info("humanoid: discarded draft", "name", h.name, "channel", d.channelType)
+	slog.Info("humanoid: discarded draft", "name", h.name,
+		"channel", d.channelType, "queue_remaining", len(h.pendingGenericDrafts))
 	h.streamToPane(fmt.Sprintf("\n[human-governed] draft discarded (%s)\n", d.channelType))
+	h.announceNextGenericDraft()
 }
 
 // buildContextualPrompt creates a prompt that includes channel context,
