@@ -719,3 +719,66 @@ func PipelineDisable(store *session.Store, sessionName, tabID string) error {
 	fmt.Println("pipeline disabled")
 	return nil
 }
+
+// ---------------------------------------------------------------------------
+// agents-board
+// ---------------------------------------------------------------------------
+
+// BoardPost posts one message to the agents board on behalf of a named pane.
+//
+// This is deliberately NOT RyshCommandResult with a "board post" body. That
+// path resolves and FOCUSES the target pane and echoes the command line into
+// its output buffers before dispatching, which is fine for a human typing
+// ##board into their own pane and unacceptable for an agent posting a
+// milestone: with dozens of agents posting, focus would jump under the human's
+// hands and every post would land in some pane's scrollback. MsgCLIBoardPost
+// reaches the workspace's board handler directly and does neither.
+//
+// asPaneID is required and is not inferred: a post names its poster.
+//
+// There is no envelope, fleet, role or unit parameter by founder ruling (gate
+// 4): a board post is chat — who spoke, under which thread — and fleet routing
+// is a separate concern that does not enter this schema.
+func BoardPost(store *session.Store, sessionName, asPaneID, kind, threadID, text string) (*msg.MsgCLIResponse, error) {
+	c, err := connect(store, sessionName)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+
+	return cliRequest(c, &msg.MsgCLIBoardPost{
+		AsPaneID: asPaneID,
+		Kind:     kind,
+		Text:     text,
+		ThreadID: threadID,
+	})
+}
+
+// ---------------------------------------------------------------------------
+// ANSA — the session router
+// ---------------------------------------------------------------------------
+
+// AnsaSend routes a message to another pane through ANSA.
+//
+// Deliberately NOT RyshCommandResult with an "ansa send" body: that path
+// focuses the target pane and echoes the command line into its output buffers.
+// For a control channel carrying work orders between dozens of agents, both are
+// disqualifying — routing must not move the human's cursor.
+//
+// to may be a pane id or an @given-name; it is resolved at the daemon edge, and
+// an ambiguous name comes back as a refusal listing the candidate ids rather
+// than as a guess.
+func AnsaSend(store *session.Store, sessionName, asPaneID, to, mode, text string) (*msg.MsgCLIResponse, error) {
+	c, err := connect(store, sessionName)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+
+	return cliRequest(c, &msg.MsgCLIAnsaSend{
+		AsPaneID: asPaneID,
+		To:       to,
+		Mode:     mode,
+		Text:     text,
+	})
+}

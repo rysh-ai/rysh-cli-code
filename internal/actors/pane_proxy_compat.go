@@ -2,10 +2,7 @@ package actors
 
 import (
 	"log/slog"
-	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/proxy"
 )
@@ -136,13 +133,13 @@ func (p *PaneActor) stopUngovernedProgram(binary string) {
 // would be far more invasive than the atomic it replaces.
 func (p *PaneActor) proxyServer() *proxy.Server { return proxy.Current() }
 
-// processName resolves a pid to its executable name. Linux reads
-// /proc/<pid>/comm; elsewhere it returns "" and detection degrades to silence
-// rather than to a wrong answer.
-func processName(pid int) string {
-	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/comm")
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(b))
-}
+// processName resolves a pid to its executable name. The implementation is
+// per-OS (pane_procname_*.go): Linux reads /proc/<pid>/comm, darwin asks the
+// kernel for the process's kinfo_proc, and anything else returns "" so that
+// detection degrades to silence rather than to a wrong answer.
+//
+// It used to be the /proc read alone, unguarded by a build tag, which meant it
+// returned "" for every pid on macOS — and since an empty name clears the
+// govWatch observation (noteForeground) and blanks the pane's foreground
+// program, both `[proxy] strict` and `##pane list`'s "running" column were dead
+// on the whole platform. See F-12.

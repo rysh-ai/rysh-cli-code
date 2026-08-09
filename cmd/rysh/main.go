@@ -332,6 +332,20 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 		// exec_cmd.go (design 021 §3.3).
 		return runExecCmd(cfg, args)
 
+	case "ansa":
+		// rysh ansa send <@name|pane-id> -- <text> — route through the session
+		// router WITHOUT focusing a pane or echoing into one. Deliberately not
+		// the generated `rysh --ansa` alias, which goes through the ## path and
+		// does both. See ansa_cmd.go.
+		return runAnsaCmd(cfg, args)
+
+	case "board":
+		// rysh board post [--as <pane-id>] -- <text> — post to the agents
+		// board WITHOUT focusing anything or echoing into a pane. Deliberately
+		// not the generated `rysh --board` alias, which goes through the ##
+		// path and does both. See board_cmd.go (design 025 §4).
+		return runBoardCmd(cfg, args)
+
 	case "script":
 		// rysh script <file.rysh> [args...] — run a bash script in which ##
 		// lines are rysh commands. See script_cmd.go (design 021).
@@ -682,6 +696,26 @@ func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error 
 		fCtx, fCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		agSetup.BootstrapForge(fCtx)
 		fCancel()
+	}
+
+	// ABLA — the agents-board listener (design 025 / 026). Session-scoped and
+	// always on, spawned at the actor-system ROOT and BEFORE the workspace farm,
+	// because it has to be listening before anything exists that could post.
+	//
+	// It is the fix for a defect that made the board quietly useless: collection
+	// and persistence used to live in the TUI, so nothing was heard and nothing
+	// was written while no TUI had a board open — which is the normal state of a
+	// session. ABLA collects; a TUI only reads.
+	//
+	// SpawnNamed, not Spawn: the name is what makes it a singleton, so a second
+	// spawn fails loudly instead of silently double-recording every post. A
+	// failure here is logged, not fatal — a session must still start when its
+	// monitoring view cannot.
+	ablaActor := actors.NewAgentBoardListenerActor(b.Conn(), b.Codecs(), b.BoardKV())
+	ablaProps := actor.PropsFromProducer(func() actor.Actor { return ablaActor })
+	if _, aerr := b.ActorSystem().Root.SpawnNamed(ablaProps, "agent-board-listener"); aerr != nil {
+		slog.Warn(progname.Rewrite("rysh: agents-board listener not started; the board will not record"),
+			"err", aerr)
 	}
 
 	// The WorkspaceFarmActor is the session root. It spawns one WorkspaceActor
@@ -1452,6 +1486,16 @@ func printUsage() {
 	usageLine("       rysh exec [--session <n>] [--tab-id <t>] [--pane-id <p>] [--json] -- '##<cmd>'")
 	usageLine("                    run any ## command against a running session and print its")
 	usageLine("                    output. Exits non-zero when the command reports failure.")
+	usageLine("       rysh ansa send <@name|pane-id> [--as <pane-id>] -- '<text>'")
+	usageLine("                    route a message to another pane through the session router.")
+	usageLine("                    Does not focus a pane or echo into one. An ambiguous @name is")
+	usageLine("                    refused with the candidate ids, never guessed.")
+	usageLine("                    `rysh ansa prompt <target> -- '<text>'` delivers it as a prompt.")
+	usageLine("       rysh board post [--as <pane-id>] [--kind <k>] [--thread <id>] -- '<text>'")
+	usageLine("                    post to the agents board without focusing a pane or echoing")
+	usageLine("                    into one. --as defaults to $RYSH_PANE, so an agent inside a")
+	usageLine("                    pane can just: rysh board post 'finished the codec wiring'.")
+	usageLine("                    `rysh board reply <thread-id> -- '<text>'` replies in-thread.")
 	usageLine("       rysh prompt [--session <n>] [--pane-id <p>] [--timeout <d>] [--json] -- '<text>'")
 	usageLine("                    send a prompt to a RUNNING session's pane and block until the")
 	usageLine("                    agentic turn ends. Same exit codes as `rysh run` (0 done,")

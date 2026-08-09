@@ -355,6 +355,12 @@ const (
 	TagPaneRawOutputAppend         = "MsgPaneRawOutputAppend"
 	TagPaneShareModeChange         = "MsgPaneShareModeChange"
 	TagPaneRawDirty                = "MsgPaneRawDirty"
+	TagBoardPost                   = "MsgBoardPost"
+	TagBoardRegister               = "MsgBoardRegister"
+	TagCLIBoardPost                = "MsgCLIBoardPost"
+	TagAnsaRoute                   = "MsgAnsaRoute"
+	TagAnsaRouteResult             = "MsgAnsaRouteResult"
+	TagCLIAnsaSend                 = "MsgCLIAnsaSend"
 	TagPaneReplayShareState        = "MsgPaneReplayShareState"
 	TagRemoteInteractiveModeChange = "MsgRemoteInteractiveModeChange"
 	TagPaneSetRemoteSubscriber     = "MsgPaneSetRemoteSubscriber"
@@ -478,6 +484,12 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagPaneRawOutputAppend, "*msg.MsgPaneRawOutputAppend", jsonDecoder[MsgPaneRawOutputAppend]())
 	r.Register(TagPaneShareModeChange, "*msg.MsgPaneShareModeChange", jsonDecoder[MsgPaneShareModeChange]())
 	r.Register(TagPaneRawDirty, "*msg.MsgPaneRawDirty", jsonDecoder[MsgPaneRawDirty]())
+	r.Register(TagBoardPost, "*msg.MsgBoardPost", jsonDecoder[MsgBoardPost]())
+	r.Register(TagBoardRegister, "*msg.MsgBoardRegister", jsonDecoder[MsgBoardRegister]())
+	r.Register(TagCLIBoardPost, "*msg.MsgCLIBoardPost", jsonDecoder[MsgCLIBoardPost]())
+	r.Register(TagAnsaRoute, "*msg.MsgAnsaRoute", jsonDecoder[MsgAnsaRoute]())
+	r.Register(TagAnsaRouteResult, "*msg.MsgAnsaRouteResult", jsonDecoder[MsgAnsaRouteResult]())
+	r.Register(TagCLIAnsaSend, "*msg.MsgCLIAnsaSend", jsonDecoder[MsgCLIAnsaSend]())
 	r.Register(TagPaneReplayShareState, "*msg.MsgPaneReplayShareState", jsonDecoder[MsgPaneReplayShareState]())
 	r.Register(TagRemoteInteractiveModeChange, "*msg.MsgRemoteInteractiveModeChange", jsonDecoder[MsgRemoteInteractiveModeChange]())
 	r.Register(TagPaneSetRemoteSubscriber, "*msg.MsgPaneSetRemoteSubscriber", jsonDecoder[MsgPaneSetRemoteSubscriber]())

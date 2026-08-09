@@ -284,10 +284,27 @@ func (w *WorkspaceActor) queryPaneCount(tabID string) int {
 	return 0
 }
 
+// queryTabSnapshot fetches a tab's STRUCTURE — lanes, groups, pane ids and the
+// per-pane flags. Every one of its ~40 callers is answering a structural
+// question (which tab holds this pane, which group, which lane, resolve this
+// selector); none reads a pane's content.
+//
+// It therefore asks for a layout-only snapshot with no histories. It used to
+// send a bare MsgGetTabSnapshot{} — LayoutOnly false — which pulled every
+// pane's output buffers, VT screen and command history through the whole
+// Tab→Lane→Group→Pane cascade just to answer "does this tab contain pane X".
+//
+// That was a correctness bug, not only a slow path. The request has a timeout,
+// and on a busy workspace it blew through it: focusPaneByID() treats a nil
+// snapshot as "not this tab" and moves on, so when the query timed out the
+// focus restore after creating a pane silently did nothing and the NEW pane
+// kept focus. With many panes spawning children at once — 44 claude panes,
+// each spawning another — focus appeared to jump to whichever pane had just
+// been created or had just produced output. Cheap requests do not time out.
 func (w *WorkspaceActor) queryTabSnapshot(tabID string) *domain.TabSnapshot {
 	reply, err := w.pub.Request(
 		msg.T("tab", tabID, "snapshot"),
-		&msg.MsgGetTabSnapshot{},
+		&msg.MsgGetTabSnapshot{LayoutOnly: true, NoHistories: true},
 		2*snapshotTimeout,
 	)
 	if err != nil {

@@ -1,7 +1,9 @@
 package actors
 
 import (
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -29,8 +31,9 @@ import (
 //
 // Session shutdown deliberately does NOT clean up: worktrees must survive a
 // detach/restart (the agent registry round-trips its worktree records through
-// KV for exactly that reason). Only user-initiated pane/group/lane/tab closes
-// release worktrees.
+// KV for exactly that reason, and so does groupWorktrees — see "Ownership
+// persistence" below). Only user-initiated pane/group/lane/tab closes release
+// worktrees.
 
 // groupWorktreeRef records the rysh-managed worktree a pane group runs in.
 type groupWorktreeRef struct {
@@ -165,6 +168,113 @@ func (w *WorkspaceActor) trackGroupWorktree(groupID, path, branch string) {
 		w.groupWorktrees = make(map[string]groupWorktreeRef)
 	}
 	w.groupWorktrees[groupID] = groupWorktreeRef{path: path, branch: branch}
+	w.persistGroupWorktrees()
+}
+
+// ---------------------------------------------------------------------------
+// Ownership persistence (E-17)
+// ---------------------------------------------------------------------------
+//
+// groupWorktrees used to live only in memory, so a daemon restart forgot which
+// pane group owned which worktree: the close of an owning group found no
+// record, returned "", and orphaned the worktree until the user found it and
+// ran `##worktree remove` by hand. The agent half of design 008 already
+// round-trips its worktree record through KV (agentKV.WorktreePath /
+// restoreFromKV in agent_registry.go); this is the pane-group equivalent,
+// keyed and written like the workspace's other side-document (cron.jobs).
+//
+// The fail-safe direction is unchanged and load-bearing: this code can only
+// ADD records that trackGroupWorktree itself wrote. Every degraded path — no
+// KV, an unreadable key, bytes that are not the expected document, a record
+// whose directory has since vanished — ends with the record ABSENT, and an
+// absent record makes releaseGroupWorktree a silent no-op ("keep"). There is
+// no path here that can produce a removal the in-memory code would not have
+// made.
+
+// groupWorktreeKV is the serialisable form of one ownership record. Kept
+// separate from groupWorktreeRef so the persisted shape is explicit (the ref's
+// fields are unexported and would serialise to nothing).
+type groupWorktreeKV struct {
+	Path   string `json:"path"`
+	Branch string `json:"branch,omitempty"`
+}
+
+// groupWorktreeKVKey is the workspace-KV key holding the ownership map.
+// Workspaces share one bucket, so the key is workspace-scoped exactly as
+// kvKey() is — group ids are per workspace, and one workspace's records must
+// not clobber another's. Sanitized for the NATS KV key charset.
+func (w *WorkspaceActor) groupWorktreeKVKey() string {
+	if w.workspaceName != "" {
+		return "worktrees_groups_" + sanitizeKVKey(w.workspaceName)
+	}
+	return "worktrees_groups"
+}
+
+// persistGroupWorktrees writes the ownership map to KV. Called on every
+// mutation (track + the delete in releaseGroupWorktree): the map is tiny and
+// changes only when a pane group takes or gives up a worktree, so it is
+// written directly rather than through the debounced layout persist — an
+// ownership record that is one crash behind is exactly the bug being fixed.
+func (w *WorkspaceActor) persistGroupWorktrees() {
+	if w.wKV == nil {
+		return
+	}
+	entries := make(map[string]groupWorktreeKV, len(w.groupWorktrees))
+	for groupID, ref := range w.groupWorktrees {
+		entries[groupID] = groupWorktreeKV{Path: ref.path, Branch: ref.branch}
+	}
+	data, err := json.Marshal(entries)
+	if err != nil {
+		return
+	}
+	if _, err := w.wKV.Put(w.groupWorktreeKVKey(), data); err != nil {
+		// Surfaced, not swallowed: a failed write means the next restart falls
+		// back to keep + manual remove, which is safe but worth seeing.
+		slog.Warn("workspace: group-worktree ownership persist failed",
+			"key", w.groupWorktreeKVKey(), "err", err)
+	}
+}
+
+// restoreGroupWorktreesFromKV re-populates the ownership map at workspace
+// start, so a pane group that survives the restart still cleans up its
+// worktree when it closes. Records whose directory no longer exists are
+// pruned (and the pruning written back) — a vanished worktree is nothing to
+// own, and nothing is removed on its behalf.
+func (w *WorkspaceActor) restoreGroupWorktreesFromKV() {
+	if w.wKV == nil {
+		return
+	}
+	entry, err := w.wKV.Get(w.groupWorktreeKVKey())
+	if err != nil {
+		return // never written, or unreadable -> no records -> close keeps
+	}
+	var entries map[string]groupWorktreeKV
+	if err := json.Unmarshal(entry.Value(), &entries); err != nil {
+		slog.Warn("workspace: group-worktree ownership record unreadable — "+
+			"worktrees will be kept on close until re-tracked",
+			"key", w.groupWorktreeKVKey(), "err", err)
+		return
+	}
+
+	restored := 0
+	for groupID, gkv := range entries {
+		if groupID == "" || gkv.Path == "" {
+			continue
+		}
+		if info, serr := os.Stat(gkv.Path); serr != nil || !info.IsDir() {
+			continue // stale record: directory gone -> drop it, remove nothing
+		}
+		if w.groupWorktrees == nil {
+			w.groupWorktrees = make(map[string]groupWorktreeRef)
+		}
+		w.groupWorktrees[groupID] = groupWorktreeRef{path: gkv.Path, branch: gkv.Branch}
+		restored++
+	}
+	if restored != len(entries) {
+		w.persistGroupWorktrees() // make the pruning durable
+	}
+	slog.Info("workspace: restored pane-group worktree ownership",
+		"restored", restored, "pruned", len(entries)-restored)
 }
 
 // releaseGroupWorktree is the cleanup-on-close hook: called when the pane
@@ -178,6 +288,9 @@ func (w *WorkspaceActor) releaseGroupWorktree(groupID string) string {
 		return ""
 	}
 	delete(w.groupWorktrees, groupID)
+	// Durable immediately: the group is gone whatever the outcome below, so a
+	// restart must not see it as a live user of the worktree.
+	w.persistGroupWorktrees()
 
 	// Another pane group still runs in this worktree — not ours to touch.
 	for other, oref := range w.groupWorktrees {

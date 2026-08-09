@@ -8,6 +8,18 @@
 /rysh
 /ry
 /rysh_local
+# These three were committed rather than ignored, and the OSS export ships
+# whatever it is not told to drop — so `medium-smoke` (7.5 MB Mach-O arm64) has
+# been sitting in the public rysh-cli-code repo since v0.1.0, and `gateway-e2e`
+# (9.6 MB Mach-O x86_64) was queued to join it. `test` is a 7-byte file
+# containing "hello!".
+#
+# The leading slash matters here for the reason given above: unanchored,
+# `gateway-e2e` would also match the cmd/gateway-e2e/ source directory, and
+# `test` would match every test/ directory in the tree.
+/gateway-e2e
+/medium-smoke
+/test
 
 # Config file (contains secrets / personal settings).
 # The committed template is rysh.config.yaml.example.

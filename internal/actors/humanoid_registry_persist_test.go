@@ -12,7 +12,8 @@ import (
 
 // recordingKV captures the bytes persistToKV writes, so tests can assert on
 // the exact record a restart would restore from. (fakeKV elsewhere in this
-// package only counts puts.)
+// package only counts puts.) Get serves those same bytes back, so a test can
+// run a real restore over the record the previous "process" wrote.
 type recordingKV struct {
 	nats.KeyValue
 	data map[string][]byte
@@ -25,6 +26,24 @@ func (r *recordingKV) Put(key string, value []byte) (uint64, error) {
 	r.data[key] = append([]byte(nil), value...)
 	return 1, nil
 }
+
+func (r *recordingKV) Get(key string) (nats.KeyValueEntry, error) {
+	value, ok := r.data[key]
+	if !ok {
+		return nil, nats.ErrKeyNotFound
+	}
+	return &recordedEntry{value: value}, nil
+}
+
+// recordedEntry is the minimal nats.KeyValueEntry a restore path reads: only
+// Value() is called. The embedded nil interface satisfies the rest at compile
+// time (same trick as recordingKV itself).
+type recordedEntry struct {
+	nats.KeyValueEntry
+	value []byte
+}
+
+func (e *recordedEntry) Value() []byte { return e.value }
 
 func persistedContacts(t *testing.T, kv *recordingKV, humanoid string) map[string]msg.ChannelConfig {
 	t.Helper()

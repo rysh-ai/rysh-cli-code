@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -25,6 +26,12 @@ type ResourceLimits struct {
 	MaxWorkspaces int    `json:"max_workspaces"`
 	MaxSessions   int    `json:"max_sessions"`
 	MaxPanes      int    `json:"max_panes"`
+	// UpgradeURL is where the server wants a user who just hit a limit to go.
+	// It may be relative to the server (the default) or absolute; resolve it
+	// with resolveUpgradeURL before showing it. Empty means the deployment
+	// configured none, and nothing is shown — a self-hosted rysh must never
+	// advertise somebody else's billing page.
+	UpgradeURL string `json:"upgrade_url,omitempty"`
 }
 
 // ResourceUsage describes the current resource counts in the workspace.
@@ -41,6 +48,41 @@ type LimitCheckResult struct {
 	Error    string `json:"error,omitempty"`
 	PlanID   string `json:"plan_id"`
 	PlanName string `json:"plan_name"`
+	// UpgradeURL — see ResourceLimits.UpgradeURL.
+	UpgradeURL string `json:"upgrade_url,omitempty"`
+}
+
+// resolveUpgradeURL turns whatever the server sent into something a user can
+// actually paste into a browser, or into "" if there is nothing to show.
+//
+// The server's default is deployment-relative ("/pricing"), so the CLI joins it
+// onto the server it is talking to. That is what keeps a self-hoster's terminal
+// pointing at their own deployment. An absolute URL is passed through; a
+// relative one with no server URL to hang it on yields "" rather than a
+// fragment that looks like a link but is not one.
+func resolveUpgradeURL(serverURL, raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+		return raw
+	}
+	base := strings.TrimRight(strings.TrimSpace(serverURL), "/")
+	if base == "" {
+		return ""
+	}
+	return base + "/" + strings.TrimLeft(raw, "/")
+}
+
+// upgradeHint renders the trailing clause appended to a limit message, or ""
+// when there is no URL to offer. Mirrors the server-side helper of the same
+// name so both surfaces read identically.
+func (c *Checker) upgradeHint(raw string) string {
+	if u := resolveUpgradeURL(c.serverURL, raw); u != "" {
+		return " — upgrade at " + u
+	}
+	return ""
 }
 
 // Checker validates resource limits against the server's subscription system.
@@ -129,8 +171,8 @@ func (c *Checker) CheckCreate(usage ResourceUsage, addPanes int) error {
 		return nil
 	}
 	if limits.MaxPanes > 0 && usage.Panes+addPanes > limits.MaxPanes {
-		return fmt.Errorf("pane limit reached (%d/%d on %s plan). Upgrade your plan to create more panes",
-			usage.Panes, limits.MaxPanes, limits.PlanName)
+		return fmt.Errorf("pane limit reached (%d/%d on %s plan). Upgrade your plan to create more panes%s",
+			usage.Panes, limits.MaxPanes, limits.PlanName, c.upgradeHint(limits.UpgradeURL))
 	}
 	return nil
 }

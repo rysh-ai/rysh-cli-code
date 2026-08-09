@@ -19,11 +19,20 @@ echo "== building a $PANES-pane lane =="
 # rysh printed the layout; bash picks the pane ids out of it. This is the whole
 # interop story in two lines — no API, no JSON, just a command and a pipe.
 ##pane list
-mapfile -t IDS < <(printf '%s\n' "${RYSH_OUT:-}" | grep -o 'id=[0-9a-f-]\{36\}' | sed 's/^id=//' | tail -n "$PANES")
+# read -a rather than mapfile: mapfile is bash 4, and macOS still ships bash
+# 3.2 as /bin/bash — so a mapfile here would break the "runs under plain bash"
+# promise for every Mac user, which is most of them.
+IDS=()
+while IFS= read -r id; do
+  IDS+=("$id")
+done < <(printf '%s\n' "${RYSH_OUT:-}" | grep -o 'id=[0-9a-f-]\{36\}' | sed 's/^id=//' | tail -n "$PANES")
 
 echo "== naming ${#IDS[@]} panes =="
+# ${IDS[@]+...} rather than a bare "${IDS[@]}": under `set -u`, bash 3.2 treats
+# an EMPTY array as an unbound variable and aborts. That is exactly the plain-bash
+# case — no rysh, so no pane ids — which is the path this file promises to survive.
 i=0
-for id in "${IDS[@]}"; do
+for id in ${IDS[@]+"${IDS[@]}"}; do
   role="${ROLES[$i]:-pane$i}"
   : ##pane name "$id" "$role"
   if [[ -n "$MODEL" ]]; then

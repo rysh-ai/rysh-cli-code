@@ -331,7 +331,20 @@ type PaneSnapshot struct {
 	AttentionCategory string `json:"attention_category,omitempty"`
 	AttentionTitle    string `json:"attention_title,omitempty"`
 
-	// Pane type discriminator: "normal" (default) or "approval" (ephemeral approval pane).
+	// Pane type discriminator. A pane type is what a pane is INSTEAD of a
+	// shell — it is a different axis from the pane's input mode
+	// (EnabledModes: shell/prompt/rysh/chat/external/email/web), which is how
+	// keystrokes are read on a pane that does have a shell.
+	//
+	//	""             normal pane (the default; "normal" is never written)
+	//	"approval"     ephemeral approval pane   (actors/approval_pane.go)
+	//	"replay"       recorded playback         (actors/workspace_replay.go)
+	//	"agents-board" threaded board of what every agent is doing (design 025)
+	//
+	// The previous comment here claimed the values were "normal" or
+	// "approval", omitting "replay" entirely — stale in both directions, and a
+	// stale comment on the field being extended is how the next reader gets it
+	// wrong. Use the PaneType* constants rather than string literals.
 	PaneType string `json:"pane_type,omitempty"`
 
 	// ShellPID is the OS process id of the pane's shell process. The TUI uses it

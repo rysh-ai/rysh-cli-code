@@ -184,3 +184,80 @@ func contains(haystack, needle string) bool {
 		return false
 	})()
 }
+
+// F-9: a second daemon rotating the credentials file must not lock this one out.
+//
+// rysh state is project-local — there is no ~/.rysh — so EVERY daemon rooted at
+// a workspace shares one web-auth.json. The server used to take a snapshot of it
+// at start and never look again, so when another daemon ran `##rysh web auth`
+// (which mints a fresh HS256 key by design, to log old browsers out) this
+// server kept verifying against the key nobody was minting with any more.
+//
+// Measured in the wild on 2026-08-07: 127 WebSocket dials over ngrok and 180
+// local, all 401, zero connections, until `##rysh web stop --shared` + `start`
+// — which is exactly what proves the listener only read the file at start.
+//
+// The fix is not "stop rotating": a second daemon is entitled to set the
+// workspace's login. It is that a running server must follow the file.
+func TestSharedDoorFollowsARotatedCredentialsFile(t *testing.T) {
+	nc := startInProcessNATS(t)
+	pub := msg.NewNATSPublisher(nc, msg.DefaultCodecRegistry())
+	private, shared := freePort(t), freePort(t)
+
+	// One workspace rysh dir, shared by every daemon rooted here.
+	ryshDir := t.TempDir()
+	first, err := SaveCredentials(ryshDir, "halil", "s3cret")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewServer(private, "rotated", pub, nc, pub.Codecs())
+	s.SetHost("127.0.0.1")
+	s.SetControl(true)
+	s.TrackCredentialsFile(ryshDir)
+	s.SetCredentials(first)
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Stop() })
+	waitForHTTP(t, fmt.Sprintf("http://127.0.0.1:%d/health", private))
+	if err := s.StartShared("127.0.0.1", shared); err != nil {
+		t.Fatalf("StartShared: %v", err)
+	}
+	waitForHTTP(t, fmt.Sprintf("http://127.0.0.1:%d/health", shared))
+
+	api := fmt.Sprintf("http://127.0.0.1:%d/api/env", shared)
+	tokFirst, err := signJWT(first.SigningKey(), first.Username, time.Now(), AccessTokenTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := get(t, api, tokFirst); code != http.StatusOK {
+		t.Fatalf("before rotation, a token from the stored login = %d, want 200", code)
+	}
+
+	// ANOTHER DAEMON sets the workspace's login. Same file, different process —
+	// this one is never told.
+	second, err := SaveCredentials(ryshDir, "halil", "rotated-by-the-other-daemon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Secret == first.Secret {
+		t.Fatal("rotation did not mint a new signing key — the premise of this test is gone")
+	}
+
+	tokSecond, err := signJWT(second.SigningKey(), second.Username, time.Now(), AccessTokenTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := get(t, api, tokSecond); code != http.StatusOK {
+		t.Errorf("after another daemon rotated the key, a token minted from the CURRENT "+
+			"credentials file = %d, want 200 — this is F-9: every client is locked out until "+
+			"the listener restarts", code)
+	}
+	// The other half of the same behaviour, and the reason rotation exists: the
+	// OLD key must stop working, or changing the password would mean nothing.
+	if code := get(t, api, tokFirst); code != http.StatusUnauthorized {
+		t.Errorf("after rotation, a token signed with the SUPERSEDED key = %d, want 401 — "+
+			"rotation must still log every old browser out", code)
+	}
+}

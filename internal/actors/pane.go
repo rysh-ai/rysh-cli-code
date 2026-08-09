@@ -18,6 +18,7 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/agentic"
 	"github.com/rysh-ai/rysh-cli-code/internal/bridge"
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
+	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 	"github.com/rysh-ai/rysh-cli-code/internal/provider"
 	"github.com/rysh-ai/rysh-cli-code/internal/tools"
@@ -86,10 +87,11 @@ type PaneActor struct {
 	// the supervisor and the daemon.
 	meta map[string]string
 	mode string
-	// paneType marks a special pane variant: "" / "normal" for regular panes,
-	// "replay" for the dedicated read-only replay pane (design 006 v2), which
-	// never starts a shell/PTY — its content is exclusively the recorded
-	// output published to its subjects. Set by the pane group at spawn.
+	// paneType marks a special pane variant — see the domain.PaneType*
+	// constants. "" is a regular shell pane; "replay" (design 006 v2) and
+	// "agents-board" (design 025) never start a shell/PTY, their content being
+	// exclusively what is published to their subjects. Set by the pane group
+	// at spawn and carried across restarts by the KV restore path.
 	paneType string
 	// enabledModes is the ordered set of input modes available for this pane's
 	// double-Esc cycle — the source of truth exposed to every frontend via the
@@ -450,13 +452,20 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 			}
 		}
 
-		// Replay panes (design 006 v2) never start a shell: no PTY, no
-		// rawinput subscription — raw keys are inert and executeShell fails
-		// closed ("shell is not available"), so the pane is read-only by
-		// construction.
-		if p.paneType != "replay" {
+		// Shell-less pane types never start a shell: no PTY, no rawinput
+		// subscription — raw keys are inert and executeShell fails closed
+		// ("shell is not available"), so the pane is read-only by
+		// construction. Replay panes (design 006 v2) were the first; the
+		// agents board (design 025) is the second.
+		if !domain.IsShelllessPaneType(p.paneType) {
 			p.startShell()
 		}
+
+		// Announce this pane's persona to the agents board (design 025). After
+		// the shell decision so a shell-less pane type is already known, and
+		// fire-and-forget: a board that misses this still renders the pane's
+		// posts.
+		p.registerOnBoard()
 
 		// Auto-share if upstream is configured and auto_share is enabled.
 		if p.cfg.Upstream.Enabled && p.cfg.Upstream.AutoShare {
@@ -621,6 +630,12 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 	case *msg.MsgPaneSetGivenName:
 		p.givenName = m.Name
 		p.kvDirty = true
+		// Re-announce, so the roster cannot go stale. A roster showing an old
+		// name beside fresh posts carrying the new one is worse than no roster
+		// — it looks authoritative and is wrong. The alternative (document that
+		// the roster shows the name at announce time) is defensible too; this
+		// one costs a single publish on an action a human takes by hand.
+		p.registerOnBoard()
 		// A given-name change isn't a structural layout change, so stream clients
 		// (the desktop app and the TUI) wouldn't otherwise re-fetch a snapshot —
 		// which made `##pane name <name>` (and the `r`-key rename) appear to do

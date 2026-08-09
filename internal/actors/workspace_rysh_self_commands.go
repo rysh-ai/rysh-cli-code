@@ -79,6 +79,10 @@ func (w *WorkspaceActor) handleRyshSelfCommand(ctx actor.Context, out *strings.B
 				break
 			}
 			w.webServer = web.NewServer(opts.Port, w.sessionName, w.pub, w.nc, w.pub.Codecs())
+			// Follow the workspace's credentials file, not just the snapshot
+			// resolved above: a sibling daemon rooted at this project shares it
+			// and rotating the key there must not 401 everyone here (F-9).
+			w.webServer.TrackCredentialsFile(w.cfg.RyshDir)
 			w.webServer.SetFSBrowser(w.webFSBrowser())
 			if opts.Host != "" {
 				w.webServer.SetHost(opts.Host)
@@ -199,6 +203,18 @@ func (w *WorkspaceActor) handleRyshSelfCommand(ctx actor.Context, out *strings.B
 				default:
 					fmt.Fprintf(out, "\n[rysh] web server running at %s (no login)\n", base)
 					fmt.Fprintf(out, "[rysh] bind address: %s   port: %d\n", webBindLabel(host), port)
+				}
+				// The one case a running server cannot resolve for itself. It
+				// follows the credentials FILE (TrackCredentialsFile), so a
+				// login another daemon rotates is picked up without a restart —
+				// but a file it cannot parse is deliberately NOT adopted, since
+				// reading a half-written file as "no login" would drop the gate
+				// at the worst possible moment. That leaves the server on the
+				// last good login it loaded, which to a user just looks like the
+				// password not working. Say so, with the remedy (F-9).
+				if _, err := web.LoadCredentials(w.cfg.RyshDir); err != nil {
+					fmt.Fprintf(out, "[rysh] the stored login is unreadable: %v\n", err)
+					fmt.Fprintf(out, "[rysh] the server is still serving the last login it read — set it again with `##rysh web auth username=<u> password=<p>`\n")
 				}
 				// The shared door, when one is open: the same session at a second
 				// address, always behind the login.

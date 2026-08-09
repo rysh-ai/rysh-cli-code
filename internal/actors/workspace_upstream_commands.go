@@ -19,12 +19,15 @@ func (w *WorkspaceActor) handleUpstreamCommand(out *strings.Builder, paneID stri
 		sub = "status"
 	}
 	switch sub {
+	case "connect":
+		w.handleUpstreamConnect(out, args[1:])
 	case "status":
 		if !w.cfg.Upstream.Enabled {
 			// Answering "it is off" IS the status. Only ACTIONS that need
 			// upstream report failure — same rule as ##replay status.
 			fmt.Fprintf(out, "\n[rysh] upstream is not enabled\n")
-			fmt.Fprintf(out, "  set upstream.enabled: true in rysh.config.yaml\n\n")
+			fmt.Fprintf(out, "  run: ##upstream connect <url> <api-key>\n")
+			fmt.Fprintf(out, "  (or set upstream.enabled: true in rysh.config.yaml by hand)\n\n")
 		} else {
 			// Count the panes currently shared upstream. Only the active tab is
 			// consulted, which is what this command has always reported.
@@ -74,6 +77,9 @@ func (w *WorkspaceActor) handleUpstreamCommand(out *strings.Builder, paneID stri
 		w.handleUpstreamSend(out, text)
 	default:
 		ryshWriter(out).Unknown("upstream", sub,
+			"##upstream connect <url> <api-key>  connect this session to a rysh server",
+			"  (resolves the workspace id from the key and writes rysh.config.yaml;",
+			"   leaves upstream.governance off — that is a separate opt-in)",
 			"##upstream status              show upstream configuration and status",
 			"##upstream my-shares           list shares published from this session",
 			"##upstream list-remote         list all shares in the workspace (from server)",

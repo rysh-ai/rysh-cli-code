@@ -16,22 +16,34 @@ import (
 // uuidRe matches a canonical UUID (the form workspace ids take).
 var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
-// FetchWorkspaceID queries the upstream server's /api/server-info endpoint with
-// the workspace API key and returns the workspace id (UUID). The id is the
-// globally unique NATS namespace token (ws.{id}.*); workspace names are unique
-// per user, so the name cannot be used on the wire.
-func FetchWorkspaceID(up config.UpstreamConfig) (string, error) {
+// WorkspaceInfo is what /api/server-info tells a client about the workspace
+// its API key belongs to: the Name a human recognises, and the ID that is the
+// only thing usable on the wire.
+type WorkspaceInfo struct {
+	Name string
+	ID   string
+}
+
+// FetchWorkspaceInfo queries the upstream server's /api/server-info endpoint
+// with the workspace API key and returns the workspace name and id (UUID). The
+// id is the globally unique NATS namespace token (ws.{id}.*); workspace names
+// are unique per user, so the name cannot be used on the wire.
+//
+// Its errors are written for a human to read as one line — `##upstream connect`
+// prints them verbatim. A user who mistyped a URL should see that, not a
+// wrapped *url.Error with an HTTP body glued to the end of it.
+func FetchWorkspaceInfo(up config.UpstreamConfig) (WorkspaceInfo, error) {
 	if up.URL == "" {
-		return "", fmt.Errorf("upstream url not set")
+		return WorkspaceInfo{}, fmt.Errorf("upstream url not set")
 	}
 	if up.APIKey == "" {
-		return "", fmt.Errorf("upstream api_key not set")
+		return WorkspaceInfo{}, fmt.Errorf("upstream api_key not set")
 	}
 
-	url := strings.TrimRight(up.URL, "/") + "/api/server-info"
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	base := strings.TrimRight(up.URL, "/")
+	req, err := http.NewRequest(http.MethodGet, base+"/api/server-info", nil)
 	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
+		return WorkspaceInfo{}, fmt.Errorf("could not reach %s: %w", base, err)
 	}
 	req.Header.Set("Authorization", "Bearer "+up.APIKey)
 	req.Header.Set("X-API-Key", up.APIKey)
@@ -39,13 +51,18 @@ func FetchWorkspaceID(up config.UpstreamConfig) (string, error) {
 	client := &http.Client{Timeout: 4 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("fetch server-info: %w", err)
+		// Transport-level: DNS, refused connection, TLS, timeout. The URL is
+		// what the user can act on, so lead with it.
+		return WorkspaceInfo{}, fmt.Errorf("could not reach %s — check the URL and that the server is running", base)
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("fetch server-info: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return WorkspaceInfo{}, fmt.Errorf("%s rejected that api key (HTTP %d)", base, resp.StatusCode)
+	case resp.StatusCode != http.StatusOK:
+		return WorkspaceInfo{}, fmt.Errorf("%s returned HTTP %d — is that a rysh server?", base, resp.StatusCode)
 	}
 
 	var result struct {
@@ -53,12 +70,23 @@ func FetchWorkspaceID(up config.UpstreamConfig) (string, error) {
 		WorkspaceID string `json:"workspace_id"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf("decode server-info: %w", err)
+		return WorkspaceInfo{}, fmt.Errorf("%s did not return valid server-info JSON — is that a rysh server?", base)
 	}
 	if result.WorkspaceID == "" {
-		return "", fmt.Errorf("server-info did not return a workspace_id (server may predate per-user workspace names)")
+		// Never guess a namespace here: a session that connects to the wrong
+		// one silently sees no shares, which is worse than refusing.
+		return WorkspaceInfo{}, fmt.Errorf("%s returned no workspace_id — the api key may be unrecognised, or the server predates per-user workspace ids", base)
 	}
-	return result.WorkspaceID, nil
+	return WorkspaceInfo{Name: result.Workspace, ID: result.WorkspaceID}, nil
+}
+
+// FetchWorkspaceID is FetchWorkspaceInfo when only the namespace token matters.
+func FetchWorkspaceID(up config.UpstreamConfig) (string, error) {
+	info, err := FetchWorkspaceInfo(up)
+	if err != nil {
+		return "", err
+	}
+	return info.ID, nil
 }
 
 // ResolveWorkspaceID returns the upstream NATS namespace token for the given

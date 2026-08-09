@@ -57,8 +57,17 @@ type Server struct {
 	//
 	// WHICH DOOR a request came through decides whether the gate applies at all
 	// — see authMiddleware and StartShared.
-	credsMu sync.RWMutex
-	creds   *Credentials
+	//
+	// credsDir, when set, is the workspace rysh dir holding web-auth.json, and
+	// the file — not this snapshot — becomes the source of truth. Every daemon
+	// rooted at a workspace shares that one file (rysh state is project-local;
+	// there is no ~/.rysh), so a second daemon running `##rysh web auth` mints a
+	// new signing key that this process would otherwise never see. See
+	// refreshCredentials and F-9.
+	credsMu   sync.RWMutex
+	creds     *Credentials
+	credsDir  string
+	credsStat credsFileStamp
 
 	// fsBrowse serves the web UI's file browser (GET /fs/list, /fs/read).
 	// Injected by the WorkspaceActor via SetFSBrowser — the implementation
@@ -481,19 +490,18 @@ func (s *Server) handleWebSocket(c *gin.Context) {
 		sizeClientID:  fmt.Sprintf("web:%d", s.nextClientSeq.Add(1)),
 		sizedPanes:    make(map[string]bool),
 	}
-	s.hub.register <- client
-
 	// Stream clients render from a layout-only snapshot + per-pane content
-	// deltas; seed them with one full snapshot so existing panes show their
-	// current content immediately (subsequent updates are layout-only + deltas).
+	// deltas. Seed them with the layout, then the content in byte-bounded
+	// batches — one 17 MB snapshot could not be written inside writeWait over a
+	// tunnel, which left the browser permanently blank. See seed.go.
+	//
+	// Deliberately BEFORE hub registration: the hub owns close(client.send), so
+	// sending to an unregistered client's buffer cannot race a close, and the
+	// seed gets the buffer to itself.
 	if stream {
-		if data := s.snapshotMessage(false, false); data != nil {
-			select {
-			case client.send <- data:
-			default:
-			}
-		}
+		s.seedStreamClient(client)
 	}
+	s.hub.register <- client
 
 	go client.writePump()
 	go client.readPump(s)
@@ -539,7 +547,30 @@ func (s *Server) pollSnapshots(ctx context.Context) {
 // The layout_only flag tells the client whether to (re)seed its content store
 // from this snapshot (full) or keep its store and use this for layout only.
 func (s *Server) snapshotMessage(layoutOnly, fresh bool) []byte {
-	reply, err := s.pub.Request(msg.T("ws", "snapshot"), &msg.MsgGetWorkspaceSnapshot{LayoutOnly: layoutOnly, Fresh: fresh}, 2*time.Second)
+	return s.snapshotMessageOpts(layoutOnly, fresh, false)
+}
+
+// snapshotMessageRaw returns the decoded workspace snapshot rather than an
+// encoded message. The seed path needs the panes themselves so it can cut them
+// into byte-bounded batches (see seed.go).
+func (s *Server) snapshotMessageRaw(layoutOnly, fresh bool) *domain.WorkspaceSnapshot {
+	reply, err := s.pub.Request(msg.T("ws", "snapshot"),
+		&msg.MsgGetWorkspaceSnapshot{LayoutOnly: layoutOnly, Fresh: fresh}, 5*time.Second)
+	if err != nil {
+		return nil
+	}
+	r, ok := reply.(*msg.MsgWorkspaceSnapshotReply)
+	if !ok {
+		return nil
+	}
+	return &r.Snapshot
+}
+
+// snapshotMessageOpts is snapshotMessage with the histories switch exposed. The
+// seed path uses it; everything else keeps the previous behaviour.
+func (s *Server) snapshotMessageOpts(layoutOnly, fresh, noHistories bool) []byte {
+	reply, err := s.pub.Request(msg.T("ws", "snapshot"),
+		&msg.MsgGetWorkspaceSnapshot{LayoutOnly: layoutOnly, Fresh: fresh, NoHistories: noHistories}, 2*time.Second)
 	if err != nil {
 		return nil
 	}
@@ -1723,7 +1754,14 @@ func (s *Server) subscribeLayoutDirty(ctx context.Context) {
 				// enabled modes / web binding), so bypass the snapshot cache — stream
 				// clients have no fallback poll and would otherwise stick on a stale
 				// memoized snapshot built just before the change.
-				if data := s.snapshotMessage(true, true); data != nil {
+				//
+				// NoHistories: a layout-only snapshot still carries every pane's
+				// command history, which measured 5.8 MB on a 143-pane session —
+				// pushed on EVERY layout change, and too large to write inside
+				// writeWait over a tunnel, so it could kill the connection the seed
+				// had just successfully established. Clients get history from the
+				// seed instead (store.paneHistory), which is why this can drop it.
+				if data := s.snapshotMessageOpts(true, true, true); data != nil {
 					s.hub.sendWhere(data, func(c *wsClient) bool { return c.streamContent })
 				}
 			}

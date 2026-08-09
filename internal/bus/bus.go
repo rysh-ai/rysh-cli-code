@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/board"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 )
 
@@ -37,6 +38,7 @@ type Bus struct {
 	aKV        nats.KeyValue    // "rysh-agents"
 	secretKV   nats.KeyValue    // "rysh-secrets" — per-session secret store
 	variableKV nats.KeyValue    // "rysh-variables" — per-session env-variable store
+	boardKV    nats.KeyValue    // "rysh-board" — per-session agents-board history
 	objStore   nats.ObjectStore // "rysh-images" — large conversation images (follow-up 1b)
 	system     *actor.ActorSystem
 	codecs     *msg.CodecRegistry
@@ -241,6 +243,18 @@ func New(cfg Config) (*Bus, error) {
 		b.variableKV = vKV
 	}
 
+	// Per-session agents-board history (design 025; founder gate 2 — the board
+	// survives a daemon restart). Same manner as the two stores above: failure
+	// is non-fatal and degrades the board to live-only rather than blocking a
+	// session from starting over a monitoring view. The bucket's retention
+	// (TTL + MaxBytes) is declared in internal/board beside the comment that
+	// documents the numbers, so the two cannot drift apart.
+	if bKV, berr := js.CreateKeyValue(board.BucketConfig(sessionSuffix)); berr == nil {
+		b.boardKV = bKV
+	} else if bKV, berr2 := js.KeyValue(board.BucketName(sessionSuffix)); berr2 == nil {
+		b.boardKV = bKV
+	}
+
 	// Create proto.actor ActorSystem with a silent logger to prevent
 	// "actor system started" from printing to stderr.
 	b.system = actor.NewActorSystem(actor.WithLoggerFactory(func(_ *actor.ActorSystem) *slog.Logger {
@@ -281,6 +295,11 @@ func (b *Bus) SecretKV() nats.KeyValue { return b.secretKV }
 // JetStream is unavailable, in which case variable resolution falls back to
 // config + environment only.
 func (b *Bus) VariableKV() nats.KeyValue { return b.variableKV }
+
+// BoardKV returns the per-session agents-board history bucket. It may be nil
+// when JetStream is unavailable, in which case the board is live-only: posts
+// are delivered and rendered but do not survive a restart.
+func (b *Bus) BoardKV() nats.KeyValue { return b.boardKV }
 
 // ActorSystem returns the proto.actor ActorSystem.
 func (b *Bus) ActorSystem() *actor.ActorSystem { return b.system }

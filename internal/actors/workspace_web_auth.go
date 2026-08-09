@@ -237,6 +237,12 @@ func (w *WorkspaceActor) applyWebCredentials(srv *web.Server, out io.Writer) {
 	if srv == nil {
 		return
 	}
+	// Every server this workspace builds follows the workspace's credentials
+	// FILE from here on, not just the snapshot loaded below. Another daemon
+	// rooted at the same project shares that file and may rotate the signing
+	// key at any moment; without this, this process keeps verifying against the
+	// superseded key and 401s every client until it is restarted (F-9).
+	srv.TrackCredentialsFile(w.cfg.RyshDir)
 	creds, err := web.LoadCredentials(w.cfg.RyshDir)
 	if err != nil {
 		if out != nil {
