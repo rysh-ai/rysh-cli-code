@@ -817,9 +817,23 @@ func runAttachUI(cfg config.Config, logger *slog.Logger, store *session.Store, r
 	msg.SetSessionPrefix(sessionName)
 
 	// Connect to the session's existing NATS server (external mode).
+	//
+	// SessionName is NOT optional here, and F-23 is what it costs to omit it.
+	// bus.New derives every KV bucket from it (`rysh-board-<session>`, …) and
+	// falls back to "default" when it is empty, so an attaching TUI silently
+	// opened rysh-board-DEFAULT while the daemon wrote rysh-board-<session>.
+	// Subjects were unaffected — they come from SetSessionPrefix above — so the
+	// live tail worked and only the restore was dead: the board rendered posts
+	// that arrived while you watched and no history at all, over an empty
+	// bucket, while displaying "Nothing posted yet."
+	//
+	// It is passed the SAME `sessionName` the subject prefix is built from,
+	// deliberately. The defect existed because one fact had two sources; giving
+	// them one source is the fix, not remembering to update both.
 	b, err := bus.New(bus.Config{
-		Mode: "external",
-		URL:  fmt.Sprintf("nats://127.0.0.1:%d", rec.NATSPort),
+		Mode:        "external",
+		URL:         fmt.Sprintf("nats://127.0.0.1:%d", rec.NATSPort),
+		SessionName: sessionName,
 	})
 	if err != nil {
 		return fmt.Errorf("connect to session %q: %w", rec.Name, err)
