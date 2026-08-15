@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package runtime
 
 // Streaming sessions (design 015 §2.1/§2.2): server-streaming gRPC methods and

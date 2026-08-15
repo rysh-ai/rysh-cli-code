@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 // Phase 2 (bash-shell-mode): readline key priority, reverse-i-search, and

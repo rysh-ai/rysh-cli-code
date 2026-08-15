@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -89,11 +91,26 @@ func (w *WorkspaceActor) handleCLIBoardPost(m *msg.MsgCLIBoardPost) *msg.MsgCLIR
 		return &msg.MsgCLIResponse{OK: false, Error: fmt.Sprintf("pane not found: %s", as)}
 	}
 
+	// WHICH BOARD (design 028): the request's own --board if it named one,
+	// otherwise the poster pane's `board.id` meta, otherwise the session board.
+	// A named board that does not validate is REFUSED rather than downgraded to
+	// the session board — an agent told its milestone landed on its fleet's
+	// board when it landed somewhere else is the receipt-without-delivery
+	// failure this whole stack keeps re-learning.
+	boardID := w.boardForPane(paneID)
+	if named := strings.TrimSpace(m.Board); named != "" {
+		id, err := resolveBoardArg(named)
+		if err != nil {
+			return &msg.MsgCLIResponse{OK: false, Error: err.Error()}
+		}
+		boardID = id
+	}
+
 	post := w.buildBoardPost(paneID, m.Kind, text, m.ThreadID)
-	if err := msg.SendBoardPost(w.pub, post); err != nil {
+	if err := msg.SendBoardPost(w.pub, boardID, post); err != nil {
 		return &msg.MsgCLIResponse{OK: false, Error: fmt.Sprintf("publish board post: %v", err)}
 	}
-	return &msg.MsgCLIResponse{OK: true, ID: post.ThreadID, Output: boardPostConfirmation(post)}
+	return &msg.MsgCLIResponse{OK: true, ID: post.ThreadID, Output: boardPostConfirmation(boardID, post)}
 }
 
 // buildBoardPost assembles one post from a pane's live snapshot. Shared by both
@@ -125,13 +142,16 @@ func (w *WorkspaceActor) buildBoardPost(paneID, kind, text, threadID string) *ms
 // AGENT-minted precisely so no client has to parse a round trip; this line is a
 // confirmation nobody is required to read, and an agent that does want the id in
 // a field reads MsgCLIResponse.ID instead of scraping this.
-func boardPostConfirmation(post *msg.MsgBoardPost) string {
+//
+// It names the board since 028: "posted to the board" was unambiguous while
+// there was one, and is a guess as soon as a session has several.
+func boardPostConfirmation(boardID string, post *msg.MsgBoardPost) string {
 	if post.ThreadID == "" {
-		return fmt.Sprintf("posted to the board as %s (%s): root, no thread id\n",
-			post.Persona, post.Kind)
+		return fmt.Sprintf("posted to board %s as %s (%s): root, no thread id\n",
+			boardLabel(boardID), post.Persona, post.Kind)
 	}
-	return fmt.Sprintf("posted to the board as %s (%s): thread %s\n",
-		post.Persona, post.Kind, post.ThreadID)
+	return fmt.Sprintf("posted to board %s as %s (%s): thread %s\n",
+		boardLabel(boardID), post.Persona, post.Kind, post.ThreadID)
 }
 
 // handleBoardCommand is the `##board` verb — the HUMAN front door.
@@ -148,20 +168,46 @@ func (w *WorkspaceActor) handleBoardCommand(out *strings.Builder, paneID string,
 		sub = args[0]
 	}
 
+	// `--board <id>` / `--fleet <name>` may appear anywhere in any subcommand,
+	// and an unparseable one stops the command rather than falling back to the
+	// session board (F-19's rule: a flag that silently does nothing is worse
+	// than one that refuses).
+	rest, flagBoard, berr := extractBoardFlag(args)
+	if berr != nil {
+		return w.boardUsage(out, fmt.Sprintf("##board: %v", berr))
+	}
+	args = rest
+	if len(args) > 0 {
+		sub = args[0]
+	} else {
+		sub = ""
+	}
+
+	// The board this command is about: the one named on the line, else the
+	// caller's own board, else the session board.
+	boardID := flagBoard
+	if boardID == "" {
+		boardID = w.boardForPane(paneID)
+	}
+
 	switch sub {
 	case "open":
 		// The human's door onto the board. Opening is a pane operation, not a
 		// post, so it lives in workspace_board_pane.go and shares nothing with
 		// the posting path -- an agent posting must never create panes.
-		w.openAgentsBoardPane(out, paneID)
+		w.openAgentsBoardPane(out, paneID, boardID)
 		return nil
+
+	case "agent":
+		// The board claude: a real pane kept off screen (design 027 §2 ruling 1).
+		return w.handleBoardAgentCommand(out, paneID, boardID, args[1:])
 
 	case "post":
 		body := strings.TrimSpace(strings.Join(args[1:], " "))
 		if body == "" {
 			return w.boardUsage(out, "##board post needs some text")
 		}
-		return w.boardPostFromPane(out, paneID, "", body)
+		return w.boardPostFromPane(out, paneID, boardID, "", body)
 
 	case "reply":
 		// `##board reply <thread> <text>` — the thread key is explicit. There is
@@ -175,7 +221,7 @@ func (w *WorkspaceActor) handleBoardCommand(out *strings.Builder, paneID string,
 		if body == "" {
 			return w.boardUsage(out, "##board reply needs some text")
 		}
-		return w.boardPostFromPane(out, paneID, args[1], body)
+		return w.boardPostFromPane(out, paneID, boardID, args[1], body)
 
 	default:
 		if sub == "" {
@@ -185,8 +231,9 @@ func (w *WorkspaceActor) handleBoardCommand(out *strings.Builder, paneID string,
 	}
 }
 
-// boardPostFromPane publishes on behalf of the pane the command was typed in.
-func (w *WorkspaceActor) boardPostFromPane(out *strings.Builder, paneID, threadID, text string) error {
+// boardPostFromPane publishes on behalf of the pane the command was typed in,
+// onto the board that pane belongs to unless the line named another.
+func (w *WorkspaceActor) boardPostFromPane(out *strings.Builder, paneID, boardID, threadID, text string) error {
 	if paneID == "" {
 		w.failRysh("##board has no pane to post as")
 		fmt.Fprintf(out, "##board: no pane to post as\n")
@@ -197,12 +244,12 @@ func (w *WorkspaceActor) boardPostFromPane(out *strings.Builder, paneID, threadI
 		kind = msg.BoardKindReply
 	}
 	post := w.buildBoardPost(paneID, kind, text, threadID)
-	if err := msg.SendBoardPost(w.pub, post); err != nil {
+	if err := msg.SendBoardPost(w.pub, boardID, post); err != nil {
 		w.failRysh("publish board post: %v", err)
 		fmt.Fprintf(out, "##board: publish failed: %v\n", err)
 		return fmt.Errorf("publish board post: %w", err)
 	}
-	out.WriteString(boardPostConfirmation(post))
+	out.WriteString(boardPostConfirmation(boardID, post))
 	return nil
 }
 
@@ -211,9 +258,12 @@ func (w *WorkspaceActor) boardPostFromPane(out *strings.Builder, paneID, threadI
 // table entry claims statusAware, and this is what earns it.
 func (w *WorkspaceActor) boardUsage(out *strings.Builder, why string) error {
 	fmt.Fprintf(out, "%s\n", why)
-	out.WriteString("  ##board open                   open the agents board pane\n")
+	out.WriteString("  ##board open [--board <id>]    open the agents board pane (default board: session)\n")
 	out.WriteString("  ##board post <text>            post a milestone to the agents board\n")
 	out.WriteString("  ##board reply <thread> <text>  reply under an existing thread\n")
+	out.WriteString("  ##board agent up               start the board claude in a hidden pane\n")
+	out.WriteString("  ##board agent visible          show the board claude's pane\n")
+	out.WriteString("  ##board agent invisible        hide it again (it keeps running)\n")
 	w.failRyshUsage("%s", why)
 	return fmt.Errorf("%s", why)
 }

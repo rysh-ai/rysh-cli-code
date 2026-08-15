@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 import (
@@ -331,7 +333,8 @@ type Model struct {
 	// its live feed, and per-pane scroll state. The board is a PaneType, not a
 	// mode, so `board` is shared by every agents-board pane while `boardViews`
 	// holds only what is genuinely per-pane.
-	board        *board.Store
+	boards       map[string]*board.Store
+	boardKV      board.KV
 	boardEventCh <-chan board.Event
 	boardSub     *board.Subscriber
 	// boardConn asks the recorder whether it is recording. A request, not a
@@ -341,7 +344,7 @@ type Model struct {
 	// boardRecorder is the last liveness answer. The view renders from this and
 	// never blocks on the question.
 	boardRecorder RecorderState
-	boardViews   map[string]*boardViewState
+	boardViews    map[string]*boardViewState
 	// pendingActivate remembers a backend activate-mode push (register-output)
 	// whose target mode is not yet enabled in this snapshot; syncPaneInputs
 	// applies it as soon as the mode-enable propagates. Keyed by pane ID.
@@ -542,7 +545,7 @@ func NewModel(cfg config.Config, logger *slog.Logger, b *bus.Bus) (Model, error)
 
 	// Agents-board (design 025): restores KV history, then subscribes to the
 	// live feed. Returns a usable store on every failure path.
-	boardStore, boardEventCh, boardSub := setupBoardSubscriptions(b)
+	boardStores, boardKV, boardEventCh, boardSub := setupBoardSubscriptions(b)
 
 	m := Model{
 		cfg:                cfg,
@@ -587,7 +590,8 @@ func NewModel(cfg config.Config, logger *slog.Logger, b *bus.Bus) (Model, error)
 		emailViews:         make(map[string]*emailViewState),
 		emailEventCh:       emailEventCh,
 		activateModeCh:     activateModeCh,
-		board:              boardStore,
+		boards:             boardStores,
+		boardKV:            boardKV,
 		boardConn:          boardNATSConn(b),
 		boardEventCh:       boardEventCh,
 		boardSub:           boardSub,
@@ -639,7 +643,7 @@ func (m Model) notifyMirrorMaximize() {
 	// On restore, send zero dims; the source reverts to its own layout sizing.
 	var rows, cols int
 	if on {
-		rows, cols = fullscreenPTYDims(m.width, m.height)
+		rows, cols = fullscreenPTYDims(m.bodyDims())
 	}
 	m.sendMsg(&msgpkg.MsgMirrorMaximizePane{On: on, Rows: rows, Cols: cols})
 }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package provider
 
 // pane_override.go — the `##pane provider` seam (design 002 §3.4).

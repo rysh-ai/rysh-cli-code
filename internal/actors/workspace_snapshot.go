@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -92,6 +94,7 @@ func (w *WorkspaceActor) collectSnapshot(layoutOnly, noHistories bool) domain.Wo
 		ActivePaneID:    w.activePaneID,
 		Workspaces:      w.workspaceNames,
 		ActiveWorkspace: w.workspaceIdx,
+		TabBarVertical:  w.tabBarVertical,
 	}
 
 	// Fetch the tabs concurrently (one round-trip instead of one per tab). Each
@@ -107,7 +110,10 @@ func (w *WorkspaceActor) collectSnapshot(layoutOnly, noHistories bool) domain.Wo
 			2*snapshotTimeout,
 		)
 		if err != nil {
-			results[i] = domain.TabSnapshot{ID: id, Title: title}
+			// Kept rather than dropped — a missing tab breaks navigation that
+			// only needs the id — but MARKED, so no caller can read the empty
+			// Lanes slice as "this tab has no lanes" (`F-11`).
+			results[i] = domain.TabSnapshot{ID: id, Title: title, Partial: true}
 			have[i] = true
 			return
 		}
@@ -223,7 +229,19 @@ type workspaceKV struct {
 	ActiveTab    int       `json:"active_tab"`
 	ActivePaneID string    `json:"active_pane_id"`
 	Shares       []shareKV `json:"shares,omitempty"`
+	// TabBar is the tab-bar orientation: "vertical", or empty/"horizontal" for
+	// the default strip. Stored as a string rather than a bool so a third
+	// orientation can be added without another field, and omitempty so
+	// documents written before this field existed restore as horizontal.
+	TabBar string `json:"tab_bar,omitempty"`
 }
+
+// Tab-bar orientation values for workspaceKV.TabBar and the `##tab
+// orientation` argument. The empty string means tabBarHorizontal.
+const (
+	tabBarHorizontal = "horizontal"
+	tabBarVertical   = "vertical"
+)
 
 // shareKV persists one active upstream share so it can be re-established on
 // restart (reusing the same shareID), preventing "ghost" shares that subscribers
@@ -359,6 +377,9 @@ func (w *WorkspaceActor) persistToKVNow() {
 		Tabs:         make([]tabKV, len(w.tabs)),
 		Shares:       w.shareList(),
 	}
+	if w.tabBarVertical {
+		state.TabBar = tabBarVertical
+	}
 	for i, info := range w.tabs {
 		state.Tabs[i] = w.tabKVFor(info)
 	}
@@ -490,6 +511,7 @@ func (w *WorkspaceActor) restoreFromKV(ctx actor.Context) bool {
 		w.activeTabIdx = 0
 	}
 	w.activePaneID = state.ActivePaneID
+	w.tabBarVertical = state.TabBar == tabBarVertical
 
 	// Restore persisted share intents so reshareActiveShares (run after the share
 	// registry spawns) can re-establish them, reusing the original shareIDs.

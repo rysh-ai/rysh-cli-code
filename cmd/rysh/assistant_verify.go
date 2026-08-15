@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // assistant_verify.go — RA4 round-trip verification (design 008 §4.2 step 7).

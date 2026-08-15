@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package provider
 
 // claude_cli_agentic.go — makes ClaudeCLI reachable from the agentic selection

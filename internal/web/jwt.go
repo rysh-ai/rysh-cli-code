@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package web
 
 // Minimal HS256 JSON Web Tokens for the web UI's username/password login.

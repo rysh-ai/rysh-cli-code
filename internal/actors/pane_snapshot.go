@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -46,6 +48,7 @@ func (p *PaneActor) buildSnapshot(includeContent, includeConversations, includeH
 		ProviderOverride:      p.providerOverride,
 		ProviderOverrideModel: p.providerOverrideModel,
 		GivenName:             p.givenName,
+		Hidden:                p.hidden,
 		Program:               p.Program(),
 		Meta:                  p.metaCopy(),
 		ListeningToID:         p.listeningToID,
@@ -454,6 +457,12 @@ func (p *PaneActor) RestoreState(snap domain.PaneSnapshot) {
 	p.status = snap.Status
 	p.lastCommand = snap.LastCommand
 	p.givenName = snap.GivenName
+	// Restored hidden, not restored visible: a pane the human deliberately took
+	// off screen must not reappear because the daemon restarted. The board
+	// claude is the case that makes this load-bearing — it is hidden by
+	// default, so losing this field would put an agent's pane on everyone's
+	// screen after every restart.
+	p.hidden = snap.Hidden
 	p.meta = snap.Meta
 	// `##pane provider` override: only the name/model pair is recorded here.
 	// The live provider is rebuilt in *actor.Started (installProviderOverride),

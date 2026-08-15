@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //go:build livechannels
 
 // Package channels live round-trip suite (LV1, design 010). These tests talk to

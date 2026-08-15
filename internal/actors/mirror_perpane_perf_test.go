@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // Tests for the per-pane mirror content plane (shared-tab interactive

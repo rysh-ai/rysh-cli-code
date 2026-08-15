@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package provider
 
 // capabilities.go — the provider capability table (roadmap design 002 §3.3,

@@ -1,6 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
+	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 	"strings"
 	"testing"
 
@@ -18,14 +21,13 @@ func TestOpenAgentsBoardPaneFailsClosedWithNoTab(t *testing.T) {
 	// later open would report "already open" for a pane that never existed.
 	w := &WorkspaceActor{}
 	var out strings.Builder
-	w.openAgentsBoardPane(&out, "")
+	w.openAgentsBoardPane(&out, "", "")
 
 	if got := out.String(); !strings.Contains(got, "no active tab") {
 		t.Errorf("expected a 'no active tab' message, got %q", got)
 	}
-	if w.boardPaneID != "" {
-		t.Errorf("boardPaneID = %q, want empty: a failed open must not record a pane",
-			w.boardPaneID)
+	if got := w.boardPanes[msg.DefaultBoardID]; got != "" {
+		t.Errorf("boardPanes[session] = %q, want empty: a failed open must not record a pane", got)
 	}
 	if w.ryshFail == nil {
 		t.Error("a failed open must record the failure (##board open is statusAware): " +

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package web
 
 // The two-door rule: one web server, one session, two listeners with different

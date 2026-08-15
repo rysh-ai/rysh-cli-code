@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -40,7 +42,7 @@ func TestForegroundEvents(t *testing.T) {
 // TestClaudeLaunchCommand pins the three properties that make `##pane new
 // --claude` different from typing "claude" into a pane.
 func TestClaudeLaunchCommand(t *testing.T) {
-	cmd := claudeLaunchCommand("11111111-2222-3333-4444-555555555555", "/tmp/p.txt")
+	cmd := claudeLaunchCommand("11111111-2222-3333-4444-555555555555", "/tmp/p.txt", "")
 
 	// 1. The session id is pinned, so the caller knows it before claude runs
 	//    rather than after it exits.
@@ -62,7 +64,7 @@ func TestClaudeLaunchCommand(t *testing.T) {
 
 	// Without a prompt there must be no trailing argv at all: an empty "" would
 	// be an empty first message, not "no message".
-	if bare := claudeLaunchCommand("id", ""); strings.Contains(bare, `"$(cat`) || strings.HasSuffix(bare, `""`) {
+	if bare := claudeLaunchCommand("id", "", ""); strings.Contains(bare, `"$(cat`) || strings.HasSuffix(bare, `""`) {
 		t.Errorf("no-prompt launch should end at the flags: %s", bare)
 	}
 }

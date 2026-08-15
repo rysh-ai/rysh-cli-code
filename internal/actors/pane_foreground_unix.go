@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //go:build !windows
 
 package actors
@@ -58,4 +60,14 @@ func terminateProcessGroup(pgid int) error {
 		return unix.EINVAL
 	}
 	return unix.Kill(-pgid, unix.SIGTERM)
+}
+
+// killProcessGroup is terminateProcessGroup's harder sibling: SIGKILL for a
+// group that survived its SIGTERM. Separate function rather than a flag so a
+// grep for SIGKILL finds every site that can send one.
+func killProcessGroup(pgid int) error {
+	if pgid <= 1 {
+		return unix.EINVAL
+	}
+	return unix.Kill(-pgid, unix.SIGKILL)
 }

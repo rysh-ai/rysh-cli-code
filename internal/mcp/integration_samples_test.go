@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //go:build mcpsamples
 
 // Integration tests that validate the MCP client against the real reference

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 import (
@@ -76,7 +78,7 @@ func buildBoardModel(store *board.Store) Model {
 		paneScrollOffsets: map[string]int{},
 		pipelineOutputs:   map[string]string{},
 		attentionState:    map[string]*attentionInfo{},
-		board:             store,
+		boards:            map[string]*board.Store{msgpkg.DefaultBoardID: store},
 		boardViews:        map[string]*boardViewState{},
 		workspaceInbox:    msgpkg.T("ws", "inbox"),
 	}
@@ -131,7 +133,7 @@ func TestBoardReplyRendersUnderItsRoot(t *testing.T) {
 	st.Apply(boardReplyPost(boardPaneB, "worker-3", "acknowledged, building", thread, 2_000))
 
 	m := buildBoardModel(st)
-	rows := m.boardRows(100)
+	rows := m.boardRows("", 100)
 
 	if got := countRows(rows, boardRootGlyph); got != 1 {
 		t.Fatalf("expected exactly 1 root line, got %d; rows =\n%s", got, strings.Join(rows, "\n"))
@@ -167,7 +169,7 @@ func TestBoardOrphanReplyIsReparentedWithoutDuplicatingTheRoot(t *testing.T) {
 	st.Apply(boardReplyPost(boardPaneB, "worker-3", "starting on the view", thread, 2_000))
 
 	m := buildBoardModel(st)
-	rows := m.boardRows(100)
+	rows := m.boardRows("", 100)
 	if countRows(rows, boardProvisionalGlyph) != 1 {
 		t.Fatalf("an orphan reply must render as a provisional root; rows =\n%s", strings.Join(rows, "\n"))
 	}
@@ -177,7 +179,7 @@ func TestBoardOrphanReplyIsReparentedWithoutDuplicatingTheRoot(t *testing.T) {
 
 	// 2. The root lands late.
 	st.Apply(boardRootPost(boardPaneA, "ceo", "unit 01 kickoff", 7, 1_000))
-	rows = m.boardRows(100)
+	rows = m.boardRows("", 100)
 
 	if got := countRows(rows, boardRootGlyph); got != 1 {
 		t.Fatalf("after re-parenting expected exactly 1 root, got %d; rows =\n%s", got, strings.Join(rows, "\n"))
@@ -221,7 +223,7 @@ func TestBoardPersonaNeverLeaksTheApprovalOverload(t *testing.T) {
 	st := board.New(0)
 	st.Apply(boardRootPost(boardPaneA, poisoned, "a milestone", 1, 1_000))
 	m := buildBoardModel(st)
-	rows := m.boardRows(100)
+	rows := m.boardRows("", 100)
 	joined := strings.Join(rows, "\n")
 	if strings.Contains(joined, "\x1f") || strings.Contains(joined, "approval.response") {
 		t.Fatalf("rendered board leaked the approval overload; rows =\n%s", joined)
@@ -363,7 +365,7 @@ func TestBoardTextIsSanitised(t *testing.T) {
 	st.Apply(boardRootPost(boardPaneA, "ceo", "before\x1b[2Jafter\x1b[31m", 1, 1_000))
 
 	m := buildBoardModel(st)
-	joined := strings.Join(m.boardRows(100), "\n")
+	joined := strings.Join(m.boardRows("", 100), "\n")
 
 	if strings.Contains(joined, "\x1b") {
 		t.Fatalf("an escape sequence survived into the rendered board: %q", joined)

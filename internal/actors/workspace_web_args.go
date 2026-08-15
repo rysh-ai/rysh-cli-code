@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -20,6 +22,12 @@ func writeWebUsage(out io.Writer) {
 		fmt.Sprintf("    --bind <addr>   bind address (default: %s, this machine only; 0.0.0.0 exposes it on your network)", web.DefaultHost),
 		fmt.Sprintf("    --port <n>      TCP port (default: %d, or [web] port in rysh.config.yaml)", defaultWebPort),
 		"    --control       enable channel/pairing/humanoid management from the dashboard (loopback only)",
+		"    --ngrok         also publish it at a public HTTPS URL (ngrok)",
+		"    --ngrok-domain <d>  publish at a reserved domain, so the URL survives restarts",
+		"    --no-save       apply to this run only (do not write rysh.config.yaml or the secrets)",
+		"  what you pass is SAVED FOR THIS SESSION: bind/port/ngrok to .rysh/web/<session>.json and the",
+		"  login to the secret store (RYSH_WEB_USERNAME / RYSH_WEB_PASSWORD), with auto_start — so",
+		"  restarting THIS session serves it again, tunnel included, and sibling sessions are untouched",
 		"  the login is stored for this workspace, so later starts need no flags",
 		"  e.g. ##rysh web start --username alice --password s3cret",
 		"  when the server is ALREADY running (the desktop app starts one), naming an",
@@ -33,7 +41,8 @@ func writeWebUsage(out io.Writer) {
 		"    the browser keeps the issued token for 30 days, then asks again",
 		"    ##rysh web auth        show whether a login is configured",
 		"    ##rysh web auth clear  remove the login (the UI will not start without one)",
-		"config: [web] host/port in rysh.config.yaml, or RYSH_WEB_HOST/RYSH_WEB_PORT",
+		"per-session state: .rysh/web/<session>.json   ·   project-wide defaults: [web] host/port in",
+		"rysh.config.yaml, or RYSH_WEB_HOST/RYSH_WEB_PORT (used only until a session saves its own)",
 	)
 }
 
@@ -64,6 +73,19 @@ type webStartOpts struct {
 	// pairing approve/allow, humanoid governance) and forces a loopback bind
 	// (R2, --control).
 	Control bool
+	// Ngrok publishes the server at a public HTTPS URL, and persists that
+	// choice so every later start of this session does it again. NgrokDomain
+	// pins a reserved domain — without one the public URL is different after
+	// every restart, which defeats half the point of persisting it.
+	Ngrok       bool
+	NgrokDomain string
+	// SharedDoor marks a start that opened a SECOND address onto an already
+	// running server, rather than starting one. Set by the caller, never by the
+	// command line: it decides which config keys the address is persisted under.
+	SharedDoor bool
+	// NoSave suppresses persistence: the parameters apply to this run only and
+	// rysh.config.yaml, the secret store and the session record are left alone.
+	NoSave bool
 	// Explicit records that the command line named an address or a port, rather
 	// than falling back to config and defaults. On a server that is ALREADY
 	// running it is the difference between "you forgot it is up" and "serve this
@@ -183,6 +205,19 @@ func parseWebStartArgs(args []string, defHost string, defPort int) (webStartOpts
 
 		case a == "--control":
 			opts.Control = true
+
+		case a == "--ngrok", a == "--publish":
+			opts.Ngrok = true
+		case a == "--ngrok-domain", a == "--domain":
+			if v, ok := next(); ok {
+				opts.Ngrok, opts.NgrokDomain = true, v
+			}
+		case strings.HasPrefix(a, "--ngrok-domain="), strings.HasPrefix(a, "--domain="):
+			_, v, _ := strings.Cut(a, "=")
+			opts.Ngrok, opts.NgrokDomain = true, v
+
+		case a == "--no-save", a == "--once":
+			opts.NoSave = true
 
 		case strings.HasPrefix(a, "-"):
 			warnf("ignoring unknown flag %q", a)

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package session
 
 // SelfHeal returns the record a live daemon should have on disk, given what is

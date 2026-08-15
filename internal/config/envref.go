@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package config
 
 import (
@@ -139,3 +141,21 @@ var secretNamePat = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // secretNameOK reports whether name is a legal secret/env identifier (and a
 // safe single-segment filename).
 func secretNameOK(name string) bool { return secretNamePat.MatchString(name) }
+
+// resolveSecretRef expands a value that is a ${NAME} secret reference through
+// the config-level tiers, returning "" when the reference cannot be resolved —
+// a half-expanded literal is never a usable credential, and an empty one is at
+// least reported as missing by whoever needs it. Values that carry no reference
+// are returned unchanged.
+func resolveSecretRef(ryshDir, value string) string {
+	if !EnvRefPattern.MatchString(value) {
+		return value
+	}
+	expanded, missing := ExpandEnvRefs(value, func(name string) (string, bool) {
+		return LookupSecretRef(ryshDir, name)
+	})
+	if len(missing) > 0 {
+		return ""
+	}
+	return expanded
+}

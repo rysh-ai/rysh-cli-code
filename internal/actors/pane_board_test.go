@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -103,7 +105,7 @@ func TestRegistrationCarriesNoFleetFields(t *testing.T) {
 func TestRegisterOnBoardPublishes(t *testing.T) {
 	nc := newBoardNATS(t)
 	codecs := msg.DefaultCodecRegistry()
-	rec := recordSubject(t, nc, msg.BoardRegisterSubject())
+	rec := recordSubject(t, nc, msg.BoardRegisterSubject(""))
 
 	p := &PaneActor{
 		id:        "aaaaaaaa-1111-2222-3333-444444444444",
@@ -137,7 +139,7 @@ func TestRegisterOnBoardPublishes(t *testing.T) {
 // "requestID\x1FresponseSubject". Nothing may put that on the wire as a name.
 func TestApprovalPaneNeverRegisters(t *testing.T) {
 	nc := newBoardNATS(t)
-	rec := recordSubject(t, nc, msg.BoardRegisterSubject())
+	rec := recordSubject(t, nc, msg.BoardRegisterSubject(""))
 
 	p := &PaneActor{
 		id:        "bbbbbbbb-5555-6666-7777-888888888888",

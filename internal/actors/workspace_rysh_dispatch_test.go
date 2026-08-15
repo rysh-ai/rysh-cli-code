@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -166,8 +168,13 @@ func TestRyshHelp_ListsEveryCommand(t *testing.T) {
 
 // TestRyshUnknownCommand_SuggestsNearMatches pins the new behaviour the table
 // makes possible: a typo gets a short suggestion list instead of 180 lines of
-// help. A word with no near match still falls back to the full help, because
-// then there is nothing better to offer.
+// help.
+//
+// A word with no near match no longer dumps the full help either: since user
+// commands landed, such a word is more likely to be a command the user meant to
+// define than a mistyped built-in, so the message names the file that would
+// define it (see TestRyshUnknownCommandPointsAtTheCommandsDir). The full help
+// remains the fallback for a word that could not name a file at all.
 func TestRyshUnknownCommand_SuggestsNearMatches(t *testing.T) {
 	w := &WorkspaceActor{}
 
@@ -188,8 +195,8 @@ func TestRyshUnknownCommand_SuggestsNearMatches(t *testing.T) {
 	if !strings.Contains(far.String(), `unknown command: "zzzzz"`) {
 		t.Errorf("missing the unknown-command line:\n%s", far.String())
 	}
-	if !strings.Contains(far.String(), "available ## commands:") {
-		t.Errorf("a word with no near match should fall back to the full help:\n%s", far.String())
+	if !strings.Contains(far.String(), "##help lists every built-in command") {
+		t.Errorf("a word with no near match should still point at the help:\n%s", far.String())
 	}
 }
 
@@ -240,7 +247,7 @@ func TestRyshCommand_DispatchesToTheRightHandler(t *testing.T) {
 	w := newDispatchTestWorkspace(t)
 	for _, c := range cases {
 		t.Run(c.input, func(t *testing.T) {
-			got, _ := w.handleRyshCommand(nil, "", "rysh", c.input, false)
+			got, _ := w.handleRyshCommand(nil, "", "rysh", c.input, false, ryshBuiltinCmd)
 			if !strings.Contains(got, c.want) {
 				t.Errorf("%q produced:\n%s\nwant it to contain %q", c.input, got, c.want)
 			}
@@ -253,13 +260,13 @@ func TestRyshCommand_DispatchesToTheRightHandler(t *testing.T) {
 func TestRyshCommand_EmptyAndUnknown(t *testing.T) {
 	w := newDispatchTestWorkspace(t)
 
-	if got, _ := w.handleRyshCommand(nil, "", "rysh", "", false); !strings.Contains(got, "available ## commands:") {
+	if got, _ := w.handleRyshCommand(nil, "", "rysh", "", false, ryshBuiltinCmd); !strings.Contains(got, "available ## commands:") {
 		t.Errorf("empty command should render help, got:\n%s", got)
 	}
-	if got, _ := w.handleRyshCommand(nil, "", "rysh", "   ", false); !strings.Contains(got, "available ## commands:") {
+	if got, _ := w.handleRyshCommand(nil, "", "rysh", "   ", false, ryshBuiltinCmd); !strings.Contains(got, "available ## commands:") {
 		t.Errorf("whitespace-only command should render help, got:\n%s", got)
 	}
-	got, err := w.handleRyshCommand(nil, "", "rysh", "zzzzz", false)
+	got, err := w.handleRyshCommand(nil, "", "rysh", "zzzzz", false, ryshBuiltinCmd)
 	if !strings.Contains(got, `unknown command: "zzzzz"`) {
 		t.Errorf("unknown command not reported, got:\n%s", got)
 	}
@@ -271,7 +278,7 @@ func TestRyshCommand_EmptyAndUnknown(t *testing.T) {
 	}
 
 	// Help is not a failure.
-	if _, err := w.handleRyshCommand(nil, "", "rysh", "", false); err != nil {
+	if _, err := w.handleRyshCommand(nil, "", "rysh", "", false, ryshBuiltinCmd); err != nil {
 		t.Errorf("empty command should not be an error, got %v", err)
 	}
 }
@@ -286,7 +293,7 @@ func TestRyshCommand_StatusAwareCommandsReportFailure(t *testing.T) {
 		{"session switch ghost", "no such session"},
 		{"session bogus", "unknown subcommand"},
 	} {
-		if _, err := w.handleRyshCommand(nil, "", "rysh", c.input, false); err == nil {
+		if _, err := w.handleRyshCommand(nil, "", "rysh", c.input, false, ryshBuiltinCmd); err == nil {
 			t.Errorf("%q (%s) reported success", c.input, c.why)
 		}
 	}
@@ -304,8 +311,8 @@ func TestRyshCommand_AliasesProduceIdenticalOutput(t *testing.T) {
 	}
 	w := newDispatchTestWorkspace(t)
 	for _, p := range pairs {
-		a, _ := w.handleRyshCommand(nil, "", "rysh", p[0], false)
-		b, _ := w.handleRyshCommand(nil, "", "rysh", p[1], false)
+		a, _ := w.handleRyshCommand(nil, "", "rysh", p[0], false, ryshBuiltinCmd)
+		b, _ := w.handleRyshCommand(nil, "", "rysh", p[1], false, ryshBuiltinCmd)
 		if a != b {
 			t.Errorf("%q and %q differ:\n%q\n%q", p[0], p[1], a, b)
 		}

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package plugin implements the out-of-process channel plugin SDK
 // (openclaw_roadmap design 002, WS2 P1-P3): a third party ships a channel as a
 // separate process speaking a small wire contract, and the in-core

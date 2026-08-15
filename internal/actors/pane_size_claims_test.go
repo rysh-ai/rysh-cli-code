@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // Pane PTY size arbitration: one pane has one PTY but can be on screen in
@@ -232,5 +234,154 @@ func TestReapStaleSizeClaimsIsRateLimited(t *testing.T) {
 	single.reapStaleSizeClaims()
 	if len(single.sizeClaims) != 1 {
 		t.Error("a lone claim was reaped — nothing would be left to size the pane")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Shrink settling (backlog F-52 mitigation)
+// ---------------------------------------------------------------------------
+//
+// Narrowing the PTY destroys the glyphs past the new width — vt10x copies each
+// row into a narrower one and cannot reflow, so a shell's already-committed
+// lines keep the hole permanently. Growing costs nothing. So a shrink waits one
+// paneSizeSettleWindow for the claim set to stop moving, and a claim that was
+// only ever transient never reaches the PTY at all.
+//
+// These tests drive the settle by hand rather than sleeping on the real timer's
+// callback: sizeSettleSend is what production uses to hop back onto the mailbox
+// goroutine, so a test that signals through it and then calls
+// applySettledPaneSize itself is running exactly the production sequence,
+// without reading pane state off the timer goroutine.
+
+// settleHandshake wires the pane's settle wake-up to a channel and returns it.
+func settleHandshake(p *PaneActor) chan struct{} {
+	fired := make(chan struct{}, 4)
+	p.sizeSettleSend = func() { fired <- struct{}{} }
+	return fired
+}
+
+// TestTransientNarrowClaimNeverReachesPTY is the whole point of the settle
+// window. A viewport that measures itself mid-layout, or opens and closes
+// again, used to clip every row on screen on its way past.
+func TestTransientNarrowClaimNeverReachesPTY(t *testing.T) {
+	p := newSizeTestPane(t)
+	fired := settleHandshake(p)
+
+	p.claimPaneSize("web:1", 50, 200) // grows — immediate
+	if rows, cols := p.size(); rows != 50 || cols != 200 {
+		t.Fatalf("after growing claim = %dx%d, want 50x200", rows, cols)
+	}
+
+	// A transient viewport appears and claims something much smaller.
+	p.claimPaneSize(liveClientID(), 24, 70)
+	if rows, cols := p.size(); rows != 50 || cols != 200 {
+		t.Fatalf("shrink applied immediately = %dx%d, want it held at 50x200", rows, cols)
+	}
+	if p.sizeSettleTimer == nil {
+		t.Fatal("no settle armed for a shrink")
+	}
+
+	// ...and goes away again before the window elapses.
+	p.releasePaneSize(liveClientID())
+	if rows, cols := p.size(); rows != 50 || cols != 200 {
+		t.Fatalf("after release = %dx%d, want 50x200 untouched", rows, cols)
+	}
+	if p.sizeSettleTimer != nil {
+		t.Error("pending shrink not cancelled once the claim that armed it went away")
+	}
+
+	select {
+	case <-fired:
+		t.Error("settle fired for a claim that was withdrawn")
+	case <-time.After(paneSizeSettleWindow + 100*time.Millisecond):
+	}
+}
+
+// TestGenuineNarrowLandsAfterSettle — the window delays a real shrink, it does
+// not veto it. A second front-end that really is smaller must still win, or the
+// arbitration this file exists to test would be broken.
+func TestGenuineNarrowLandsAfterSettle(t *testing.T) {
+	p := newSizeTestPane(t)
+	fired := settleHandshake(p)
+
+	p.claimPaneSize("web:1", 50, 200)
+	p.claimPaneSize(liveClientID(), 24, 70)
+
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("settle never fired for a shrink that stood")
+	}
+	p.applySettledPaneSize() // what the mailbox does on paneSizeSettleMsg
+
+	if rows, cols := p.size(); rows != 24 || cols != 70 {
+		t.Fatalf("settled size = %dx%d, want 24x70 (smallest claim)", rows, cols)
+	}
+}
+
+// TestShrinkBurstCoalescesToOneResize — claims keep arriving while a shrink is
+// pending. They must update the answer without each arming its own timer, and
+// the PTY must move once, to the final value, rather than stepping down through
+// every intermediate size (each step being a destructive clip).
+func TestShrinkBurstCoalescesToOneResize(t *testing.T) {
+	p := newSizeTestPane(t)
+	fired := settleHandshake(p)
+
+	p.claimPaneSize("web:1", 50, 200)
+	p.claimPaneSize(liveClientID(), 24, 70)
+	armed := p.sizeSettleTimer
+	if armed == nil {
+		t.Fatal("no settle armed")
+	}
+
+	// More claims land inside the window, each smaller than the last.
+	p.claimPaneSize("web:1", 40, 90)
+	p.claimPaneSize("web:1", 30, 80)
+	if p.sizeSettleTimer != armed {
+		t.Error("a claim inside the window re-armed the timer; shrinks must coalesce, " +
+			"or a fast re-claiming front-end defers the resize indefinitely")
+	}
+	if rows, cols := p.size(); rows != 50 || cols != 200 {
+		t.Fatalf("PTY moved mid-burst = %dx%d, want it held at 50x200", rows, cols)
+	}
+
+	<-fired
+	p.applySettledPaneSize()
+
+	// min(30,24) x min(80,70) — the whole burst, resolved once.
+	if rows, cols := p.size(); rows != 24 || cols != 70 {
+		t.Fatalf("settled size = %dx%d, want 24x70", rows, cols)
+	}
+}
+
+// TestGrowIsNotDeferred — growing cannot lose anything, so it must not pay the
+// settle latency. An interactive app given more room should get it now.
+func TestGrowIsNotDeferred(t *testing.T) {
+	p := newSizeTestPane(t)
+	settleHandshake(p)
+
+	p.claimPaneSize("web:1", 100, 300)
+	if rows, cols := p.size(); rows != 100 || cols != 300 {
+		t.Fatalf("grow = %dx%d, want 100x300 applied immediately", rows, cols)
+	}
+	if p.sizeSettleTimer != nil {
+		t.Error("grow armed a settle timer")
+	}
+}
+
+// TestArbitrationStaysInlineWithoutMailbox pins the escape hatch the other
+// tests in this file rely on: with no actor system behind it there is nowhere
+// to defer to, so a shrink applies inline and the arbitration result is
+// observable synchronously.
+func TestArbitrationStaysInlineWithoutMailbox(t *testing.T) {
+	p := newSizeTestPane(t) // sizeSettleSend left nil
+
+	p.claimPaneSize("web:1", 50, 200)
+	p.claimPaneSize(liveClientID(), 24, 70)
+	if rows, cols := p.size(); rows != 24 || cols != 70 {
+		t.Fatalf("inline shrink = %dx%d, want 24x70", rows, cols)
+	}
+	if p.sizeSettleTimer != nil {
+		t.Error("inline path armed a timer")
 	}
 }

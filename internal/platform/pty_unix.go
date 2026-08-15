@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //go:build !windows
 
 // Package platform reports host capabilities that change what rysh can do,

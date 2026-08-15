@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package vt10x
 
 func isControlCode(c rune) bool {

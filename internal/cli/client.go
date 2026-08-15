@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package cli implements CLI subcommands that communicate with a running
 // rysh session via NATS.
 package cli

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Workspace-level messages: what the TUI and the CLI send to the
 // WorkspaceActor, and the workspace-level layout operations.
 package msg
@@ -34,6 +36,17 @@ type MsgFocusTabIndex struct {
 // moved tab stays active; it is a no-op at the edges.
 type MsgMoveTab struct {
 	Direction Direction `json:"direction"`
+}
+
+// MsgSetTabBarOrientation switches the tab bar between a horizontal strip
+// under the workspace row and a vertical column down the left edge of the
+// body. Orientation is per-workspace state and survives a restart.
+//
+// Vertical selects the orientation directly; Toggle flips whatever is current
+// and takes precedence over Vertical when set.
+type MsgSetTabBarOrientation struct {
+	Vertical bool `json:"vertical"`
+	Toggle   bool `json:"toggle,omitempty"`
 }
 
 // MsgSwitchWorkspace switches the active workspace within the session. It is
@@ -91,6 +104,13 @@ type MsgSubmitInput struct {
 	// PREVIOUS pane (e.g. straight into a running claude CLI). The workspace
 	// aligns focus to this pane before routing, healing any drift.
 	PaneID string `json:"pane_id,omitempty"`
+	// Programmatic marks input that NOBODY TYPED: an agent's rysh tool, a
+	// script, `rysh run`. It routes to PaneID exactly like typed input but must
+	// not move the human's focus there — a human typing is the strongest focus
+	// signal there is, and a machine submitting on a pane's behalf is no signal
+	// at all. Without it, every agent that ran a ## command dragged the cursor
+	// (and, across tabs, the whole visible tab) to itself.
+	Programmatic bool `json:"programmatic,omitempty"`
 }
 
 // MsgWebPromptDispatched announces that a prompt was sent to a web pane's AI

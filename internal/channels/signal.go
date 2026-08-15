@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package channels
 
 // SignalAdapter — C4 (openclaw_roadmap design 001 §4.4). In-core JSON-RPC

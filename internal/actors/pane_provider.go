@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // pane_provider.go — the pane side of `##pane provider` (design 002 §3.4) and

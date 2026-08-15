@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -93,6 +95,18 @@ func (w *WorkspaceActor) cmdSessionInfo(out *strings.Builder) {
 		if rec.WebPort > 0 {
 			fmt.Fprintf(out, "  web port    : %d (http://127.0.0.1:%d — the desktop app adopts a session through this)\n",
 				rec.WebPort, rec.WebPort)
+			// How this session is reached from anywhere other than this
+			// machine: the address it is bound to, the login it asks for, and
+			// the public URL in front of it.
+			if rec.WebHost != "" {
+				fmt.Fprintf(out, "  web bind    : %s\n", rec.WebHost)
+			}
+			if rec.WebUser != "" {
+				fmt.Fprintf(out, "  web login   : %s\n", rec.WebUser)
+			}
+			if rec.WebPublicURL != "" {
+				fmt.Fprintf(out, "  web public  : %s\n", rec.WebPublicURL)
+			}
 		}
 		fmt.Fprintf(out, "  attached TUI: %d\n", len(rec.AliveTUIPIDs()))
 		if rec.AppClients > 0 {

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //go:build !windows
 
 package actors
@@ -54,6 +56,41 @@ import (
 //     the version. The stop still happens, because nothing in the detection path
 //     consults the CLI profile table; see TestStrictStopsAnUnknownLongRunningProgram
 //     and F-13.
+//
+// # Re-measured 2026-08-12 against `claude` 2.1.228 (E8/T8)
+//
+// The numbers above were taken on 2.1.224; `~/.local/bin/claude` now points at
+// 2.1.228, so they were re-run rather than trusted. Command, from a rysh-cli
+// worktree:
+//
+//	RYSH_TEST_REAL_CLI=/Users/halilagin/.local/bin/claude GOWORK=off \
+//	  go test ./internal/actors/ -run '^TestStrict…$' -v -count=1 -timeout 15m
+//
+// Six runs, three of each test, on an 8-core host carrying eight concurrent
+// agent fleets — i.e. the loaded condition F-14 describes, and then some:
+//
+//   - Stop case: 3/3 PASS at load 56–70. Strict fired at 20.118s / 20.120s /
+//     20.274s against a 20s GraceWindow, the CLI's process group was gone every
+//     run, and every run ended governed=0 escaped=3 — so each one really was an
+//     escaped CLI mid-conversation and not an idle one.
+//   - Spare case: 3/3 PASS at load 128 / 140 / 152. First governed request at
+//     4.691s / 6.535s / 2.859s.
+//
+// F-14 therefore did NOT reproduce, and the margin moved the right way: on the
+// same in-process basis, 2.1.224 needed 9.6s and 2.1.228 needs 2.9–6.5s, at
+// 13× the load. That is not the same as F-14 being closed. This test measures
+// exec → first request against an in-process httptest upstream; the 23.1s and
+// 24.3s samples that made F-14 a coin flip were taken against a SEPARATE
+// upstream process, a condition nothing here exercises. F-14's worst case is
+// untested today, not refuted.
+//
+// F-15 reproduced exactly, with the version moved on: strict named the CLI
+// "2.1.228" in all six runs (`cli=2.1.228` in the log line, `name="2.1.228"`
+// from processName). Every literal `2.1.224` in the F-15 backlog row is stale.
+//
+// F-13 also still reproduces on 2.1.228 — run with RYSH_TEST_KNOWN_FAILING=1 it
+// stopped `sleep 120`, a program with no profile, and told the user to run
+// `##proxy check sleep`.
 
 // realCLIPath returns the binary under test, or skips.
 func realCLIPath(t *testing.T) string {
@@ -388,9 +425,17 @@ func TestStrictStopsARealUngovernedClaude(t *testing.T) {
 // left alone. An implementation that stops it has turned a governance feature
 // into an outage for the exact users who configured it correctly.
 //
-// This test currently FAILS — see F-13 and the file header. Real `claude`
-// 2.1.224 needs ~24s to reach its first request and GraceWindow is 20s, so the
-// positive evidence arrives after the verdict.
+// This test is LOAD-DEPENDENT — see F-14 (not F-13) and the file header. It
+// asserts a property the code does not actually guarantee: that a governed CLI
+// produces its first request inside GraceWindow. Whether it does is a race
+// between the CLI's cold start and a 20s timer.
+//
+// On 2.1.224 that race was close enough to lose — 23.1s and 24.3s samples
+// against a separate upstream process, versus a 20s window. On 2.1.228,
+// 2026-08-12, it was won three times out of three at load 128–152, with the
+// first governed request at 4.691s / 6.535s / 2.859s. A green run here is
+// evidence about this host, this CLI build and this load, and not a proof that
+// strict cannot stop a correctly-governed CLI.
 func TestStrictSparesARealGovernedClaude(t *testing.T) {
 	bin := realCLIPath(t)
 	rig := newStrictRig(t)

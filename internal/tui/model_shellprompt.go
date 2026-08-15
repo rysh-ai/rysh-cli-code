@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 // model_shellprompt.go — context-aware shell prompt and PS2 continuation

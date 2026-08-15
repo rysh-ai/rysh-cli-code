@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // Result derivation for `rysh run` (design 009): the runCollector accumulates

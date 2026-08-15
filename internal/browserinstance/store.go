@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package browserinstance manages persistent Chromium browser profiles for
 // web-mode panes. Profiles live in the project-local
 // <workDir>/.rysh/browser-instances/ directory (sibling to rysh.config.yaml),

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 // Phase 5 (bash-shell-mode): context-aware prompt + PS2 continuation tests.

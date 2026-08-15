@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 // model_readline.go — bash-style extras for shell mode (Phase 2 of the

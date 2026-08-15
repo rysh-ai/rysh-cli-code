@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package relay provides a thread-safe in-process registry that maps pane IDs
 // to PTY relay handles. When the TUI activates a relay for a pane, the
 // rawReadLoop in the PaneActor sends raw PTY output to the handle's OutputCh,

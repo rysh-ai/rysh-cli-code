@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package voice implements voice prompting for the rysh TUI: it records the
 // microphone via a system recorder, transcribes the audio with a pluggable
 // speech-to-text provider (Deepgram by default, OpenAI Whisper as an

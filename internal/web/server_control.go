@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Control-dashboard surface (WS5, design 005 — tasks DB1–DB4).
 //
 // This file adds the browser control plane on top of the read-only viewer in

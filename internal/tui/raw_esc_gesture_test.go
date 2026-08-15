@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 // Tests for the double-Esc "switch modes" gesture over an AUTO-DETECTED

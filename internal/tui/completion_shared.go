@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 // completion_shared.go — an exported facade over the TUI's shell tab-completion

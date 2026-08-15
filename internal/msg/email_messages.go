@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package msg
 
 // Email data-transfer types. These live in the msg package (rather than

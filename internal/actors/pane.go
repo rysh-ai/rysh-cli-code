@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -81,6 +83,11 @@ type PaneActor struct {
 	// Unguarded — sequential mailbox.
 	title     string
 	givenName string
+	// hidden takes this pane off screen without taking it out of the session
+	// (design 027 §5.1). Rendering state only: the PTY, the program and every
+	// addressing path are untouched, which is what lets the board claude run in
+	// a real pane nobody has to look at.
+	hidden bool
 	// meta is free-form metadata set through `##pane meta`, owned by whatever
 	// is driving this pane and never interpreted here. Persisted with the pane
 	// so a supervisor's record of what a pane is FOR survives a restart of both
@@ -228,6 +235,16 @@ type PaneActor struct {
 	// lastSizeClaimReap rate-limits the liveness sweep over sizeClaims, which
 	// runs off snapshot requests (a hot path) rather than a timer.
 	lastSizeClaimReap time.Time
+	// sizeSettleTimer holds a pending SHRINK of the PTY. Narrowing destroys the
+	// glyphs past the new width (backlog `F-52`), so it waits one
+	// paneSizeSettleWindow for the claim set to stop moving; growing applies at
+	// once. Armed and cleared only on the mailbox goroutine.
+	sizeSettleTimer *time.Timer
+	// sizeSettleSend wakes the mailbox when that timer fires — it posts
+	// paneSizeSettleMsg to this actor, because sizeClaims must not be read off
+	// the timer's own goroutine. Nil before Started (and in the arbitration unit
+	// tests), which makes a shrink apply inline instead of being deferred.
+	sizeSettleSend func()
 
 	// remoteSubscriber is true when this pane is the local owner pane of a remote
 	// share subscription (##upstream subscribe). While set, non-shell remote modes
@@ -338,6 +355,12 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 		// Safety-net KV flush for a detached daemon, which gets no snapshot
 		// requests and so would otherwise never write dirty pane state.
 		p.startPersistTicker(ctx)
+		// Give a deferred PTY shrink a way back onto the mailbox goroutine.
+		// Captured here rather than read from ctx later: the timer fires on its
+		// own goroutine, where ctx is not ours to touch.
+		if self, system := ctx.Self(), ctx.ActorSystem(); self != nil && system != nil {
+			p.sizeSettleSend = func() { system.Root.Send(self, &paneSizeSettleMsg{}) }
+		}
 		p.br = bridge.New(p.nc, ctx.Self(), ctx.ActorSystem(), p.pub.Codecs())
 		p.br.SetPaneID(p.id)
 		_ = p.br.AddSubject(msg.T("pane", p.id, "inbox"))
@@ -500,6 +523,7 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 		}
 
 	case *actor.Restarting:
+		p.cancelSizeSettle()
 		if p.br != nil {
 			p.br.Stop()
 			p.br = nil
@@ -508,6 +532,7 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 
 	case *actor.Stopping:
 		p.stopPersistTicker()
+		p.cancelSizeSettle()
 		teardownScope(p.agSetup, agentic.ScopePane, p.id)
 		// Release the pane's governance-proxy state: rate buckets, the cached
 		// ledger verdict, the ungoverned-CLI observation, and its place in the
@@ -537,11 +562,28 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 			_ = p.pub.Send(msg.T("ws", "inbox"), &msg.MsgPaneStopped{PaneID: p.id})
 		}
 
+	// paneRehomeRequest lands after ##move has re-parented this pane's
+	// bookkeeping (pane_move.go). The fields are this actor's own, so the
+	// adopting group asks rather than reaching in.
+	//
+	// It updates where a shell started FROM NOW ON believes it is. A shell that
+	// is already running keeps the RYSH_LANE / RYSH_STACK / RYSH_TAB it was
+	// exec'd with — no process's environment can be rewritten from outside, so
+	// those three go stale on a move. RYSH_PANE, the one an agent addresses
+	// itself by, never changes.
+	case *paneRehomeRequest:
+		p.tabID = m.tabID
+		p.laneID = m.laneID
+		p.groupID = m.groupID
+
 	case *msg.MsgPaneSubmitInput:
 		p.handleSubmitInput(m)
 
 	case *msg.MsgPaneExecShell:
 		p.executeShell(m.Command)
+
+	case *msg.MsgPaneKillForeground:
+		p.killForeground(m.Hard)
 
 	case *msg.MsgPaneExecPrompt:
 		p.executePrompt(m.Prompt, nil)
@@ -642,6 +684,16 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 		// nothing in the app until an unrelated action forced a refresh.
 		p.notifyLayoutDirty()
 
+	case *msg.MsgPaneSetHidden:
+		p.hidden = m.Hidden
+		p.kvDirty = true
+		// A hidden pane is a LAYOUT change even though nothing about the pane
+		// itself moved: every frontend decides what to draw from the snapshot,
+		// so without this the pane stays on screen until some unrelated action
+		// forces a re-fetch — the same defect `##pane name` had (see the
+		// given-name handler above).
+		p.notifyLayoutDirty()
+
 	case *msg.MsgPaneSetMeta:
 		if m.Key != "" {
 			if m.Value == "" {
@@ -670,6 +722,11 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 
 	case *msg.MsgPaneReleaseSize:
 		p.releasePaneSize(m.ClientID)
+
+	case *paneSizeSettleMsg:
+		// A deferred shrink's window has elapsed — resize to whatever the claim
+		// set says now. See applyEffectivePaneSize.
+		p.applySettledPaneSize()
 
 	case *msg.MsgRawKeyInput:
 		// Raw key input received through the actor mailbox (fallback path).

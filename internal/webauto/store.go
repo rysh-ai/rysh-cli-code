@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package webauto stores reusable, prompt-based automations ("recipes") for
 // the ##auto command family. A recipe is a Markdown file with YAML
 // frontmatter (description, args, output_dir, step budget, plus per-kind

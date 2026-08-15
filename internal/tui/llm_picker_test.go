@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 // The `##llm select` picker is a keyboard front-end to commands that already

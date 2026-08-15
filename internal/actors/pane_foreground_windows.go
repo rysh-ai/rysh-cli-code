@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //go:build windows
 
 package actors
@@ -25,4 +27,12 @@ func processGroupAlive(_ int) bool { return false }
 // something was stopped.
 func terminateProcessGroup(_ int) error {
 	return errors.New("proxy strict: stopping a process group is not supported on Windows")
+}
+
+// killProcessGroup is unsupported on Windows, for the same reason as
+// terminateProcessGroup above. It referred to an `errUnsupported` that is
+// declared nowhere in the package, so this file has never compiled on Windows —
+// the failure was masked by internal/tunnel failing first.
+func killProcessGroup(_ int) error {
+	return errors.New("proxy strict: killing a process group is not supported on Windows")
 }

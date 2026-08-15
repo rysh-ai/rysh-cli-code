@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package msg
 
 // WhatsApp UI data-transfer types and NATS messages for the desktop WhatsApp

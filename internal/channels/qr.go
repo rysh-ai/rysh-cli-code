@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package channels
 
 // QR rendering for device-link pairing (X4, design 009). Two render targets from

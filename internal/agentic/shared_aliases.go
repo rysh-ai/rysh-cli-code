@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package agentic shared_aliases.go — re-exports rysh-shared/agentic types.
 package agentic
 

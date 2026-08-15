@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package ir defines the Forge Intermediate Representation: a language- and
 // target-agnostic model of an API. Every Forge generator (tool-pack, MCP
 // server, docs, SDKs) reads only the IR, so adding a new source format (OpenAPI,

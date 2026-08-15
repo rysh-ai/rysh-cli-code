@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package pysdk is a Forge generator that emits a Python client SDK
 // (client.py + pyproject.toml + README.md) for an API described by the IR. The
 // generated client uses only the standard library (urllib.request) and has zero

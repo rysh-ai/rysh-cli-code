@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 import (
@@ -40,12 +42,18 @@ func (m Model) renderHeader() string {
 	//
 	// The header stays exactly two rows tall, keeping the body height budget
 	// unchanged.
+	//
+	// With a vertical tab bar the second row moves into the body as a left-hand
+	// column (renderTabColumn), so the header is the workspace strip alone and
+	// bodyDims hands the freed row back to the panes.
 	wsRow := m.renderWorkspaceStrip()
-	tabRow := m.renderTabStrip()
-	return lipgloss.NewStyle().
+	style := lipgloss.NewStyle().
 		Width(max(20, m.width)).
-		Padding(0, 1, 0, 1).
-		Render(wsRow + "\n" + tabRow)
+		Padding(0, 1, 0, 1)
+	if m.tabBarVertical() {
+		return style.Render(wsRow)
+	}
+	return style.Render(wsRow + "\n" + m.renderTabStrip())
 }
 
 // powerlineSeg circumfixes already-background-painted content with Powerline
@@ -102,6 +110,107 @@ func (m Model) renderTabStrip() string {
 	return strings.Join(segs, " ")
 }
 
+// tabColumnLabel is the text of one vertical-tab-bar row: the 1-based tab
+// number and its title, with the padding spaces included so the string's width
+// is exactly what the row occupies.
+//
+// tabColumnWidth sizes the column from this and nothing else. In particular the
+// attention marker is deliberately excluded: it blinks, and a width that
+// depended on it would resize the column — and therefore every pane and mouse
+// rect — twice a second. The marker is drawn inside the width instead, over the
+// end of the title.
+func tabColumnLabel(i int, tab domain.TabSnapshot) string {
+	title := strings.TrimSpace(tab.Title)
+	if title == "" {
+		title = "tab"
+	}
+	return fmt.Sprintf(" %d %s ", i+1, title)
+}
+
+// renderTabColumn renders the active workspace's tabs as a vertical column,
+// one row per tab, for the left edge of the body. The active tab carries a ▌
+// marker in place of its leading space; tabs awaiting attention carry the same
+// red ●count marker the horizontal strip uses.
+//
+// Every row is rendered at exactly width columns (Width pads, MaxWidth
+// truncates) so the column is a clean rectangle and the pane grid beside it
+// starts where bodyXOffset says it does.
+//
+// maxRows bounds the column to the height of the body it sits beside. A
+// horizontal tab strip that overflows just wraps onto another header row, but a
+// column that outgrew the body would make the whole View taller and push the
+// footer off screen — so past maxRows the column scrolls to keep the active tab
+// visible and spends its last row saying how many tabs are not shown.
+func (m Model) renderTabColumn(width, maxRows int) string {
+	cell := func(bg, fg lipgloss.Color, bold bool) lipgloss.Style {
+		return lipgloss.NewStyle().Background(bg).Foreground(fg).Bold(bold).
+			Width(width).MaxWidth(width)
+	}
+
+	if len(m.snapshot.Tabs) == 0 {
+		return cell(plTabInactiveBg, plTabInactiveFg, false).Italic(true).Render(" ctrl+t n")
+	}
+
+	rows := make([]string, 0, len(m.snapshot.Tabs))
+	activeIdx := 0
+	for i, tab := range m.snapshot.Tabs {
+		active := tab.ID == m.snapshot.ActiveTabID
+		if active {
+			activeIdx = i
+		}
+		bg, fg := plTabInactiveBg, plTabInactiveFg
+		if active {
+			bg, fg = plTabActiveBg, plTabActiveFg
+		}
+
+		label := tabColumnLabel(i, tab)
+		if active {
+			// Replace the leading pad with a bar so the active tab is legible
+			// even where the background colours wash out. Same width.
+			label = "▌" + strings.TrimPrefix(label, " ")
+		}
+
+		row := cell(bg, fg, active).Render(label)
+		if attn := m.tabAttentionCount(tab); attn > 0 && (active || m.attentionBlink) {
+			marker := fmt.Sprintf("●%d", attn)
+			// Truncate the label to leave room for the marker, then re-pad, so
+			// the row is still exactly width columns wide.
+			keep := max(0, width-len([]rune(marker)))
+			head := lipgloss.NewStyle().Background(bg).Foreground(fg).Bold(active).
+				Width(keep).MaxWidth(keep).Render(label)
+			tail := lipgloss.NewStyle().Background(bg).Foreground(plAttnFg).Bold(true).Render(marker)
+			row = head + tail
+		}
+		rows = append(rows, row)
+	}
+
+	if maxRows > 0 && len(rows) > maxRows {
+		visible := max(1, maxRows-1) // the last row reports the remainder
+		start := 0
+		if activeIdx >= visible {
+			start = activeIdx - visible + 1
+		}
+		start = min(start, len(rows)-visible)
+		window := append([]string{}, rows[start:start+visible]...)
+		window = append(window, cell(plTabInactiveBg, plTabInactiveFg, false).Italic(true).
+			Render(fmt.Sprintf(" +%d more", len(rows)-visible)))
+		rows = window
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left, rows...)
+}
+
+// withTabColumn places the vertical tab bar to the left of an already-rendered
+// body. A horizontal tab bar returns the body untouched. The column is bounded
+// by the body's own height so the pair never grows the View.
+func (m Model) withTabColumn(body string) string {
+	w := m.tabColumnWidth()
+	if w == 0 {
+		return body
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, m.renderTabColumn(w, lipgloss.Height(body)), body)
+}
+
 // renderWorkspaceStrip renders every workspace as a Powerline bubble, with the
 // active one highlighted. Driven entirely by the active workspace's snapshot
 // (which carries the full workspace name list from the WorkspaceFarmActor).
@@ -136,20 +245,24 @@ func (m Model) renderBody() string {
 	// The `##llm select` picker takes the whole body. See renderLLMPicker for
 	// why it replaces the pane grid instead of floating over it.
 	if m.mode == modeLLMPicker && m.llmPicker != nil {
-		return m.renderLLMPicker(max(20, m.width), max(10, m.height-6))
+		// The picker is a modal takeover of the body, so it keeps the full
+		// terminal width and the vertical tab column steps aside for it.
+		return m.renderLLMPicker(max(20, m.width), m.bodyPanelHeight())
 	}
 	tab := m.activeTab()
 	if tab == nil {
-		return panelStyle.Width(max(20, m.width)).Height(max(10, m.height-6)).Render("no active tab, create one with ctrl+t n")
+		bodyWidth, _ := m.bodyDims()
+		return m.withTabColumn(panelStyle.Width(max(20, bodyWidth)).Height(m.bodyPanelHeight()).
+			Render("no active tab, create one with ctrl+t n"))
 	}
 
 	// Fullscreen mode: render only the active (or pinned) pane at full size.
 	if m.fullscreenPaneID != "" {
 		for _, pane := range tab.FlatPanes() {
 			if pane.ID == m.fullscreenPaneID {
-				// Use the full terminal width minus outer padding (2) and borders (2).
-				fsWidth := max(20, m.width-4)
-				fsHeight := max(8, m.height-8)
+				// Use the full body width minus outer padding (2) and borders (2).
+				fsWidth := m.fullscreenWidth()
+				fsHeight := m.bodyHeight()
 				style := activePaneStyle.BorderForeground(m.activePaneBorderColor()).Width(fsWidth).Height(fsHeight)
 				panel := m.buildPanePanel(pane, *tab, fsWidth, fsHeight)
 				title := m.paneBorderTitle(pane)
@@ -178,7 +291,7 @@ func (m Model) renderBody() string {
 					}
 				}
 				rendered := injectBorderTitle(style.Render(panel), title, true, m.activePaneBorderColor(), fsWidth, rightLabel)
-				return lipgloss.NewStyle().Padding(0, 1).Render(rendered)
+				return m.withTabColumn(lipgloss.NewStyle().Padding(0, 1).Render(rendered))
 			}
 		}
 		// Fullscreen pane no longer exists — fall through to normal layout.
@@ -186,11 +299,12 @@ func (m Model) renderBody() string {
 
 	lanes := tab.FlatLanes()
 	if len(lanes) == 0 {
-		return panelStyle.Width(max(20, m.width)).Height(max(10, m.height-6)).Render("no panes")
+		bodyWidth, _ := m.bodyDims()
+		return m.withTabColumn(panelStyle.Width(max(20, bodyWidth)).Height(m.bodyPanelHeight()).Render("no panes"))
 	}
 
 	colWidths := laneWidths(lanes, m.paneAvailWidth(len(lanes)))
-	totalHeight := max(8, m.height-8)
+	totalHeight := m.bodyHeight()
 
 	renderedCols := make([]string, len(lanes))
 	for c, lane := range lanes {
@@ -273,7 +387,7 @@ func (m Model) renderBody() string {
 		renderedCols[c] = lipgloss.JoinVertical(lipgloss.Left, renderedPanes...)
 	}
 
-	return lipgloss.NewStyle().Padding(0, 1).Render(lipgloss.JoinHorizontal(lipgloss.Top, renderedCols...))
+	return m.withTabColumn(lipgloss.NewStyle().Padding(0, 1).Render(lipgloss.JoinHorizontal(lipgloss.Top, renderedCols...)))
 }
 
 func (m Model) keyHelp() string {
@@ -307,7 +421,7 @@ func (m Model) keyHelp() string {
 		return "rename tab: type new title  enter confirm  esc cancel"
 	}
 	if m.mode == modeTab {
-		return "mode: tab | alt+left/right tabs  shift+left/right move  1-9 jump  n new-tab  r rename-tab  esc|. exit"
+		return "mode: tab | alt+left/right tabs  shift+left/right move  1-9 jump  n new-tab  r rename-tab  v vert/horiz  esc|. exit"
 	}
 	if m.mode == modeWorkspace {
 		return "mode: workspace | ←/→ or h/l prev/next  1-9 jump  esc|. exit"

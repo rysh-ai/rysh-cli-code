@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package config
 
 // Tests for the per-provider key sourcing in applyEnvOverrides (design 002

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package board is the agents-board store (design 025): the in-memory model of
 // a threaded, push-based stream of what every agent in a session is doing.
 //
@@ -41,16 +43,20 @@ const MaxPosts = 5000
 // *msg.MsgBoardPost mutates what every other reader sees. Copying ~5000
 // messages on every render to prevent that would cost more than the discipline
 // does.
+// The json tags exist because a Thread now travels: the board's read path
+// (query.go) marshals it as the recorder's answer to `rysh board tail`. They
+// are lower-case and stable so `rysh board tail --json` is a contract a script
+// can be written against, not a rendering of Go field names.
 type Thread struct {
 	// Key addresses the thread. For a normal thread it is the poster-minted
 	// "<pane-uuid>/<n>" that replies carry. For a standalone post (one that
 	// arrived with no ThreadID and can therefore never be replied to) it is an
 	// internal key that no agent can mint — see standaloneKey.
-	Key string
+	Key string `json:"key"`
 
 	// Root is nil while the thread is Provisional.
-	Root    *msg.MsgBoardPost
-	Replies []*msg.MsgBoardPost
+	Root    *msg.MsgBoardPost   `json:"root"`
+	Replies []*msg.MsgBoardPost `json:"replies"`
 
 	// Provisional marks a thread whose replies arrived before their root.
 	// This is expected, not an error: thread ids are minted agent-side with no
@@ -58,7 +64,7 @@ type Thread struct {
 	// guaranteed. The view renders a provisional thread as a root; when the
 	// real root lands the thread stops being provisional and re-positions
 	// itself to where the ROOT's arrival puts it.
-	Provisional bool
+	Provisional bool `json:"provisional"`
 }
 
 // RosterEntry is one agent the board knows about, from MsgBoardRegister.
@@ -72,23 +78,23 @@ type Thread struct {
 // non-fleet claude, so nothing downstream can drift into treating a fleet
 // poster as more first-class than any other.
 type RosterEntry struct {
-	PaneID  string
-	Persona string
-	TS      int64
+	PaneID  string `json:"pane_id"`
+	Persona string `json:"persona"`
+	TS      int64  `json:"ts"`
 }
 
 // Stats are the counters a view needs to be honest with the human about what it
 // is not showing.
 type Stats struct {
-	Threads     int // total threads, provisional included
-	Provisional int // threads still missing their root
-	Posts       int // roots + replies currently held
-	Duplicates  uint64
-	Evicted     uint64
+	Threads     int    `json:"threads"`     // total threads, provisional included
+	Provisional int    `json:"provisional"` // threads still missing their root
+	Posts       int    `json:"posts"`       // roots + replies currently held
+	Duplicates  uint64 `json:"duplicates"`
+	Evicted     uint64 `json:"evicted"`
 	// UnknownVersion counts posts whose V is not BoardSchemaVersion. They are
 	// KEPT, not dropped — a board that discards a message because it was
 	// written by a newer agent is worse than one that renders it plainly.
-	UnknownVersion uint64
+	UnknownVersion uint64 `json:"unknown_version"`
 }
 
 // Store holds the board. It is safe for concurrent use: a Subscriber pump may
@@ -384,6 +390,20 @@ func standaloneKey(seq uint64) string {
 	// seq is already unique per store.
 	writeUint(&b, seq)
 	return b.String()
+}
+
+// IsStandaloneKey reports whether a thread key is one the store minted for a
+// post that arrived with no ThreadID — a root no agent can reply to, because
+// no agent can name it.
+//
+// Exported for the read path (query.go / `rysh board tail`). A renderer needs
+// this for two reasons, and the second is the real one: the key's first byte is
+// a NUL, which a terminal swallows, so printing it raw emits an invisible
+// control character; and the key is an ADDRESS a reader would reasonably try to
+// pass back to `board reply`, where it can never work. Showing it at all is the
+// mistake — this is what lets a renderer not show it.
+func IsStandaloneKey(key string) bool {
+	return len(key) > 0 && key[0] == 0
 }
 
 func writeUint(b *strings.Builder, n uint64) {

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tools
 
 // rysh_command (design 008, RA3) — run a rysh system command ("##" command)
@@ -185,7 +187,15 @@ func (t *RyshCommandTool) Execute(ctx context.Context, params json.RawMessage) (
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 
+	// A body carrying exactly ONE leading hash is a user command (design 032):
+	// it already names its vocabulary, and re-prefixing it would produce
+	// "###name", which resolves to neither. A body starting "##" is what is left
+	// of a "####" remote-control escape after normalizeRyshCommand took one pair
+	// off, and must get that pair back.
 	text := "##" + body
+	if strings.HasPrefix(body, "#") && !strings.HasPrefix(body, "##") {
+		text = body
+	}
 	data, err := json.Marshal(msg.NATSEnvelope{
 		TypeTag: msg.TagSubmitInput,
 		Payload: mustMarshalSubmitInput(text, paneID),
@@ -230,7 +240,11 @@ func (t *RyshCommandTool) Execute(ctx context.Context, params json.RawMessage) (
 // plain data, so marshalling cannot fail; errors are surfaced by the caller's
 // envelope marshal.
 func mustMarshalSubmitInput(text, paneID string) []byte {
-	b, _ := json.Marshal(&msg.MsgSubmitInput{Text: text, Mode: "shell", PaneID: paneID})
+	b, _ := json.Marshal(&msg.MsgSubmitInput{
+		Text: text, Mode: "shell", PaneID: paneID,
+		// An agent running a ## command is not a human typing in that pane.
+		Programmatic: true,
+	})
 	return b
 }
 

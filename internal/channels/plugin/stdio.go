@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package plugin
 
 // stdioTransport — newline-delimited JSON-RPC 2.0 over the plugin process's

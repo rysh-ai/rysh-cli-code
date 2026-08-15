@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package runtime
 
 // token.go implements the forged-API authentication/refresh layer (Phase A of

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package domain contains shared data types that are transport-agnostic.
 // Only snapshot types are kept here; command types have moved to internal/msg.
 package domain
@@ -71,6 +73,11 @@ type WorkspaceSnapshot struct {
 	// WorkspaceFarmActor. Used by the TUI to render the workspace switcher.
 	Workspaces      []string `json:"workspaces,omitempty"`
 	ActiveWorkspace int      `json:"active_workspace,omitempty"`
+	// TabBarVertical renders the tab bar as a column down the left edge of the
+	// body instead of a strip under the workspace row. Per-workspace, set by
+	// `##tab orientation` (or ctrl+t v) and persisted with the layout. Omitted
+	// when false so the horizontal default stays the zero value.
+	TabBarVertical bool `json:"tab_bar_vertical,omitempty"`
 	// SpendMicroUSD is today's session spend (design 003 §3.5), for the status
 	// bar. SpendWarn is true when any active pane ceiling is at ≥80% of its
 	// limit, so the TUI colours the figure yellow. Populated by the WorkspaceActor
@@ -83,8 +90,18 @@ type WorkspaceSnapshot struct {
 // TabSnapshot carries the state of a single tab.
 // Tabs now contain lanes (columns), not pane groups directly.
 type TabSnapshot struct {
-	ID              string         `json:"id"`
-	Title           string         `json:"title"`
+	ID    string `json:"id"`
+	Title string `json:"title"`
+
+	// Partial marks a tab whose real snapshot never arrived — the request timed
+	// out and this is a stub carrying nothing but the id and title (`F-11`).
+	//
+	// IT EXISTS BECAUSE A STUB AND AN EMPTY TAB ARE OTHERWISE THE SAME VALUE.
+	// A reader that cannot tell them apart reports "lane not found" for a lane
+	// that is sitting right there, which is how 22 fleets lost their fan-out
+	// while every operator hunted a selector bug. Anything that concludes
+	// ABSENCE from an empty Lanes slice must check this first.
+	Partial         bool           `json:"partial,omitempty"`
 	Lanes           []LaneSnapshot `json:"lanes"`
 	ActivePaneID    string         `json:"active_pane_id"`
 	PipelineOutput  string         `json:"pipeline_output,omitempty"`
@@ -125,17 +142,8 @@ func (ts TabSnapshot) FlatLanes() []LaneRenderInfo {
 			Name:   lane.Name,
 		}
 		for _, g := range lane.PaneGroups {
-			if len(g.Panes) == 0 {
-				continue
-			}
-			stackTotal := len(g.Panes)
-			for idx, p := range g.Panes {
-				flat := p
+			for _, flat := range drawnPanesInGroup(g) {
 				flat.LaneID = lane.ID
-				flat.RowFlex = g.RowFlex
-				flat.StackPosition = idx
-				flat.StackTotal = stackTotal
-				flat.StackCollapsed = p.ID != g.ActivePaneID // inactive panes are collapsed
 				lr.VisiblePanes = append(lr.VisiblePanes, flat)
 			}
 		}
@@ -154,23 +162,45 @@ func (ts TabSnapshot) FlatPanes() []PaneSnapshot {
 	var panes []PaneSnapshot
 	for _, lane := range ts.Lanes {
 		for _, g := range lane.PaneGroups {
-			if len(g.Panes) == 0 {
-				continue
-			}
-			stackTotal := len(g.Panes)
-			for idx, p := range g.Panes {
-				flat := p
+			for _, flat := range drawnPanesInGroup(g) {
 				flat.Flex = lane.Flex
 				flat.LaneID = lane.ID
-				flat.RowFlex = g.RowFlex
-				flat.StackPosition = idx
-				flat.StackTotal = stackTotal
-				flat.StackCollapsed = p.ID != g.ActivePaneID
 				panes = append(panes, flat)
 			}
 		}
 	}
 	return panes
+}
+
+// drawnPanesInGroup returns the panes of g that are DRAWN, in stable creation
+// order, with the stack fields already filled in.
+//
+// One implementation, called by both FlatLanes and FlatPanes deliberately. The
+// hidden rule and the stack numbering are the same rule, and keeping a rule in
+// two places is how F-18 happened (design 025 §8a): the two copies agreed until
+// one of them was handed different inputs.
+//
+// Hidden panes are dropped here and NOWHERE ELSE in this file, so the whole of
+// "what does the TUI draw" is this one predicate. They are also dropped from
+// StackTotal, because a stack that reports [1/2] while drawing one pane is
+// reporting a pane the human cannot reach. PanesInTab (navigate.go) is
+// deliberately NOT filtered — a hidden pane is off screen, not gone, and ANSA
+// must still be able to address it.
+func drawnPanesInGroup(g PaneGroupSnapshot) []PaneSnapshot {
+	var out []PaneSnapshot
+	for _, p := range g.Panes {
+		if p.Hidden {
+			continue
+		}
+		out = append(out, p)
+	}
+	for i := range out {
+		out[i].RowFlex = g.RowFlex
+		out[i].StackPosition = i
+		out[i].StackTotal = len(out)
+		out[i].StackCollapsed = out[i].ID != g.ActivePaneID // inactive panes are collapsed
+	}
+	return out
 }
 
 // PaneGroupSnapshot carries the state of a pane group (a stack of panes within a lane).
@@ -212,9 +242,9 @@ type PaneSnapshot struct {
 	PTYRows       int    `json:"pty_rows,omitempty"`
 	PTYCols       int    `json:"pty_cols,omitempty"`
 	SizeViewports int    `json:"size_viewports,omitempty"`
-	Output      string `json:"output"`
-	Status      string `json:"status"`
-	LastCommand string `json:"last_command"`
+	Output        string `json:"output"`
+	Status        string `json:"status"`
+	LastCommand   string `json:"last_command"`
 	// Program is the pane's live FOREGROUND executable ("claude", "vim", …),
 	// empty when the pane is at its shell prompt or where it cannot be resolved
 	// (see processName). It answers "which panes are running an agent?" as a
@@ -346,6 +376,24 @@ type PaneSnapshot struct {
 	// stale comment on the field being extended is how the next reader gets it
 	// wrong. Use the PaneType* constants rather than string literals.
 	PaneType string `json:"pane_type,omitempty"`
+
+	// Hidden takes a pane OFF SCREEN without taking it out of the session
+	// (design 027 §5.1). It is a rendering state, not a lifecycle state: the
+	// pane keeps its PTY, its program keeps running, and it stays fully
+	// addressable — ANSA reaches it, `##pane` commands act on it, and it is
+	// still in the roster. What changes is that FlatLanes/FlatPanes stop
+	// emitting it, and the pane group skips it when cycling focus.
+	//
+	// This is deliberately NOT the stack's collapsed state. StackCollapsed
+	// below means "drawn as a one-line title row"; a collapsed pane is still on
+	// screen. Before this field there was no way to have a live pane that is
+	// not drawn at all, and the only off-screen-but-alive state was a
+	// non-active TAB — rejected for the board claude because revealing it would
+	// then mean switching the human's tab.
+	//
+	// Persisted, so a hidden pane comes back hidden rather than reappearing
+	// after a daemon restart.
+	Hidden bool `json:"hidden,omitempty"`
 
 	// ShellPID is the OS process id of the pane's shell process. The TUI uses it
 	// to resolve the shell's live working directory for tab-completion (so paths

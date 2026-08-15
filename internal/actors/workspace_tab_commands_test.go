@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -38,6 +40,7 @@ func TestTabCommand_UnknownSubcommand(t *testing.T) {
 		"##tab model",
 		"##tab delete",
 		"##tab pipeline enable|disable",
+		"##tab orientation [horizontal|vertical|toggle]",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help missing %q:\n%s", want, out)

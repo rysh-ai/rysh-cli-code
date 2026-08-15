@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package mcp implements a Model Context Protocol (MCP) client for the rysh CLI.
 //
 // It lets rysh agents/humanoids consume tools exposed by external MCP servers

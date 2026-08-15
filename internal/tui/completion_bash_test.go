@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 // Phase 4 (bash-shell-mode): bash programmable-completion sidecar tests.

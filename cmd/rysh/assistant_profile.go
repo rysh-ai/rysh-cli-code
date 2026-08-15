@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // assistant_profile.go — the `assistant` profile scaffold (design 007 PM1),

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package llms
 
 // The seed registry is inherited by EVERY new session, so a wrong entry is not

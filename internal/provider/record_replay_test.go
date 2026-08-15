@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package provider
 
 // Hermetic tests for record/replay determinism (design 009 §3.2): a scripted

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // Command-level tests for `##pane model`, in the workspace_pane_provider_test.go

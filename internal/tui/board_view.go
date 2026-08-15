@@ -1,10 +1,16 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/nats-io/nats.go"
 
@@ -38,8 +44,11 @@ import (
 
 // boardViewState is the per-pane view state.
 //
-// The BOARD ITSELF is session-wide and lives on Model.board — two agents-board
-// panes show the same stream, and each keeps only its own scroll position.
+// THE BOARD ITSELF lives on Model.boards, keyed by board id (design 028): two
+// agents-board panes on the SAME board share one stream and keep only their own
+// scroll position, while panes on different boards read different streams. A
+// pane names its board through `board.id` meta; a pane without it reads the
+// session board.
 type boardViewState struct {
 	// scrollOffset is how many rendered rows the view is scrolled UP from the
 	// newest post. 0 means pinned to the live tail, which is the default and
@@ -53,6 +62,19 @@ type boardViewState struct {
 	// solves the same problem.
 	lastRows    int
 	lastVisible int
+
+	// composing is true while the human is typing a prompt for the board
+	// claude rather than navigating the stream. See updateBoardPaneInput for
+	// why this is a sub-mode instead of an always-focused field.
+	composing bool
+
+	// sendStatus is the last thing the board claude's router said, rendered
+	// under the input field. It holds a REFUSAL as readily as a success,
+	// because a prompt that went nowhere has to look different from one that
+	// landed — the receipt-without-delivery failure this whole track is built
+	// around (design 027 §5.4).
+	sendStatus string
+	sendOK     bool
 }
 
 // boardEventMsg carries one decoded board message from the subscription
@@ -82,32 +104,91 @@ type boardEventMsg struct{ ev board.Event }
 // It still returns a usable Store in every failure path: agents-board is a
 // monitoring view, and a monitoring view that takes the session down with it is
 // worse than no view.
-func setupBoardSubscriptions(b *bus.Bus) (*board.Store, <-chan board.Event, *board.Subscriber) {
-	store := board.New(0)
+// It returns the SESSION board pre-restored plus the kv handle every other
+// board restores from lazily (boardStore): a board a fleet opens mid-session
+// cannot be known here, and one subscription hears them all.
+func setupBoardSubscriptions(b *bus.Bus) (map[string]*board.Store, board.KV, <-chan board.Event, *board.Subscriber) {
+	stores := map[string]*board.Store{msgpkg.DefaultBoardID: board.New(0)}
 
 	// A never-delivering channel, so listenBoardEventCmd parks instead of
 	// receiving from nil (which is the same park, but reads like a bug).
 	dead := make(chan board.Event)
 
 	if b == nil || b.Conn() == nil {
-		return store, dead, nil
+		return stores, nil, dead, nil
 	}
 
-	// Read-only restore. board.NewPersistence(nil) is a no-op Persistence, so a
-	// session without JetStream gets an empty history rather than a refusal to
-	// start. Restore before subscribing: history first, then the live tail —
-	// the other order interleaves restored posts among live ones and puts
-	// yesterday's milestones in the middle of today's stream.
-	persist := board.NewPersistence(b.BoardKV())
-	_, _, _ = persist.Restore(store)
+	kv := b.BoardKV()
 
-	// nil persister: ABLA writes, this view does not.
+	// Read-only restore. board.NewPersistence(nil, …) is a no-op Persistence,
+	// so a session without JetStream gets an empty history rather than a
+	// refusal to start. Restore before subscribing: history first, then the
+	// live tail — the other order interleaves restored posts among live ones
+	// and puts yesterday's milestones in the middle of today's stream.
+	_, _, _ = board.NewPersistence(kv, msgpkg.DefaultBoardID).Restore(stores[msgpkg.DefaultBoardID])
+
+	// nil persister: ABLA writes, this view does not — for EVERY board, not
+	// just this one. A read-only view that grew a writer for "just the new
+	// boards" would be the same defect with a smaller blast radius.
 	sub, err := board.Subscribe(b.Conn(), b.Codecs(), board.DefaultBufferSize, nil)
 	if err != nil {
-		return store, dead, nil
+		return stores, kv, dead, nil
 	}
-	return store, sub.Events(), sub
+	return stores, kv, sub.Events(), sub
 }
+
+// boardStore returns this TUI's read-only copy of one board, restoring its
+// history from the KV the first time the board is seen.
+//
+// The value receiver mutates the Model's maps through the copy, exactly as
+// boardViewFor does. A board first seen here — because a pane was opened on it,
+// or because a post arrived for it — gets yesterday's history before today's
+// tail, which is the same ordering rule ABLA applies on the writing side.
+func (m Model) boardStore(boardID string) *board.Store {
+	id := msgpkg.NormalizeBoardID(boardID)
+	if m.boards == nil {
+		return board.New(0)
+	}
+	if s := m.boards[id]; s != nil {
+		return s
+	}
+	s := board.New(0)
+	m.boards[id] = s
+	// Read-only restore, nil persister — see setupBoardSubscriptions.
+	_, _, _ = board.NewPersistence(m.boardKV, id).Restore(s)
+	return s
+}
+
+// boardIDForPane reads which board a pane renders or posts to, from its
+// `board.id` meta. Panes without it are on the session board, which is what
+// keeps every pre-028 pane working unchanged.
+//
+// The RULE is msgpkg.BoardIDFromMeta and is deliberately not restated here:
+// the web server answers the app's board_get through the same predicate, and
+// two copies that disagreed would show two different boards for one pane.
+// Finding the pane is this method's own job; deciding what its meta means is
+// not.
+func (m Model) boardIDForPane(paneID string) string {
+	for _, tab := range m.snapshot.Tabs {
+		for _, lane := range tab.Lanes {
+			for _, g := range lane.PaneGroups {
+				for i := range g.Panes {
+					if g.Panes[i].ID != paneID {
+						continue
+					}
+					return msgpkg.BoardIDFromMeta(g.Panes[i].Meta[boardIDMetaKey])
+				}
+			}
+		}
+	}
+	return msgpkg.DefaultBoardID
+}
+
+// boardIDMetaKey is the pane meta the workspace writes when a board pane is
+// born (actors.paneMetaBoardID). Duplicated as a constant rather than imported
+// because internal/tui must not depend on internal/actors; the pairing is
+// pinned by a test.
+const boardIDMetaKey = "board.id"
 
 // boardNATSConn hands the view the connection it asks liveness on. Nil when
 // there is no bus, which renders as UNKNOWN rather than as either answer.
@@ -135,6 +216,12 @@ const (
 // on a timer and never on the render path.
 const recorderAliveTimeout = 400 * time.Millisecond
 
+// boardPromptTimeout bounds one prompt to the board claude. Longer than the
+// liveness question because it involves a real route (a probe plus a delivery),
+// and short enough that a wedged board claude shows as one rather than hanging
+// the field the human is typing into.
+const boardPromptTimeout = 5 * time.Second
+
 // boardRecorderMsg carries a liveness answer back into Update.
 type boardRecorderMsg struct{ state RecorderState }
 
@@ -154,7 +241,10 @@ func (m Model) askRecorderCmd() tea.Cmd {
 		if nc == nil {
 			return boardRecorderMsg{state: RecorderUnknown}
 		}
-		if _, err := nc.Request(msgpkg.BoardAliveSubject(), nil, recorderAliveTimeout); err != nil {
+		// The SESSION board's subject: one recorder answers for every board in
+		// the session (internal/actors/abla.go), so this question has one
+		// answer and asking it per board would only multiply the round trips.
+		if _, err := nc.Request(msgpkg.BoardAliveSubject(msgpkg.DefaultBoardID), nil, recorderAliveTimeout); err != nil {
 			return boardRecorderMsg{state: RecorderStale}
 		}
 		return boardRecorderMsg{state: RecorderLive}
@@ -194,12 +284,13 @@ func (m Model) listenBoardEventCmd() tea.Cmd {
 	return func() tea.Msg { return boardEventMsg{ev: <-ch} }
 }
 
-// applyBoardEvent files one event into the session store.
+// applyBoardEvent files one event into the store for the board it was
+// delivered to. The board comes off the subject, never the payload.
 func (m *Model) applyBoardEvent(ev board.Event) {
-	if m.board == nil {
+	if m.boards == nil {
 		return
 	}
-	m.board.ApplyEvent(ev)
+	m.boardStore(ev.Board).ApplyEvent(ev)
 }
 
 // boardViewFor returns (creating if needed) the view state for a pane.
@@ -237,7 +328,58 @@ func (m *Model) updateBoardPaneInput(msg tea.KeyMsg) (bool, tea.Cmd) {
 	st := m.boardViewFor(snap.ID)
 	page := max(1, st.lastVisible-1)
 
+	// COMPOSING is an explicit sub-mode, and it has to be, for a reason worth
+	// stating because the obvious design fails: the board's input field cannot
+	// simply claim every printable key.
+	//
+	// `[` and `]` switch tabs from anywhere in this TUI, and j/k/g/G scroll the
+	// board — TestBoardUserIsNeverTrapped and TestBoardScrollClampsToTheStream
+	// pin both, and both are correct. A field that always had focus would eat
+	// `[`, and the user would be trapped in a pane whose whole purpose is to
+	// watch other panes. So typing is entered deliberately (i, or enter) and
+	// left with esc, and the multiplexer chords keep working throughout.
+	//
+	// The cost is one keystroke before typing, which is the honest trade and is
+	// documented in boardKeyHelp rather than left to be discovered.
+	if st.composing {
+		switch msg.String() {
+		case "esc":
+			st.composing = false
+			return true, nil
+		case "enter":
+			st.composing = false
+			return true, m.submitBoardPrompt(snap.ID)
+		}
+		// Chords are never typing: they are how the user leaves. Anything with
+		// alt or ctrl falls through to the global handler exactly as it does
+		// when the board is not composing.
+		if msg.Alt || isControlKey(msg) {
+			return false, nil
+		}
+		in, ok := m.inputs[snap.ID]
+		if !ok {
+			if m.inputs == nil {
+				m.inputs = make(map[string]textinput.Model)
+			}
+			in = textinput.New()
+			in.CharLimit = 4000
+			in.Prompt = ""
+		}
+		// A textinput silently ignores every key while blurred, so without
+		// this the field renders, accepts nothing, and looks like a hung
+		// terminal. Focus is set here rather than at the moment composing
+		// starts so it cannot drift out of step with the branch that types.
+		in.Focus()
+		updated, cmd := in.Update(msg)
+		m.inputs[snap.ID] = updated
+		return true, cmd
+	}
+
 	switch msg.String() {
+	case "i", "enter":
+		// Start composing a prompt for the board claude.
+		st.composing = true
+		return true, nil
 	case "up", "k":
 		st.scrollOffset = clampBoardScroll(st.scrollOffset+1, st)
 		return true, nil
@@ -256,13 +398,78 @@ func (m *Model) updateBoardPaneInput(msg tea.KeyMsg) (bool, tea.Cmd) {
 	case "end", "G":
 		st.scrollOffset = 0
 		return true, nil
-	case "enter":
-		// Swallowed for replay_pane.go's reason: an agents-board pane is
-		// shell-less by construction, so letting enter through would print a
-		// "shell is not available" error into a read-only view.
-		return true, nil
 	}
 	return false, nil
+}
+
+// isControlKey reports whether k is a chord rather than a character. Used to
+// let the multiplexer's own bindings through while the board is composing, so
+// the input field can never trap the user.
+func isControlKey(k tea.KeyMsg) bool {
+	return k.Type != tea.KeyRunes && k.Type != tea.KeySpace &&
+		k.Type != tea.KeyBackspace && k.Type != tea.KeyDelete &&
+		k.Type != tea.KeyLeft && k.Type != tea.KeyRight &&
+		k.Type != tea.KeyHome && k.Type != tea.KeyEnd
+}
+
+// submitBoardPrompt sends the typed line to the board claude and clears the
+// field.
+//
+// It clears ONLY after the router has been asked, and it renders whatever the
+// router said — including a refusal. An input field that empties itself on
+// enter regardless of what happened is the exact shape of the defect this track
+// keeps finding: the human sees the line disappear and reads that as delivery.
+func (m *Model) submitBoardPrompt(paneID string) tea.Cmd {
+	in, ok := m.inputs[paneID]
+	if !ok {
+		return nil
+	}
+	text := strings.TrimSpace(in.Value())
+	if text == "" {
+		return nil
+	}
+	in.SetValue("")
+	m.inputs[paneID] = in
+
+	st := m.boardViewFor(paneID)
+	st.sendStatus = "sending…"
+	st.sendOK = false
+
+	pub, inbox := m.pub, m.workspaceInbox
+	// The prompt names the board it was typed into, so a line meant for fleet
+	// epic-07 cannot be acted on by epic-08's mind (design 028, `D-13`).
+	boardID := m.boardIDForPane(paneID)
+	return func() tea.Msg {
+		reply, err := pub.Request(inbox,
+			&msgpkg.MsgBoardAgentPrompt{Text: text, Board: boardID}, boardPromptTimeout)
+		if err != nil {
+			// A timeout is not a delivery. Say which it was: "the board claude
+			// is not answering" is actionable, "failed" is not.
+			return boardPromptResultMsg{paneID: paneID, ok: false,
+				detail: fmt.Sprintf("board claude not answering: %v — reach an agent directly with ##ansa send <pane-id> -- <text>", err)}
+		}
+		resp, ok := reply.(*msgpkg.MsgCLIResponse)
+		if !ok {
+			return boardPromptResultMsg{paneID: paneID, ok: false, detail: "unexpected reply from the workspace"}
+		}
+		if !resp.OK {
+			return boardPromptResultMsg{paneID: paneID, ok: false, detail: resp.Error}
+		}
+		return boardPromptResultMsg{paneID: paneID, ok: true, detail: strings.TrimSpace(resp.Output)}
+	}
+}
+
+// boardPromptResultMsg carries the router's verdict back into Update.
+type boardPromptResultMsg struct {
+	paneID string
+	ok     bool
+	detail string
+}
+
+func (m *Model) applyBoardPromptResult(r boardPromptResultMsg) {
+	st := m.boardViewFor(r.paneID)
+	st.sendOK = r.ok
+	st.sendStatus = r.detail
 }
 
 func maxBoardScroll(rows, visible int) int {
@@ -288,16 +495,20 @@ func clampBoardScroll(want int, st *boardViewState) int {
 func (m Model) buildBoardPanel(pane domain.PaneSnapshot, paneWidth, height int) string {
 	// Seed before rendering: the roster must reflect the panes that exist now,
 	// not only those that announced while this board happened to be attached.
+	boardID := m.boardIDForPane(pane.ID)
 	m.seedRosterFromSnapshot()
 
 	contentWidth := max(8, paneWidth-4)
-	maxLines := height - 1 // the header line is the only overhead
+	// The header, the input field, and the status line under it. The status
+	// line is not optional chrome: it is where a refusal appears, and a refusal
+	// with nowhere to render is a dropped message that looks like a sent one.
+	maxLines := height - 3
 	if maxLines < 0 {
 		maxLines = 0
 	}
 
 	st := m.boardViewFor(pane.ID)
-	rows := m.boardRows(contentWidth)
+	rows := m.boardRows(boardID, contentWidth)
 
 	// Record what this frame measured so the key handler can clamp, and clamp
 	// the current offset against it: the board grows under the user, and an
@@ -314,9 +525,46 @@ func (m Model) buildBoardPanel(pane domain.PaneSnapshot, paneWidth, height int) 
 	for len(out) < maxLines {
 		out = append(out, "")
 	}
-	return fmt.Sprintf("%s\n%s",
-		metaStyle.Render(truncBoardLine(m.boardHeaderText(st), contentWidth)),
-		strings.Join(out, "\n"))
+	return fmt.Sprintf("%s\n%s\n%s\n%s",
+		metaStyle.Render(truncBoardLine(m.boardHeaderText(boardID, st), contentWidth)),
+		strings.Join(out, "\n"),
+		truncBoardLine(m.boardInputLine(pane.ID), contentWidth),
+		metaStyle.Render(truncBoardLine(m.boardStatusLine(st), contentWidth)))
+}
+
+// boardInputLine renders the prompt field (design 027 §5.2).
+//
+// Every line typed here goes to the board claude — there is no verbatim `@tag`
+// bypass, by founder ruling. The field is the pane's own textinput, which
+// syncPaneInputs has been allocating for every pane all along; this view simply
+// never drew it before.
+func (m Model) boardInputLine(paneID string) string {
+	st := m.boardViewFor(paneID)
+	if !st.composing {
+		return "  (press i to write to the board claude)"
+	}
+	in, ok := m.inputs[paneID]
+	if !ok {
+		return "> "
+	}
+	return "> " + in.Value()
+}
+
+// boardStatusLine says what happened to the last prompt, and how to get past
+// the board claude when it is the thing that is broken.
+//
+// The bypass is named here rather than documented elsewhere because this is the
+// moment a human needs it: `##ansa send` reaches an agent without going through
+// the board claude at all, so a wedged mind in the loop is an inconvenience
+// rather than a severed control channel (design 027 §5.4).
+func (m Model) boardStatusLine(st *boardViewState) string {
+	if st.sendStatus == "" {
+		return "enter sends to the board claude · ##ansa send <pane-id> -- <text> reaches an agent directly"
+	}
+	if st.sendOK {
+		return st.sendStatus
+	}
+	return "REFUSED/FAILED: " + st.sendStatus
 }
 
 // boardHeaderText states what the board is NOT showing as well as what it is.
@@ -325,14 +573,19 @@ func (m Model) buildBoardPanel(pane domain.PaneSnapshot, paneWidth, height int) 
 // one is a defect: a burst can drop posts at the subscriber (§7.2) and the cap
 // evicts old threads (§7.1a). Both are counted rather than hidden, so the board
 // says "N dropped" instead of silently lying about being complete.
-func (m Model) boardHeaderText(st *boardViewState) string {
-	if m.board == nil {
+//
+// It NAMES THE BOARD since 028. A board is no longer the only one in the
+// session, and an unlabelled stream is a screenshot nobody can act on — worse,
+// two boards side by side would be indistinguishable.
+func (m Model) boardHeaderText(boardID string, st *boardViewState) string {
+	if m.boards == nil {
 		return "AGENTS-BOARD | no feed on this session"
 	}
-	s := m.board.Stats()
-	parts := []string{fmt.Sprintf("AGENTS-BOARD | %s · %s",
-		plural(s.Threads, "thread"), plural(s.Posts, "post"))}
-	if n := len(m.board.Roster()); n > 0 {
+	store := m.boardStore(boardID)
+	s := store.Stats()
+	parts := []string{fmt.Sprintf("AGENTS-BOARD %s | %s · %s",
+		msgpkg.NormalizeBoardID(boardID), plural(s.Threads, "thread"), plural(s.Posts, "post"))}
+	if n := len(store.Roster()); n > 0 {
 		parts = append(parts, plural(n, "agent"))
 	}
 	if s.Provisional > 0 {
@@ -342,7 +595,9 @@ func (m Model) boardHeaderText(st *boardViewState) string {
 		parts = append(parts, fmt.Sprintf("%d evicted", s.Evicted))
 	}
 	if m.boardSub != nil {
-		if d := m.boardSub.Dropped(); d > 0 {
+		// This board's drops, not the session's: a count from another fleet's
+		// burst rendered here would be a claim about this fleet that is false.
+		if d := m.boardSub.DroppedFor(boardID); d > 0 {
 			parts = append(parts, fmt.Sprintf("%d DROPPED", d))
 		}
 	}
@@ -355,7 +610,7 @@ func (m Model) boardHeaderText(st *boardViewState) string {
 // boardKeyHelp is the footer for a focused agents-board pane, in the shape
 // model_view.go:keyHelp uses per mode.
 func (m Model) boardKeyHelp() string {
-	return "pane: agents-board (read-only) | j/k ↑/↓ scroll  pgup/pgdn page  g top  G/end live  " +
+	return "pane: agents-board | i write to the board claude (enter sends, esc cancels)  j/k ↑/↓ scroll  pgup/pgdn page  g top  G/end live  " +
 		"[/] tabs  ctrl+space navigate  ctrl+p pane-mgmt  ctrl+o prefix"
 }
 
@@ -368,6 +623,43 @@ const (
 	boardReplyIndent = 4
 )
 
+// boardHintBinary names THIS binary in the empty-board hint, rather than the
+// literal "rysh" it was hardcoded to until 2026-08-14.
+//
+// There is no `rysh` on every machine that runs rysh. The installed name here
+// is `rysh_local`; `make build` emits `rysh_local`, README promises `./rysh`,
+// and the root Makefile echoes `ry` — three names in one install path, kept in
+// two repositories so no single diff ever showed them disagreeing (design 025
+// §8d). This hint is read by an agent whose post just failed, so it is the one
+// place a wrong name costs the most: it is the instruction someone follows when
+// they are already lost. Two claudes did exactly that in an isolated session,
+// got `bash: rysh: command not found` (exit 127), and left the board empty
+// while ABLA, ANSA, the store and this view were all working.
+//
+// PROVE THE SHORT NAME BEFORE CLAIMING IT. LookPath is what makes `rysh_local`
+// a fact rather than a guess; without it this would just be a differently
+// wrong name on a machine where the binary is not on PATH. Only when the base
+// name does not resolve does the hint fall back to the absolute path — long,
+// and correct from any cwd, which is what an agent in a worktree needs.
+func boardHintBinary() string {
+	self, err := os.Executable()
+	if err != nil || strings.TrimSpace(self) == "" {
+		// Nothing verifiable to offer. The old literal is at least the name the
+		// docs use, so a reader has something to search for.
+		return "rysh"
+	}
+	base := filepath.Base(self)
+	if resolved, err := exec.LookPath(base); err == nil {
+		// Same name, same file — not merely something else answering to it.
+		if a, err1 := filepath.EvalSymlinks(resolved); err1 == nil {
+			if b, err2 := filepath.EvalSymlinks(self); err2 == nil && a == b {
+				return base
+			}
+		}
+	}
+	return self
+}
+
 // boardRows renders every thread to plain rows, newest thread last.
 //
 // The rows carry NO styling on purpose. Two reasons, and the second is the real
@@ -376,11 +668,11 @@ const (
 // the content is agent-supplied text, and the moment a renderer emits escapes
 // of its own it becomes much harder to be sure an agent's escapes are not
 // getting through with them. See sanitiseBoardText.
-func (m Model) boardRows(width int) []string {
-	if m.board == nil {
+func (m Model) boardRows(boardID string, width int) []string {
+	if m.boards == nil {
 		return []string{"", "  No board feed on this session.", ""}
 	}
-	threads := m.board.Threads()
+	threads := m.boardStore(boardID).Threads()
 	if len(threads) == 0 {
 		// "Nothing posted yet" is only sayable when the recorder is known live.
 		// Otherwise the honest answer is that we do not know, and saying so is
@@ -388,10 +680,12 @@ func (m Model) boardRows(width int) []string {
 		if notice := m.recorderNotice(); notice != "" {
 			return []string{"", notice, "  An empty board here does NOT mean nobody posted.", ""}
 		}
+		bin := boardHintBinary()
 		return []string{
 			"",
 			"  Nothing posted yet.",
-			"  Agents post with `rysh board post <text>` and reply with `rysh board reply <thread> <text>`.",
+			fmt.Sprintf("  Agents post with `%s board post <text>` and reply with `%s board reply <thread> <text>`.",
+				bin, bin),
 			"",
 		}
 	}
@@ -629,12 +923,15 @@ func plural(n int, noun string) string {
 //
 // Idempotent by construction — Store.Register keys on pane id and last
 // announcement wins, so re-seeding replaces rather than duplicates.
+// PER BOARD since 028: a pane is seeded into the roster of ITS board, and each
+// board is reconciled against its OWN panes. Seeding every board from every
+// pane would give each fleet a roster of the whole session.
 func (m Model) seedRosterFromSnapshot() {
-	if m.board == nil {
+	if m.boards == nil {
 		return
 	}
 	now := time.Now().UnixMilli()
-	live := map[string]bool{}
+	live := map[string]map[string]bool{}
 	for _, tab := range m.snapshot.Tabs {
 		for _, lane := range tab.Lanes {
 			for _, g := range lane.PaneGroups {
@@ -643,8 +940,12 @@ func (m Model) seedRosterFromSnapshot() {
 					if !domain.PaneCanHostAnAgent(p.PaneType) {
 						continue
 					}
-					live[p.ID] = true
-					m.board.Register(&msgpkg.MsgBoardRegister{
+					id := m.boardIDForPane(p.ID)
+					if live[id] == nil {
+						live[id] = map[string]bool{}
+					}
+					live[id][p.ID] = true
+					m.boardStore(id).Register(&msgpkg.MsgBoardRegister{
 						V:      msgpkg.BoardSchemaVersion,
 						PaneID: p.ID,
 						// Same persona rule as every other surface.
@@ -659,7 +960,13 @@ func (m Model) seedRosterFromSnapshot() {
 	// seeding alone would only ever ADD. Without this the roster accumulates
 	// ghosts — observed live as "3 agents" in a two-agent session, the third a
 	// pane id from an earlier run.
-	m.board.RetainRoster(live)
+	// Only boards that HAVE live panes are reconciled. RetainRoster treats an
+	// empty set as "caller does not know" and retains everything, so a board
+	// whose panes have all closed keeps its roster rather than being wiped by a
+	// map entry that was never populated.
+	for id, ids := range live {
+		m.boardStore(id).RetainRoster(ids)
+	}
 }
 
 // recorderAskInterval is how often the view re-asks whether the recorder is

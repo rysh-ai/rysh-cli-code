@@ -1,7 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -34,18 +37,63 @@ type fakeAnsaTransport struct {
 
 	probeErr   error
 	deliverErr error
+	// program is what Probe reports as the target's foreground executable.
+	// "" = a bare rysh pane; "claude" = a pane a program owns (F-25).
+	program string
 
 	// delivered records every message that actually reached a pane inbox. Its
 	// LENGTH is the assertion that matters: a refusal that still delivered is
 	// worse than one that did not refuse.
 	delivered []ansaDelivery
 	probed    []string
+
+	// interrupted records every pane that was sent the interrupt gesture. Its
+	// LENGTH and CONTENTS are the assertion for W1-3: a pane that should have
+	// been spared and was not is the defect, and it is invisible in a return
+	// value.
+	interrupted []string
+
+	// screens is what Screen() returns, one entry per call, then the last entry
+	// repeats. A queue draining is a SEQUENCE of screens, so a single canned
+	// value could not express the case this exists to test.
+	screens    [][]string
+	screenCall int
+	screenErr  error
+	// killed records every Kill on the wire; killSurvives fakes a group that
+	// ignores SIGTERM (dies only on hard); killErr fakes a transport failure.
+	killed        []string
+	killSurvives  bool
+	killErr       error
+	probeErrAfter int
+	// screenFailFirst makes the first N Screen calls fail, then succeed. A
+	// permanent error cannot express the case that matters: a TRANSIENT read
+	// failure during a loaded session.
+	screenFailFirst int
+	interruptErr    error
+
+	// The native agent's state — what Probe cannot see. turnInFlight is "this
+	// pane's rysh agent is mid-turn"; turnPaused is "it has a checkpoint to
+	// continue from". turnSurvives fakes a prompt queued behind the cancelled
+	// run, which starts on its own and is the native shape of F-41.
+	turnInFlight       bool
+	turnPaused         bool
+	turnSurvives       bool
+	turnStatusErr      error
+	turnStatusErrAfter int
+	turnStatusCalls    int
+	cancelErr          error
+	continueErr        error
+	cancelled          []string
+	continued          []string
+	armed              []string
+	armErr             error
 }
 
 type ansaDelivery struct {
-	PaneID string
-	Mode   string
-	Text   string
+	PaneID  string
+	Mode    string
+	Text    string
+	Program string
 }
 
 func (f *fakeAnsaTransport) Panes() ([]ansaPane, error) {
@@ -55,21 +103,45 @@ func (f *fakeAnsaTransport) Panes() ([]ansaPane, error) {
 	return f.panes, nil
 }
 
-func (f *fakeAnsaTransport) Probe(paneID string) error {
+func (f *fakeAnsaTransport) Probe(paneID string) (string, error) {
 	f.mu.Lock()
 	f.probed = append(f.probed, paneID)
+	prog := f.program
+	// probeErrAfter fails probes only from the Nth call on — a transport that
+	// answers the pre-kill probe and then goes unreachable, which is the case
+	// that must NOT read as dead.
+	err := f.probeErr
+	if f.probeErrAfter > 0 && len(f.probed) > f.probeErrAfter {
+		err = errors.New("nats: timeout")
+	}
 	f.mu.Unlock()
-	return f.probeErr
+	return prog, err
 }
 
-func (f *fakeAnsaTransport) Deliver(paneID, mode, text string) error {
+func (f *fakeAnsaTransport) Deliver(paneID, mode, text, program string) error {
 	if f.deliverErr != nil {
 		return f.deliverErr
 	}
 	f.mu.Lock()
-	f.delivered = append(f.delivered, ansaDelivery{PaneID: paneID, Mode: mode, Text: text})
+	f.delivered = append(f.delivered, ansaDelivery{PaneID: paneID, Mode: mode, Text: text, Program: program})
 	f.mu.Unlock()
 	return nil
+}
+
+func (f *fakeAnsaTransport) Interrupt(paneID string) error {
+	if f.interruptErr != nil {
+		return f.interruptErr
+	}
+	f.mu.Lock()
+	f.interrupted = append(f.interrupted, paneID)
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeAnsaTransport) interruptedPanes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.interrupted...)
 }
 
 func (f *fakeAnsaTransport) sent() []ansaDelivery {
@@ -399,4 +471,113 @@ func TestAnsaPersonaGuardsTheApprovalPaneOverload(t *testing.T) {
 	} else if got != "pane-abcdef01" {
 		t.Errorf("persona = %q, want the pane-<8> fallback", got)
 	}
+}
+
+// Kill records the signal and, by default, makes the NEXT Probe report the
+// program gone — a fake of a process group that dies on SIGTERM. Set
+// killSurvives to fake a group that ignores SIGTERM until the SIGKILL.
+func (f *fakeAnsaTransport) Kill(paneID string, hard bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.killed = append(f.killed, fmt.Sprintf("%s hard=%v", paneID, hard))
+	if f.killErr != nil {
+		return f.killErr
+	}
+	if !f.killSurvives || hard {
+		f.program = ""
+	}
+	return nil
+}
+
+// The native trio. turnInFlight/turnPaused model rysh's own agent — the state
+// Probe cannot see. turnSurvives fakes the one wake this verb must catch: a
+// prompt that was QUEUED behind the cancelled run and starts on its own.
+func (f *fakeAnsaTransport) TurnStatus(paneID string) (bool, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.turnStatusCalls++
+	// turnStatusErrAfter fails reads only from the Nth on — an executor that
+	// answers the pre-cancel question and then goes unreachable, which is the
+	// case that must NOT read as stopped.
+	if f.turnStatusErr != nil || (f.turnStatusErrAfter > 0 && f.turnStatusCalls > f.turnStatusErrAfter) {
+		err := f.turnStatusErr
+		if err == nil {
+			err = errors.New("nats: timeout")
+		}
+		return false, false, err
+	}
+	return f.turnInFlight, f.turnPaused, nil
+}
+
+func (f *fakeAnsaTransport) CancelTurn(paneID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cancelled = append(f.cancelled, paneID)
+	if f.cancelErr != nil {
+		return f.cancelErr
+	}
+	if !f.turnSurvives {
+		f.turnInFlight, f.turnPaused = false, true
+	}
+	return nil
+}
+
+func (f *fakeAnsaTransport) ContinueTurn(paneID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.continued = append(f.continued, paneID)
+	if f.continueErr != nil {
+		return f.continueErr
+	}
+	f.turnInFlight, f.turnPaused = true, false
+	return nil
+}
+
+func (f *fakeAnsaTransport) ArmAutoApprove(paneID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.armed = append(f.armed, paneID)
+	return f.armErr
+}
+
+func (f *fakeAnsaTransport) armedPanes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.armed...)
+}
+
+func (f *fakeAnsaTransport) cancelledPanes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.cancelled...)
+}
+
+func (f *fakeAnsaTransport) continuedPanes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.continued...)
+}
+
+// Screen serves the next scripted frame, repeating the last one forever. A
+// nil script means "nothing on screen", i.e. a quiet pane.
+func (f *fakeAnsaTransport) Screen(paneID string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.screenFailFirst > 0 {
+		f.screenFailFirst--
+		f.screenCall++
+		return nil, errors.New("nats: timeout")
+	}
+	if f.screenErr != nil {
+		return nil, f.screenErr
+	}
+	if len(f.screens) == 0 {
+		return nil, nil
+	}
+	i := f.screenCall
+	if i >= len(f.screens) {
+		i = len(f.screens) - 1
+	}
+	f.screenCall++
+	return f.screens[i], nil
 }

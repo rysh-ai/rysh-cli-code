@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package config
 
 import (
@@ -333,7 +335,13 @@ type Config struct {
 	// channels that declare neither an allowlist nor a pairing_policy:
 	// "open" (default, pre-WS3 behaviour) or "closed" (design 003 G5).
 	PairingDefault string
-	DefaultShell   string
+	// AgentAutoresume brings back the agents `##claude` / `##codex` started,
+	// after a session stop/start has rebuilt the layout from KV (design 029).
+	// Only panes rysh launched an agent in are touched — a claude the user
+	// typed at their own shell stays theirs. Defaults to true; config
+	// `[rysh] agent_autoresume` or RYSH_AGENT_AUTORESUME.
+	AgentAutoresume bool
+	DefaultShell    string
 	// InteractiveShell, when true, launches each pane's shell with the
 	// interactive flag (e.g. `bash -i`) so it sources the user's rc files
 	// (~/.bashrc, ~/.zshrc) and uses the user's real prompt (PS1). rysh then
@@ -425,9 +433,34 @@ type Config struct {
 	LogLevel          string // "off", "debug", "info", "warn", "error" (default: "off" — logging disabled)
 	PrivateBufferSize int    // max bytes for ##private pane output buffer (per pane)
 	PublicBufferSize  int    // max bytes for ##public pane output buffer (per pane)
-	WebPort           int    // web UI server port (default 23232)
-	WebHost           string // web UI bind IP (default "" = web.DefaultHost, 127.0.0.1; set 0.0.0.0 to expose on the network)
-	WebAutoStart      bool   // auto-start web server on daemon startup
+	// The [web] block is a PROJECT-WIDE DEFAULT for sessions that have never
+	// been configured, and the channel the desktop app's sidecar uses
+	// (RYSH_WEB_PORT / RYSH_WEB_AUTO_START land here). How a given session is
+	// actually served lives in .rysh/web/<session>.json — see
+	// session.WebSettings for why: this file is read by EVERY session rooted at
+	// this project, so one session's port became every session's port.
+	WebPort      int    // web UI server port (default 23232)
+	WebHost      string // web UI bind IP (default "" = web.DefaultHost, 127.0.0.1; set 0.0.0.0 to expose on the network)
+	WebAutoStart bool   // auto-start web server on daemon startup
+	// WebUsername/WebPassword are the web UI login as the CONFIG knows it:
+	// ${RYSH_WEB_USERNAME}/${RYSH_WEB_PASSWORD} references into the secrets
+	// tier (design 004 G4: references in YAML, never literals), resolved here
+	// at load. `##rysh web start` stores the login under exactly those secret
+	// names, so writing the references is optional. They exist so a restarted
+	// session can re-establish the SAME login without anyone retyping it —
+	// .rysh/web-auth.json stores only a bcrypt hash, which cannot be replayed
+	// into a new server.
+	WebUsername string
+	WebPassword string
+	// WebNgrok publishes the auto-started web server through an ngrok tunnel.
+	// WebNgrokDomain pins a reserved domain (without one the public URL changes
+	// on every restart); WebNgrokBinary and WebNgrokConfig override the
+	// executable and its config file — those two are genuinely machine-wide, so
+	// the config file is the right home for them.
+	WebNgrok       bool
+	WebNgrokDomain string
+	WebNgrokBinary string
+	WebNgrokConfig string
 	// Prometheus metrics exporter (follow-up 3b). When MetricsEnabled, the
 	// daemon serves the agentic MetricsSink as Prometheus text on
 	// MetricsListen (/metrics). Disabled by default; the in-process sink
@@ -618,6 +651,9 @@ type ryshRysh struct {
 	// UpgradeOnAttach controls daemon-version-mismatch behavior on attach
 	// (off|warn|prompt|auto). Moved here from the removed [session] section.
 	UpgradeOnAttach string `yaml:"upgrade_on_attach"`
+	// AgentAutoresume is a pointer so "unset" (nil → keep the default of true)
+	// is distinguishable from an explicit `agent_autoresume: false`.
+	AgentAutoresume *bool `yaml:"agent_autoresume"`
 }
 
 type ryshProfile struct {
@@ -728,6 +764,16 @@ type ryshWeb struct {
 	Port      int    `yaml:"port"`
 	Host      string `yaml:"host"`
 	AutoStart bool   `yaml:"auto_start"`
+	// Username/Password are ${NAME} secret references, not literals — see
+	// Config.WebUsername. A literal here still works (it is only expanded when
+	// it looks like a reference), but nothing rysh writes puts one there.
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+	// Ngrok publishes the server publicly on start; NgrokDomain pins the URL.
+	Ngrok       bool   `yaml:"ngrok"`
+	NgrokDomain string `yaml:"ngrok_domain"`
+	NgrokBinary string `yaml:"ngrok_binary"`
+	NgrokConfig string `yaml:"ngrok_config"`
 }
 
 // ryshMetrics maps the [metrics] section (follow-up 3b).
@@ -1271,6 +1317,12 @@ func loadFrom(explicitPath string, w io.Writer) (Config, error) {
 			cfg.APIKey = expanded
 		}
 	}
+	// The web login travels the same way: `##rysh web start --username/--password`
+	// writes the values into the secrets tier and the ${NAME} references into
+	// [web]. An unresolved reference degrades to "" — an auto-start then reports
+	// a missing login instead of serving the UI behind the literal "${...}".
+	cfg.WebUsername = resolveSecretRef(ryshDir, cfg.WebUsername)
+	cfg.WebPassword = resolveSecretRef(ryshDir, cfg.WebPassword)
 	cfg = applyEnvOverrides(cfg)
 	// Fold the automation model-seat defaults into every kind (recipe >
 	// automation.<kind> > automation.loop > built-ins), so the internal loop
@@ -1378,6 +1430,7 @@ func applyDefaults() Config {
 		ProviderName:            "claude",
 		ClaudeCommand:           "claude",
 		SystemPrompt:            "system-prompt.md",
+		AgentAutoresume:         true,
 		DefaultShell:            shellDefault(),
 		InteractiveShell:        true,
 		ShellColorOutput:        true,
@@ -1506,6 +1559,9 @@ func loadFromFile(path string, cfg Config) (Config, error) {
 	if v := normalizeUpgradeMode(f.Rysh.UpgradeOnAttach); v != "" {
 		cfg.UpgradeOnAttach = v
 	}
+	if f.Rysh.AgentAutoresume != nil {
+		cfg.AgentAutoresume = *f.Rysh.AgentAutoresume
+	}
 
 	// Humanoid defaults (R7)
 	if v := strings.ToLower(strings.TrimSpace(f.HumanoidCfg.PairingDefault)); v == "open" || v == "closed" {
@@ -1590,6 +1646,24 @@ func loadFromFile(path string, cfg Config) (Config, error) {
 	}
 	if f.Web.AutoStart {
 		cfg.WebAutoStart = true
+	}
+	if v := strings.TrimSpace(f.Web.Username); v != "" {
+		cfg.WebUsername = v
+	}
+	if v := strings.TrimSpace(f.Web.Password); v != "" {
+		cfg.WebPassword = v
+	}
+	if f.Web.Ngrok {
+		cfg.WebNgrok = true
+	}
+	if v := strings.TrimSpace(f.Web.NgrokDomain); v != "" {
+		cfg.WebNgrokDomain = v
+	}
+	if v := strings.TrimSpace(f.Web.NgrokBinary); v != "" {
+		cfg.WebNgrokBinary = v
+	}
+	if v := strings.TrimSpace(f.Web.NgrokConfig); v != "" {
+		cfg.WebNgrokConfig = v
 	}
 
 	// Metrics section (follow-up 3b)
@@ -1886,6 +1960,18 @@ func applyEnvOverrides(cfg Config) Config {
 	if v := env("RYSH_WEB_AUTO_START"); v == "true" || v == "1" {
 		cfg.WebAutoStart = true
 	}
+	if v := env("RYSH_WEB_USERNAME"); v != "" {
+		cfg.WebUsername = v
+	}
+	if v := env("RYSH_WEB_PASSWORD"); v != "" {
+		cfg.WebPassword = v
+	}
+	if v := env("RYSH_WEB_NGROK"); v == "true" || v == "1" {
+		cfg.WebNgrok = true
+	}
+	if v := env("RYSH_WEB_NGROK_DOMAIN"); v != "" {
+		cfg.WebNgrokDomain = v
+	}
 	if v := env("RYSH_METRICS_PROMETHEUS"); v == "true" || v == "1" {
 		cfg.MetricsEnabled = true
 	}
@@ -2036,6 +2122,9 @@ func applyEnvOverrides(cfg Config) Config {
 	if b, ok := envBool("RYSH_INTERACTIVE_SHELL"); ok {
 		cfg.InteractiveShell = b
 	}
+	if b, ok := envBool("RYSH_AGENT_AUTORESUME"); ok {
+		cfg.AgentAutoresume = b
+	}
 	if b, ok := envBool("RYSH_SHELL_COLOR"); ok {
 		cfg.ShellColorOutput = b
 	}
@@ -2154,7 +2243,7 @@ func applyEnvOverrides(cfg Config) Config {
 // Both return values are absolute. When no config file is found, ("", "") is
 // returned and callers fall back to defaultRyshDir() (<cwd>/.rysh).
 func resolveConfig() (configFile, ryshDir string) {
-	if cwd, err := os.Getwd(); err == nil {
+	if cwd, err := getwd(); err == nil {
 		// 1. <cwd>/rysh.config.yaml -> sibling .rysh
 		if p := filepath.Join(cwd, "rysh.config.yaml"); isRegularFile(p) {
 			return p, filepath.Join(cwd, ".rysh")
@@ -2200,10 +2289,39 @@ func ryshDirForConfig(configFile string) string {
 // fallback (no ~/.rysh, ~/.local/state/rysh, or ~/.config/rysh): everything is
 // stored relative to the working directory. Set RYSH_DIR to override explicitly.
 func defaultRyshDir() string {
-	if cwd, err := os.Getwd(); err == nil {
+	if cwd, err := getwd(); err == nil {
 		return filepath.Join(cwd, ".rysh")
 	}
 	return ".rysh"
+}
+
+// getwd is os.Getwd with symlinks resolved, and it is what every cwd-derived
+// path in this file must use. os.Getwd returns $PWD verbatim whenever $PWD
+// stats to the same directory as ".", so entering a project through a symlink
+// yields the SYMLINK path — and one project then has two identities.
+//
+// That is not cosmetic. The rysh dir, the session registry inside it and the
+// config file are all derived from the cwd, so the same directory reached as
+// ~/root/github/rysh-ai (a symlink) and as ~/root/github/agentic-zellij (its
+// target) registers two separate sessions against ONE physical .rysh — both
+// claiming the same pinned nats.port, each invisible to the other's name
+// checks. "rysh create" then refuses a name whose record it cannot explain,
+// and the registry accumulates records that appear to belong to a project
+// that does not exist. EvalSymlinks collapses both spellings to the target,
+// so the identity follows the directory rather than the route taken to it.
+//
+// A failure here (a deleted or unreadable cwd) falls back to the raw value:
+// a possibly-aliased path still beats no path at all.
+func getwd() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		return cwd, nil
+	}
+	return resolved, nil
 }
 
 // isRegularFile reports whether p exists and is a regular file (not a directory).
@@ -2461,7 +2579,7 @@ func resolveWorkingDirectory(configFile, explicit string) string {
 		if !filepath.IsAbs(dir) {
 			base := configDir
 			if base == "" {
-				if cwd, err := os.Getwd(); err == nil {
+				if cwd, err := getwd(); err == nil {
 					base = cwd
 				}
 			}

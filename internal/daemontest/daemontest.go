@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package daemontest boots a real rysh daemon for tests.
 //
 // Almost every test in this tree exercises a handler by calling it directly,

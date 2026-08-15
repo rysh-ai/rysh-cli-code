@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package registry
 
 // Client-side search and update over the static index (design 005, B9).

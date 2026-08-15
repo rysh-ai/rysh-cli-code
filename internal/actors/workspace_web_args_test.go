@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -307,5 +309,67 @@ func TestHasWebForce(t *testing.T) {
 		if hasWebForce(args) {
 			t.Errorf("hasWebForce(%v) = true, want false", args)
 		}
+	}
+}
+
+// The tunnel and persistence flags parse in every form the rest of the command
+// line accepts, and --ngrok-domain implies --ngrok (naming a domain to publish
+// at and not publishing would be a silent no-op).
+func TestParseWebStartArgsTunnelFlags(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		args       []string
+		wantNgrok  bool
+		wantDomain string
+		wantNoSave bool
+	}{
+		{"plain", []string{"--ngrok"}, true, "", false},
+		{"publish alias", []string{"--publish"}, true, "", false},
+		{"domain space", []string{"--ngrok-domain", "rysh.ngrok.app"}, true, "rysh.ngrok.app", false},
+		{"domain equals", []string{"--ngrok-domain=rysh.ngrok.app"}, true, "rysh.ngrok.app", false},
+		{"domain alias", []string{"--domain", "rysh.ngrok.app"}, true, "rysh.ngrok.app", false},
+		{"no-save", []string{"--no-save"}, false, "", true},
+		{"once alias", []string{"--once"}, false, "", true},
+		{"none", []string{"--port", "23001"}, false, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, warnings := parseWebStartArgs(tc.args, "", 0)
+			if len(warnings) != 0 {
+				t.Fatalf("warnings = %v, want none", warnings)
+			}
+			if opts.Ngrok != tc.wantNgrok {
+				t.Errorf("Ngrok = %v, want %v", opts.Ngrok, tc.wantNgrok)
+			}
+			if opts.NgrokDomain != tc.wantDomain {
+				t.Errorf("NgrokDomain = %q, want %q", opts.NgrokDomain, tc.wantDomain)
+			}
+			if opts.NoSave != tc.wantNoSave {
+				t.Errorf("NoSave = %v, want %v", opts.NoSave, tc.wantNoSave)
+			}
+		})
+	}
+}
+
+// The full command the feature exists for, parsed as one line.
+func TestParseWebStartArgsFullPublishedStart(t *testing.T) {
+	opts, warnings := parseWebStartArgs([]string{
+		"--bind", "0.0.0.0", "--port", "23001",
+		"--username", "alice", "--password", "s3cret pass",
+		"--ngrok-domain", "rysh-web.ngrok.app",
+	}, "127.0.0.1", 23232)
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v", warnings)
+	}
+	if opts.Host != "0.0.0.0" || opts.Port != 23001 || !opts.Explicit {
+		t.Fatalf("address = %s:%d explicit=%v", opts.Host, opts.Port, opts.Explicit)
+	}
+	if opts.Username != "alice" || opts.Password != "s3cret pass" {
+		t.Fatalf("login = %q/%q", opts.Username, opts.Password)
+	}
+	if !opts.Ngrok || opts.NgrokDomain != "rysh-web.ngrok.app" {
+		t.Fatalf("tunnel = %v/%q", opts.Ngrok, opts.NgrokDomain)
+	}
+	if opts.NoSave {
+		t.Fatal("NoSave set without --no-save — this start must be persisted")
 	}
 }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // wire-harness — the reproducible, recordable end-to-end proof that a wrapped
 // agent CLI's provider traffic is governed by rysh (design 001, Phase 0/1
 // definition-of-done item 3).

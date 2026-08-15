@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package plugin
 
 // PluginSupervisor — owns the plugin PROCESS (design 002 §4.5). v1 keeps one

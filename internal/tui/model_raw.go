@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 import (
@@ -245,14 +247,16 @@ func (m *Model) sendPaneResizes() {
 
 	// Fullscreen: only the maximized pane is visible, so size its PTY to the
 	// full body. These dims must match the fullscreen render path in View()
-	// (fsWidth = m.width-4, fsHeight = m.height-8) and buildPanePanel's raw
-	// rendering (content width = paneWidth-4, height = paneHeight-1 for the
-	// single meta line). Hidden panes keep their last size until fullscreen is
-	// exited, at which point this function runs again with normal sizing.
+	// (fsWidth = m.fullscreenWidth(), fsHeight = m.bodyHeight()) and
+	// buildPanePanel's raw rendering (content width = paneWidth-4, height =
+	// paneHeight-1 for the single meta line). Hidden panes keep their last size
+	// until fullscreen is exited, at which point this function runs again with
+	// normal sizing. bodyDims folds in the vertical tab column, so a fullscreen
+	// PTY is not sized over the top of the tab bar.
 	if m.fullscreenPaneID != "" {
 		for _, pane := range tab.FlatPanes() {
 			if pane.ID == m.fullscreenPaneID {
-				fsRows, fsCols := fullscreenPTYDims(m.width, m.height)
+				fsRows, fsCols := fullscreenPTYDims(m.bodyDims())
 				_ = m.pub.Send(msgpkg.T("pane", pane.ID, "inbox"), &msgpkg.MsgPaneResize{
 					Rows:     fsRows,
 					Cols:     fsCols,
@@ -270,7 +274,7 @@ func (m *Model) sendPaneResizes() {
 	}
 
 	colWidths := laneWidths(lanes, m.paneAvailWidth(len(lanes)))
-	totalHeight := max(8, m.height-8)
+	totalHeight := m.bodyHeight()
 
 	for c, lane := range lanes {
 		col := lane.VisiblePanes
@@ -364,7 +368,8 @@ func (m *Model) applyRemoteFullscreen(ev remoteFullscreenMsg) {
 		// with a larger terminal than ours gets a full-resolution render at its own
 		// screen size. Fall back to our own full body when the subscriber did not
 		// send dims (older client) or sent invalid ones.
-		rows, cols := remoteFullscreenDims(ev.Rows, ev.Cols, m.width, m.height)
+		srcW, srcH := m.bodyDims()
+		rows, cols := remoteFullscreenDims(ev.Rows, ev.Cols, srcW, srcH)
 		// Override: this is not a measurement of a local viewport, it is the
 		// subscriber's chosen resolution, which we honour deliberately (see
 		// remoteFullscreenDims). Routing it through claim arbitration would

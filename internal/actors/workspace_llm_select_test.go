@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // `##llm select` is a two-step picker: print a numbered menu, then take the

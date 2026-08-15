@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 // completion_bash.go — bash programmable completion delegation (Phase 4 of

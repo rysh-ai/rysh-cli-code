@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package msg shared_aliases.go — re-exports rysh-shared/msg types as type aliases.
 // Type aliases (=) are NOT new types — they are the same underlying Go type.
 // This is required so that messages sent from rysh-cli actors to rysh-shared/agentic

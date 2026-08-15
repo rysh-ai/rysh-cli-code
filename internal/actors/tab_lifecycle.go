@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -273,7 +275,7 @@ func (t *TabActor) deleteLaneByID(ctx actor.Context, laneID string) {
 // paneID, when non-empty, pre-assigns the initial pane's ID (see
 // MsgTabCreatePaneGroupInLane); paneType marks a special pane variant
 // ("replay" panes never start a shell).
-func (t *TabActor) createPaneGroupInLane(ctx actor.Context, laneID, title, groupID, workingDir, paneID, paneType string) {
+func (t *TabActor) createPaneGroupInLane(ctx actor.Context, laneID, title, groupID, workingDir, paneID, paneType string, meta map[string]string) {
 	subject, ok := t.laneSubjects[laneID]
 	if !ok {
 		return
@@ -286,6 +288,7 @@ func (t *TabActor) createPaneGroupInLane(ctx actor.Context, laneID, title, group
 	}
 	_ = t.pub.Send(subject, &msg.MsgLaneCreatePaneGroup{
 		PaneID: paneID, Title: title, GroupID: groupID, WorkingDir: workingDir, PaneType: paneType,
+		Meta: meta,
 	})
 	t.paneToLane[paneID] = laneID
 

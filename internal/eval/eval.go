@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package eval implements the agent eval harness (design 009): "unit tests for
 // agents." A fixture describes a task and structural assertions; a Result is
 // what running the agent produced; Evaluate checks the Result against the

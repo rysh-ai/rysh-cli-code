@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // `rysh exec` — the generic door into the "##" command language (design 021 §3.3).
@@ -90,7 +92,9 @@ func runExecCmd(cfg config.Config, args []string) error {
 		return err
 	}
 
-	aware := actors.RyshCommandIsStatusAware(commandWord(command))
+	// Scoped to the session the command was sent to: a "#" word resolves against
+	// that session's commands directory before the shared one.
+	aware := actors.RyshCommandIsStatusAware(sess, commandWord(command))
 
 	if asJSON {
 		status := 0
@@ -148,8 +152,11 @@ func jsonLine(v any) string {
 	return string(b)
 }
 
-// commandWord returns the leading command word of a ## command body, which is
-// what the dispatch table is keyed on.
+// commandWord returns the leading word of a command body, prefix and all.
+//
+// The prefix is kept because it selects the vocabulary: "#deploy" is a user
+// command (design 032) and "deploy" is a built-in, and only the caller's lookup
+// can tell those apart.
 func commandWord(command string) string {
 	fields := strings.Fields(command)
 	if len(fields) == 0 {

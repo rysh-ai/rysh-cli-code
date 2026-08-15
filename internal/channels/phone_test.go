@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package channels
 
 // Inbound half of the Twilio SMS adapter: webhook parsing, signature

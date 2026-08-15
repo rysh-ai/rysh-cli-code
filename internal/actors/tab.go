@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -48,7 +50,7 @@ type TabActor struct {
 	pub     *msg.NATSPublisher
 	agSetup *agentic.Setup
 	nc      *nats.Conn
-	kvStore nats.KeyValue // rysh-panes bucket
+	kvStore nats.KeyValue   // rysh-panes bucket
 	secrets *secretResolver // workspace-scoped ##secret lookup, threaded to panes
 	br      *bridge.NATSBridge
 
@@ -244,6 +246,49 @@ func (t *TabActor) Receive(ctx actor.Context) {
 	case *msg.MsgTabFocusPaneByID:
 		t.focusPaneByID(m.ID)
 
+	case *msg.MsgTabSetPaneHidden:
+		// Same traversal as focusPaneByID: the pane→lane map says where it
+		// lives, and the lane hands it to the group that actually owns the
+		// stack. Unlike focusPaneByID this deliberately does NOT touch
+		// t.activeLane — revealing a pane must show it, not jump to it
+		// (design 027 §5.1, and the same focus-theft rule as 025 §4.1 hazard 2).
+		if laneID, ok := t.paneToLane[m.PaneID]; ok {
+			if subject, ok := t.laneSubjects[laneID]; ok {
+				_ = t.pub.Send(subject, &msg.MsgLaneSetPaneHidden{PaneID: m.PaneID, Hidden: m.Hidden})
+			}
+		}
+
+	// --- live pane transfer (##move); see pane_move.go ---
+
+	case *tabReleasePaneRequest:
+		handle, ok := t.releasePane(ctx, m.paneID)
+		ctx.Respond(&tabReleasePaneReply{handle: handle, ok: ok})
+
+	case *tabAdoptPaneRequest:
+		laneID, groupID, ok := t.adoptPane(ctx, m)
+		ctx.Respond(&tabAdoptPaneReply{laneID: laneID, groupID: groupID, ok: ok})
+
+	case *tabMovePaneInStackRequest:
+		ok := false
+		if laneID, found := t.paneToLane[m.paneID]; found {
+			if reply, got := requestMove[*groupMovePaneReply](ctx, t.lanePIDs[laneID],
+				&groupMovePaneRequest{paneID: m.paneID, dir: m.dir}); got && reply != nil {
+				ok = reply.ok
+			}
+		}
+		ctx.Respond(&tabMoveReply{ok: ok})
+
+	case *tabMoveStackRequest:
+		ok := false
+		if reply, got := requestMove[*laneMoveGroupReply](ctx, t.lanePIDs[m.laneID],
+			&laneMoveGroupRequest{groupID: m.groupID, dir: m.dir}); got && reply != nil {
+			ok = reply.ok
+		}
+		ctx.Respond(&tabMoveReply{ok: ok})
+
+	case *tabMoveLaneRequest:
+		ctx.Respond(&tabMoveReply{ok: t.moveLane(m.laneID, m.dir)})
+
 	case *msg.MsgTabCreateStackedPane:
 		paneID := uuid.NewString()
 		t.forwardToActiveLane(&msg.MsgLaneCreateStackedPane{
@@ -339,7 +384,7 @@ func (t *TabActor) Receive(ctx actor.Context) {
 		t.deleteLaneByID(ctx, m.LaneID)
 
 	case *msg.MsgTabCreatePaneGroupInLane:
-		t.createPaneGroupInLane(ctx, m.LaneID, m.Title, m.GroupID, m.WorkingDir, m.PaneID, m.PaneType)
+		t.createPaneGroupInLane(ctx, m.LaneID, m.Title, m.GroupID, m.WorkingDir, m.PaneID, m.PaneType, m.Meta)
 
 	case *msg.MsgTabCreateGrid:
 		t.createGridHere(ctx, m.LaneTitles)

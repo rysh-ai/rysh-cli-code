@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package progname resolves the name this binary was invoked as, so that
 // user-facing text names the command the user actually has.
 //

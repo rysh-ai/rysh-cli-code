@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package session
 
 import (
@@ -80,6 +82,20 @@ type Record struct {
 	// endpoint. Records written by older daemons may still carry the field; it
 	// is ignored.
 	WebPort int `json:"web_port,omitempty"`
+	// WebHost is the address that web server is BOUND to (127.0.0.1 for a
+	// loopback-only server, 0.0.0.0 for one on the network). WebUser is the
+	// login it asks for — the name only; the password lives in the secrets tier
+	// and its hash in web-auth.json, and neither belongs in a world-readable
+	// registry record. WebPublicURL is the tunnel address the session is
+	// reachable at from outside this machine, empty when there is no tunnel.
+	//
+	// Together they are what makes a restarted session recognisable as the same
+	// door: `##session info` and the desktop app can say where it is served,
+	// who it asks for, and what to open on a phone — none of which the port
+	// alone can answer. Maintained live alongside WebPort (UpdateWebMeta).
+	WebHost      string `json:"web_host,omitempty"`
+	WebUser      string `json:"web_user,omitempty"`
+	WebPublicURL string `json:"web_public_url,omitempty"`
 }
 
 // SourceCLI and SourceApp are the canonical session Source values: the rysh
@@ -557,6 +573,50 @@ func UpdateWebEndpoint(cfg config.Config, name string, port int) {
 		return
 	}
 	rec.WebPort = port
+	_, _ = store.Upsert(rec)
+}
+
+// WebMeta is everything the session record says about how this session is
+// served: the address the web server is bound to, who signs in, and the public
+// URL a tunnel publishes it at.
+//
+// The port alone answered "where does the desktop app dial", which was all the
+// record ever needed. Reaching a session from OFF this machine asks two more
+// questions the port cannot: what address was it started on (so a restart
+// repeats it), and what URL is it reachable at right now (so it can be shared
+// without hunting through ngrok's dashboard).
+type WebMeta struct {
+	Port int
+	Host string
+	// User is the login username. The password is never recorded here — it
+	// lives in the secrets tier, and its hash in web-auth.json.
+	User string
+	// PublicURL is the tunnel's public address, empty when there is no tunnel.
+	PublicURL string
+}
+
+// UpdateWebMeta records the live web endpoint AND its public face on the
+// session record, read-modify-write like UpdateWebEndpoint so other writers'
+// bookkeeping survives. A zero Port clears the whole set — a stopped server has
+// no address, no login and no tunnel.
+func UpdateWebMeta(cfg config.Config, name string, meta WebMeta) {
+	store, err := NewStore(cfg)
+	if err != nil {
+		return
+	}
+	rec, err := store.Get(name)
+	if err != nil {
+		return
+	}
+	if meta.Port <= 0 {
+		meta = WebMeta{}
+	}
+	if rec.WebPort == meta.Port && rec.WebHost == meta.Host &&
+		rec.WebUser == meta.User && rec.WebPublicURL == meta.PublicURL {
+		return
+	}
+	rec.WebPort, rec.WebHost = meta.Port, meta.Host
+	rec.WebUser, rec.WebPublicURL = meta.User, meta.PublicURL
 	_, _ = store.Upsert(rec)
 }
 

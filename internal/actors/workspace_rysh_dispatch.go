@@ -1,7 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -116,6 +119,18 @@ func init() {
 			run:         func(w *WorkspaceActor, c *ryshCmd) { w.ryshHelp(c.out) },
 		},
 		{
+			name: "commands",
+			help: []string{
+				"  ##commands [list]            your own commands: scripts in .rysh/commands/<session>/, run as #<name>\n",
+				"  ##commands path              where user commands are looked up (session dir, then shared)\n",
+				"  ##commands show <name>       print a user command's script\n",
+				"  ##commands new <name>        create a starter script for #<name> in this session's dir\n",
+				"  ##commands new <n> --shared  create it in .rysh/commands/, for every session\n",
+			},
+			statusAware: true,
+			run:         func(w *WorkspaceActor, c *ryshCmd) { c.err = w.handleUserCommandsCommand(c.out, c.args) },
+		},
+		{
 			name:    "h",
 			aliases: []string{"history"},
 			help: []string{
@@ -145,6 +160,23 @@ func init() {
 			},
 			statusAware: true,
 			run:         func(w *WorkspaceActor, c *ryshCmd) { w.handleNewInstance(c.ctx, c.out, c.paneID, c.args) },
+		},
+		{
+			name:    "move",
+			aliases: []string{"mv"},
+			help: []string{
+				"  ##move pane [<p>] to-lane <lane> [--tab <t>]   move a live pane into a lane, as its own stack\n",
+				"  ##move pane [<p>] to-stacked-pane <pane>       join the stack that pane is in (also: to-stack <id>)\n",
+				"  ##move pane [<p>] to-tab|to-new-lane|to-new-tab|here|out   other destinations\n",
+				"  ##move pane [<p>] up|down|left|right           reorder in its stack / cross to the next lane\n",
+				"  ##move stack [<s>] to-lane|to-tab|... | up|down|left|right  move a whole stack as one\n",
+				"  ##move lane [<l>] to-tab <t> | to-new-tab | left|right      move a whole lane\n",
+				"  ##move tab [<t>] left|right                    reorder the tab bar (alias: ##mv)\n",
+				"                               position: --first|--last|--index <n>|--before <r>|--after <r>\n",
+				"                               nothing restarts: the pane keeps its shell, scrollback and agent\n",
+			},
+			statusAware: true,
+			run:         func(w *WorkspaceActor, c *ryshCmd) { c.err = w.handleMoveCommand(c.ctx, c.out, c.paneID, c.args) },
 		},
 		{
 			name: "cmd",
@@ -218,6 +250,8 @@ func init() {
 				"  ##tab  list-panes [--tab <tab-id>]  list panes of a tab (default: active tab)\n",
 				"  ##tab  name <tab-name>       rename the active tab (also: ##rysh tab name, ctrl+t r)\n",
 				"  ##tab  name <tab-id> <name>  rename the tab with that id (see ##tab list)\n",
+				"  ##tab  delete <tab-id>       close that tab and everything in it (refuses the last tab)\n",
+				"  ##tab  orientation [horizontal|vertical|toggle]  tab bar as a top strip or a left column (also: ctrl+t v)\n",
 				"  ##tab  pipeline enable       enable pipeline mode for the active tab\n",
 				"  ##tab  pipeline disable      disable pipeline mode for the active tab\n",
 				"  ##tab  delete <tab-id>       delete the tab with that id (see ##tab list)\n",
@@ -362,9 +396,10 @@ func init() {
 		{
 			name: "rysh",
 			help: []string{
-				"  ##rysh web start [--bind <addr>] [--port <n>] [--username <u> --password <p>]  start the web UI server\n",
+				"  ##rysh web start [--bind <addr>] [--port <n>] [--username <u> --password <p>] [--ngrok]  start the web UI server (parameters are saved and reused on restart)\n",
 				"  ##rysh web stop              stop the web UI server\n",
-				"  ##rysh web status            show bind address, port + login\n",
+				"  ##rysh web status            show bind address, port, login, public URL + what a restart will serve\n",
+				"  ##rysh web ngrok [start|stop|status]  publish this session at a public HTTPS URL\n",
 				"  ##rysh web auth username=<u> password=<p>  set the web UI login (30-day token)\n",
 			},
 			statusAware: true,
@@ -583,16 +618,64 @@ func init() {
 			run:         func(w *WorkspaceActor, c *ryshCmd) { c.err = w.handleBoardCommand(c.out, c.paneID, c.args) },
 		},
 		{
+			name: "fleet",
+			help: []string{
+				"  ##fleet list                  the fleets this session knows about\n",
+				"  ##fleet show <name>           one fleet, its board and its members\n",
+				"  ##fleet register <name>       track a fleet (opens no panes)\n",
+				"  ##fleet state <name> up|down  where it is in its lifecycle\n",
+				"  ##fleet forget <name>         drop it from the registry (panes keep running)\n",
+			},
+			statusAware: true,
+			run:         func(w *WorkspaceActor, c *ryshCmd) { c.err = w.handleFleetCommand(c.out, c.paneID, c.args) },
+		},
+		{
 			name: "ansa",
 			help: []string{
 				"  ##ansa send <@name|id> <text> deliver a shell line to another pane (agent nervous system)\n",
 				"  ##ansa prompt <@name|id> <t>  deliver a prompt to another pane\n",
-				"  ##ansa who                    list addressable panes + ids (duplicate names flagged)\n",
+				"  ##ansa who [--meta k[=v]]     list addressable panes + ids (duplicate names flagged);\n",
+				"                                --meta fleet.role lists only panes in a fleet\n",
+				"  ##ansa interrupt <@name|id>   cancel the turn in that pane (ESC, never a signal)\n",
+				"  ##ansa interrupt --fleet <n>  cancel the turn in every pane of THAT fleet\n",
+				"  ##ansa interrupt --all-fleets same, for every fleet in the session\n",
 				"  (agents route silently instead: rysh ansa send --to <@name|id> <text>)\n",
 			},
 			helpRewrite: []bool{false, false, false, true},
 			statusAware: true,
 			run:         func(w *WorkspaceActor, c *ryshCmd) { c.err = w.handleAnsaCommand(c.out, c.paneID, c.args) },
+		},
+		{
+			name: "claude",
+			help: []string{
+				"  ##claude [args]              run claude in THIS pane, resumed automatically after a\n",
+				"                               session stop/start (session id pinned to the pane id)\n",
+				"  ##claude new [args]          same, but start a fresh conversation under a NEW id\n",
+				"  ##claude --fresh-session     start over KEEPING the pane id; the old transcript is\n",
+				"                               renamed beside itself, not deleted\n",
+				"                               runs autonomously (--dangerously-skip-permissions);\n",
+				"                               pass --permission-mode manual to be asked instead\n",
+			},
+			statusAware: true,
+			run: func(w *WorkspaceActor, c *ryshCmd) {
+				c.err = w.handleNativeAgentCommand(c.out, c.paneID, nativeAgentClaude, c.args)
+			},
+		},
+		{
+			name: "codex",
+			help: []string{
+				"  ##codex [args]               run codex in THIS pane, resumed automatically after a\n",
+				"                               session stop/start (session id read back from codex)\n",
+				"  ##codex new [args]           same, but start a fresh conversation in this pane\n",
+				"  ##codex --fresh-session      same as new — codex issues its own ids, so a fresh one\n",
+				"                               cannot be pinned to the pane id\n",
+				"                               runs autonomously (approvals and sandbox bypassed);\n",
+				"                               pass -a on-request to be asked instead\n",
+			},
+			statusAware: true,
+			run: func(w *WorkspaceActor, c *ryshCmd) {
+				c.err = w.handleNativeAgentCommand(c.out, c.paneID, nativeAgentCodex, c.args)
+			},
 		},
 		{
 			name: "mcp",
@@ -670,7 +753,28 @@ func RyshCommandWords() []string {
 // RyshCommandIsStatusAware reports whether a command word's handler has been
 // audited to report failure (see ryshCommand.statusAware). Unknown words report
 // false.
-func RyshCommandIsStatusAware(word string) bool {
+//
+// The word carries its prefix, because the prefix selects the vocabulary. A
+// leading "#" means a user command (design 032), which reports true when the
+// script exists: its status is bash's exit code, more reliable than most of the
+// audited handlers, and the CLI path waits for it. Anything else is looked up in
+// the table.
+//
+// The user-command lookup runs against the CALLER's .rysh, which may not be the
+// daemon's. The disagreement is harmless both ways: if only the caller can see
+// the script the daemon answers "unknown user command" and the response is red
+// regardless, and if only the daemon can this under-reports, which is the
+// conservative half.
+//
+// session is the session the command is being sent to, because the lookup is
+// scoped to it (see userCommandDirs). Passing the wrong one — or "" — costs at
+// most the same under-report: the shared directory is still searched, so a
+// project-wide command still reports true.
+func RyshCommandIsStatusAware(session, word string) bool {
+	if strings.HasPrefix(word, "#") && !strings.HasPrefix(word, "##") {
+		_, ok := findUserCommandIn(ryshBaseDirs(), session, strings.TrimPrefix(word, "#"))
+		return ok
+	}
 	c, ok := ryshCommandIndex[word]
 	return ok && c.statusAware
 }
@@ -691,18 +795,57 @@ func (w *WorkspaceActor) ryshHelp(out *strings.Builder) {
 	fmt.Fprintf(out, "\n")
 }
 
-// ryshUnknownCommand reports a command word that is not in the table. It offers
-// the closest matches by prefix before falling back to the full help, so a
-// typo does not bury the user in 180 lines.
+// ryshUnknownCommand reports a "##" word that is not in the table. It offers
+// the closest matches by prefix before falling back to the full help, so a typo
+// does not bury the user in 180 lines.
+//
+// When a user command of that name exists, the message says so and names the
+// one-hash form. `##` and `#` being different vocabularies is the design, but
+// "##deploy does nothing while #deploy works" is exactly the kind of thing a
+// user hits once and needs answered in place rather than in the docs.
 func (w *WorkspaceActor) ryshUnknownCommand(out *strings.Builder, cmd string) {
 	fmt.Fprintf(out, "\n[rysh] unknown command: %q\n", cmd)
 	w.failRysh("unknown command: %q", cmd)
+	if _, ok := w.findUserCommand(cmd); ok {
+		fmt.Fprintf(out, "  #%s is a user command — one hash, not two\n", cmd)
+		fmt.Fprintf(out, "  (##help lists every built-in command; ##commands lists yours)\n\n")
+		return
+	}
 	if near := nearestRyshCommands(cmd); len(near) > 0 {
 		fmt.Fprintf(out, "  did you mean: %s\n", strings.Join(near, ", "))
 		fmt.Fprintf(out, "  (##help lists every command)\n\n")
 		return
 	}
+	if validUserCommandName(cmd) {
+		fmt.Fprintf(out, "  a script at %s would run as #%s (##commands new %s)\n",
+			filepath.Join(userCommandsWriteDir(w.sessionName), cmd), cmd, cmd)
+		fmt.Fprintf(out, "  (##help lists every built-in command)\n\n")
+		return
+	}
 	w.ryshHelp(out)
+}
+
+// unknownUserCommand reports a "#" word with no script behind it.
+//
+// It is only reachable from a non-interactive caller: routeInput checks that
+// the word resolves before it claims the line at all, so an interactive
+// "#nope" is left to the shell as the comment it has always been. A CLI caller
+// has no shell to fall through to, and a silent success there is the scripting
+// bug the whole exit-status contract exists to prevent.
+func (w *WorkspaceActor) unknownUserCommand(out *strings.Builder, cmd string) {
+	o := ryshWriter(out)
+	o.Header("unknown user command: %q", cmd)
+	if _, builtin := lookupRyshCommand(cmd); builtin {
+		// Not a collision — #pane and ##pane are different words — but almost
+		// always the mistake behind a "#pane" with no file.
+		o.Row("  ##%s is a built-in — two hashes, not one", cmd)
+		o.Row("  (or put a script at %s to make #%s yours)",
+			filepath.Join(userCommandsWriteDir(w.sessionName), cmd), cmd)
+		return
+	}
+	o.Row("  a script at %s would run as #%s (##commands new %s)",
+		filepath.Join(userCommandsWriteDir(w.sessionName), cmd), cmd, cmd)
+	o.Row("  (##commands lists the ones you have)")
 }
 
 // nearestRyshCommands returns names and aliases that share a prefix with the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package msg proxy_audit_aliases.go — re-exports rysh-shared/msg governance
 // proxy audit types (design 001 §4.5) so rysh-cli references them as
 // msg.MsgProxyRequestAudit etc. The codec is registered in rysh-shared's

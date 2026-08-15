@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // The pane's KV write is debounced behind kvDirty, and its PRIMARY flush runs

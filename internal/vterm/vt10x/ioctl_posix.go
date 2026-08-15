@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // +build linux darwin dragonfly solaris openbsd netbsd freebsd
 
 package vt10x

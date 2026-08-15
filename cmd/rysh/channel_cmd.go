@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // channel_cmd.go — `rysh channel install|list|remove` for out-of-process

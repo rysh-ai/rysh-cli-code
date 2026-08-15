@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // Command-level tests for `##pane provider` (design 002 §3.4, roadmap B6),

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package channels
 
 import (
@@ -782,8 +784,12 @@ func (w *WhatsAppAdapter) Send(ctx context.Context, outbound OutboundMessage) er
 	}
 
 	if w.inSessionWindow(outbound.RecipientID) {
-		for _, chunk := range splitMessage(outbound.Content, whatsAppMaxBodyLen) {
-			if err := w.sendOne(ctx, outbound.RecipientID, chunk); err != nil {
+		// One idempotency base per reply; each chunk is keyed "base:i" so the
+		// relay retry of a chunk whose ack was lost cannot deliver it twice
+		// (E-11.3). Direct (non-relay) sends ignore the key.
+		msgBase := newRelayMessageID()
+		for i, chunk := range splitMessage(outbound.Content, whatsAppMaxBodyLen) {
+			if err := w.sendOne(ctx, outbound.RecipientID, chunk, relayChunkID(msgBase, i)); err != nil {
 				return err
 			}
 		}
@@ -806,13 +812,14 @@ func (w *WhatsAppAdapter) Send(ctx context.Context, outbound OutboundMessage) er
 	return fmt.Errorf("whatsapp: cannot send free-form message to %s: WhatsApp's 24h customer-service window is closed (no inbound message from this recipient within 24h). Outside the window Meta only delivers pre-approved template messages; configure default_template (and template_lang) in the whatsapp contact, or send one explicitly with whatsapp_send_template", outbound.RecipientID)
 }
 
-// sendOne posts a single free-form text message.
-func (w *WhatsAppAdapter) sendOne(ctx context.Context, to, text string) error {
+// sendOne posts a single free-form text message. msgID is the per-chunk
+// idempotency key for relay mode; the direct Graph API path does not use it.
+func (w *WhatsAppAdapter) sendOne(ctx context.Context, to, text, msgID string) error {
 	// In relay mode the server performs the Graph API call with the credentials
 	// it stores. Intercepting here rather than in Send() keeps the 24h-window
 	// handling, chunking and template fallback above identical in both modes.
 	if w.config.Relay {
-		return w.sendRelayText(ctx, to, text)
+		return w.sendRelayText(ctx, to, text, msgID)
 	}
 	var payload waSendPayload
 	payload.MessagingProduct = "whatsapp"

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // Table tests for rysh doctor over synthetic on-disk states (design 004 §6):

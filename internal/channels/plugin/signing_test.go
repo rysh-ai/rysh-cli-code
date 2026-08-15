@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package plugin
 
 // Dev-tier signing tests: sign → verify round-trip, tamper → refuse (the

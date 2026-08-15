@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package forgecmd implements the `forge` subcommand family (add / generate /
 // list / diff / targets) independently of any particular front-end. It writes
 // all human-readable output to an io.Writer so the same logic backs both the

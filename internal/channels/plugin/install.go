@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package plugin
 
 // Install/remove flow (design 002 §4.4, adapted): v1 installs from a LOCAL

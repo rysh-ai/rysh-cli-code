@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package channels
 
 // X2: the chatbot adapter used to call operator routes that do not exist on

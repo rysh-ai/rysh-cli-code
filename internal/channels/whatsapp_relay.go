@@ -1,11 +1,17 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package channels
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,8 +38,6 @@ const (
 	// of a SUB line, so the queue group passes through the proxy untouched.
 	relayQueueGroup = "rysh-humanoid"
 
-	relayReplyTimeout = 10 * time.Second
-
 	// relayReplyWindow bounds how old a *replayed* message may be and still be
 	// answered automatically. It covers the case replay exists for — a session
 	// that was down for a while, a laptop lid closed over lunch — while stopping
@@ -42,6 +46,11 @@ const (
 	// matter what its timestamp says.
 	relayReplyWindow = 30 * time.Minute
 )
+
+// relayReplyTimeout caps how long one outbound request waits for the server's
+// ack. A var, not a const, so tests can shrink it to exercise the timeout
+// path; production never changes it.
+var relayReplyTimeout = 10 * time.Second
 
 // relayInbound mirrors the server's channel.InboundChannelMessage wire shape.
 type relayInbound struct {
@@ -66,6 +75,13 @@ type relayOutbound struct {
 	ThreadID     string         `json:"thread_id,omitempty"`
 	Type         string         `json:"type,omitempty"`
 	Template     *relayTemplate `json:"template,omitempty"`
+
+	// MessageID is the client-generated idempotency key ("base:chunkIndex",
+	// E-11.3). The ack for a delivered send can be lost after
+	// relayReplyTimeout while the server's send budget is 20s, so publishRelay
+	// retries the request — and the server dedupes the resend on this id
+	// instead of delivering it to the customer twice.
+	MessageID string `json:"message_id,omitempty"`
 }
 
 type relayTemplate struct {
@@ -391,18 +407,22 @@ func (w *WhatsAppAdapter) replayMissed() {
 }
 
 // sendRelayText publishes an outbound text message for the server to deliver.
-func (w *WhatsAppAdapter) sendRelayText(ctx context.Context, to, text string) error {
+// msgID is the per-chunk idempotency key from Send's chunk loop
+// ("base:chunkIndex"); empty disables dedupe and the retry (legacy behaviour).
+func (w *WhatsAppAdapter) sendRelayText(ctx context.Context, to, text, msgID string) error {
 	return w.publishRelay(ctx, relayOutbound{
 		ConnectionID: w.config.RelayConnectionID,
 		WorkspaceID:  w.config.RelayWorkspaceID,
 		RecipientID:  to,
 		Content:      text,
 		Type:         "text",
+		MessageID:    msgID,
 	})
 }
 
 // sendRelayTemplate publishes an outbound template send. Outside WhatsApp's
 // 24-hour window this is the only kind the platform will actually deliver.
+// A template send is one logical message, so it generates its own key.
 func (w *WhatsAppAdapter) sendRelayTemplate(ctx context.Context, to, name, lang string, params []string) error {
 	return w.publishRelay(ctx, relayOutbound{
 		ConnectionID: w.config.RelayConnectionID,
@@ -410,7 +430,30 @@ func (w *WhatsAppAdapter) sendRelayTemplate(ctx context.Context, to, name, lang 
 		RecipientID:  to,
 		Type:         "template",
 		Template:     &relayTemplate{Name: name, Language: lang, Params: params},
+		MessageID:    relayChunkID(newRelayMessageID(), 0),
 	})
+}
+
+// relayChunkID derives the wire idempotency key for chunk i of a reply, or ""
+// (no dedupe, no retry) when no base could be generated.
+func relayChunkID(base string, i int) string {
+	if base == "" {
+		return ""
+	}
+	return base + ":" + strconv.Itoa(i)
+}
+
+// newRelayMessageID returns the random base of an outbound idempotency key.
+// One base is generated per logical reply; chunk indexes are appended so a
+// retry of chunk i and a legitimate chunk i+1 can never collide.
+func newRelayMessageID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Degrade to no dedupe rather than fail the send: an empty id means
+		// the server treats the message exactly as it did before E-11.3.
+		return ""
+	}
+	return hex.EncodeToString(b[:])
 }
 
 func (w *WhatsAppAdapter) publishRelay(ctx context.Context, out relayOutbound) error {
@@ -429,15 +472,33 @@ func (w *WhatsAppAdapter) publishRelay(ctx context.Context, out relayOutbound) e
 	// Request/reply rather than fire-and-forget: the server's answer distinguishes
 	// "the platform accepted this" from a delivery error we would otherwise never
 	// see on this side.
-	timeout := relayReplyTimeout
-	if dl, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(dl); remaining > 0 && remaining < timeout {
-			timeout = remaining
-		}
+	//
+	// The ack can be lost AFTER the platform delivered — the server's send
+	// budget (20s) exceeds relayReplyTimeout — so a timeout is retried once
+	// with the identical payload. Safe only because out.MessageID lets the
+	// server dedupe the resend (E-11.3); without an id there is no retry,
+	// which is the pre-idempotency behaviour.
+	attempts := 1
+	if out.MessageID != "" {
+		attempts = 2
 	}
-	reply, err := nc.Request(w.relaySubject("outbound"), data, timeout)
-	if err != nil {
-		return fmt.Errorf("whatsapp relay: outbound request: %w", err)
+	var reply *nats.Msg
+	for attempt := 1; ; attempt++ {
+		timeout := relayReplyTimeout
+		if dl, ok := ctx.Deadline(); ok {
+			if remaining := time.Until(dl); remaining > 0 && remaining < timeout {
+				timeout = remaining
+			}
+		}
+		reply, err = nc.Request(w.relaySubject("outbound"), data, timeout)
+		if err == nil {
+			break
+		}
+		if attempt >= attempts || !errors.Is(err, nats.ErrTimeout) {
+			return fmt.Errorf("whatsapp relay: outbound request: %w", err)
+		}
+		slog.Warn("whatsapp relay: outbound ack timed out, retrying with same message id",
+			"message_id", out.MessageID, "attempt", attempt)
 	}
 
 	var ack struct {

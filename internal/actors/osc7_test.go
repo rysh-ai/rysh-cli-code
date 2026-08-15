@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // Phase 4 (bash-shell-mode): OSC 7 cwd scanner tests.

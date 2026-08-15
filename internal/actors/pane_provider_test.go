@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // Pane-side tests for the `##pane provider` override (design 002 §3.4,

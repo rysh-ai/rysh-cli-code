@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // rysh doctor — diagnostics (design 004 §4.3, WS4 OB3).

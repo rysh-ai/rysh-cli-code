@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package channels
 
 // TeamsAdapter — B12 / roadmap design 014 §2.4. Bridges Microsoft Teams to the

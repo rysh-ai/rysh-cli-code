@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package toolpack turns an IR into a hot-loadable Rysh tool pack: a declarative
 // manifest of tool definitions plus the live ToolExecutors that back them. It is
 // the highest-leverage Forge target — the same manifest is exposed to agents

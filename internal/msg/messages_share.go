@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Sharing messages: raw PTY relay for remote observers, upstream pane
 // sharing, the shared-pane protocol, per-pane share restrictions, and
 // WebSocket connection reliability.

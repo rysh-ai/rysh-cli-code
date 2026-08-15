@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -176,6 +178,17 @@ func collectScopePaneIDs(snap *domain.WorkspaceSnapshot, scope string, sel cmdSe
 	}
 	lane := domain.ResolveLane(tab, sel.lane)
 	if lane == nil {
+		// A TAB WE COULD NOT READ IS NOT A TAB WITH NO LANES (`F-11`). The
+		// snapshot marks a timed-out tab Partial; without this the two are
+		// indistinguishable and the honest "I could not look" is reported as
+		// the confident "it is not there" — the failure this whole track keeps
+		// re-learning, here wearing a deterministic-looking error message.
+		if tab.Partial {
+			return nil, 0, 0, "", fmt.Errorf(
+				"could not read %s: its snapshot timed out, so its lanes are unknown "+
+					"(the tab and lane %q may well exist). Retry, or reduce the pane count",
+				tabLabel, sel.lane)
+		}
 		return nil, 0, 0, "", fmt.Errorf("lane not found: %q", sel.lane)
 	}
 	laneLabel := fmt.Sprintf("lane %.8s of %s", lane.ID, tabLabel)
@@ -263,7 +276,19 @@ func anchorSnapshotToPane(snap *domain.WorkspaceSnapshot, paneID string) {
 // rather than the (possibly stale) active-tab index. Empty for cross-workspace
 // broadcasts.
 func (w *WorkspaceActor) broadcastCmd(scope string, sel cmdSelectors, command, anchorPaneID string) (targets []string, skippedShared, skippedPipeline int, label string, err error) {
-	snap := w.collectSnapshot(false, false)
+	// LAYOUT ONLY, NO HISTORIES (`F-11`). This asks a purely STRUCTURAL question
+	// — collectScopePaneIDs reads pane ids, Sharing and PipelineEnabled, and
+	// filterPanesByProgram reads Program — and the full content snapshot of
+	// every tab was missing its 2 s budget on a 111-pane tab. The timeout then
+	// substituted a lane-less stub and the caller reported `lane not found`,
+	// which sent every operator hunting a selector bug that did not exist.
+	//
+	// `--running` STILL WORKS: PaneActor.buildSnapshot sets Program
+	// unconditionally (pane_snapshot.go), outside the includeContent guard, so
+	// the cheap snapshot carries it. That was the precondition the F-11 report
+	// demanded be confirmed before this line changed, and it is checked by
+	// TestRunningFilterSurvivesTheCheapSnapshot.
+	snap := w.collectSnapshot(true, true)
 	anchorSnapshotToPane(&snap, anchorPaneID)
 	ids, skippedShared, skippedPipeline, label, err := collectScopePaneIDs(&snap, scope, sel)
 	if err != nil {

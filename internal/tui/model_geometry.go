@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 import (
@@ -42,12 +44,91 @@ func (m Model) paneExistsInSnapshot(paneID string) bool {
 	return domain.FindPaneInWorkspace(&m.snapshot, paneID) != nil
 }
 
+// Vertical tab bar sizing. The column is wide enough for the longest tab
+// label, clamped to [tabColMinWidth, tabColMaxWidth] and never allowed past a
+// third of the terminal — a long tab title must not squeeze the panes out.
+const (
+	tabColMinWidth = 12
+	tabColMaxWidth = 24
+)
+
+// tabBarVertical reports whether the tab bar is drawn as a left-hand column
+// rather than a horizontal strip. Driven by the workspace snapshot, so every
+// consumer of the geometry (view, mouse rects, PTY resizes) agrees.
+func (m Model) tabBarVertical() bool {
+	return m.snapshot.TabBarVertical
+}
+
+// tabColumnWidth returns the screen columns the vertical tab bar occupies, or
+// 0 when the tab bar is horizontal.
+//
+// This is the single definition of that width: renderBody draws the column at
+// it, paneAvailWidth subtracts it from the pane budget, and recomputePaneRects
+// offsets the mouse rects by it. Deriving it from anything but the snapshot
+// would let those three disagree and drift the layout apart.
+func (m Model) tabColumnWidth() int {
+	if !m.tabBarVertical() {
+		return 0
+	}
+	w := tabColMinWidth
+	for i, tab := range m.snapshot.Tabs {
+		if n := len([]rune(tabColumnLabel(i, tab))); n > w {
+			w = n
+		}
+	}
+	w = min(w, tabColMaxWidth)
+	// Cap at a third of the terminal, with a hard floor so a very narrow
+	// terminal still shows a usable sliver rather than a zero-width column.
+	return max(6, min(w, m.width/3))
+}
+
+// bodyXOffset is the screen column the pane grid starts at: the body's
+// Padding(0,1) plus the vertical tab column when there is one.
+func (m Model) bodyXOffset() int {
+	return 1 + m.tabColumnWidth()
+}
+
+// bodyDims returns the terminal size the body should be measured against. A
+// vertical tab bar takes its width from the left edge, and hands back the
+// header row it no longer occupies (renderHeader drops to the workspace strip
+// alone). Every body-sizing helper below derives from this, so the render, the
+// mouse rects and the PTY dims cannot disagree about where the body starts.
+func (m Model) bodyDims() (width, height int) {
+	if m.tabBarVertical() {
+		return m.width - m.tabColumnWidth(), m.height + 1
+	}
+	return m.width, m.height
+}
+
+// bodyHeight returns the content-height budget for the pane grid: two header
+// rows and a footer of chrome subtracted from the body's height.
+func (m Model) bodyHeight() int {
+	_, h := m.bodyDims()
+	return max(8, h-8)
+}
+
+// bodyPanelHeight is bodyHeight's counterpart for the full-body placeholder
+// panels (no panes, no active tab, the LLM picker), which are bordered as one
+// panel rather than a grid and so carry two fewer rows of chrome.
+func (m Model) bodyPanelHeight() int {
+	_, h := m.bodyDims()
+	return max(10, h-6)
+}
+
+// fullscreenWidth is the lipgloss Width() of a fullscreened pane: the body
+// width less outer padding (2) and the pane's own borders (2).
+func (m Model) fullscreenWidth() int {
+	w, _ := m.bodyDims()
+	return max(20, w-4)
+}
+
 // paneAvailWidth returns the total width budget for lipgloss Width() values
 // across all columns. lipgloss Width includes padding but EXCLUDES borders, so
 // each column's rendered width on screen = Width + 2 (left+right border chars).
-// We subtract 2*nColumns for borders and 2 for the body's Padding(0,1).
+// We subtract 2*nColumns for borders, 2 for the body's Padding(0,1), and the
+// vertical tab column when the tab bar is on the left.
 func (m Model) paneAvailWidth(nColumns int) int {
-	return max(24, m.width-2-2*nColumns)
+	return max(24, m.width-2-2*nColumns-m.tabColumnWidth())
 }
 
 // flexPaneHeights computes lipgloss Height() values for panes stacked in

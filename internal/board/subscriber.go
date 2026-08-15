@@ -1,7 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package board
 
 import (
 	"encoding/json"
+	"sync"
 	"sync/atomic"
 
 	"github.com/nats-io/nats.go"
@@ -59,19 +62,62 @@ const (
 
 // Event is one decoded board message on its way to a Store.
 type Event struct {
-	Kind     EventKind
+	Kind EventKind
+
+	// Board is the board this message was DELIVERED TO, read from the subject
+	// (design 028). It is never read from the payload: a post carries no board
+	// id, which is what keeps founder gate 4 closed. A consumer holding several
+	// boards routes on this field.
+	Board string
+
 	Post     *msg.MsgBoardPost
 	Register *msg.MsgBoardRegister
 }
 
-// Subscriber is the live board feed: two NATS subscriptions decoded onto one
-// buffered channel.
+// PersistenceFor resolves the single writer for a board. Returning nil for a
+// board makes the feed READ-ONLY for it — which is what every TUI passes, and
+// what keeps the session's memory out of a process that may not be running.
+//
+// The function is called on the NATS callback goroutine, so an implementation
+// that creates a Persistence on demand must not do I/O beyond what
+// Persistence.prime already does on the first write.
+type PersistenceFor func(board string) *Persistence
+
+// SingleBoardPersistence is the PersistenceFor of a caller that records exactly
+// one board and ignores the rest. It exists so that "one board" cannot be
+// spelled as "return p for anything", which would write every board's posts
+// into one board's keys.
+func SingleBoardPersistence(board string, p *Persistence) PersistenceFor {
+	want := msg.NormalizeBoardID(board)
+	return func(b string) *Persistence {
+		if msg.NormalizeBoardID(b) != want {
+			return nil
+		}
+		return p
+	}
+}
+
+// Subscriber is the live board feed: EVERY board in the session, decoded onto
+// one buffered channel and tagged with the board it arrived on.
+//
+// Four subscriptions, not two, and the pairing is the point (design 028): the
+// wildcard `board.*.post` hears every named board, and the legacy `board.post`
+// hears the default one, whose subject is one token shorter and therefore does
+// not match the wildcard. One connection and one callback path per family, no
+// per-board subscription bookkeeping, and a board that appears mid-session is
+// heard without anyone being told it exists.
 type Subscriber struct {
 	ch       chan Event
 	subs     []*nats.Subscription
 	dropped  atomic.Uint64
-	persist  *Persistence
+	persist  PersistenceFor
 	writeErr atomic.Uint64
+
+	// perBoardDropped counts drops per board. A shared counter would report
+	// fleet 7's drops on fleet 3's board, which is the kind of number that gets
+	// acted on by the wrong person.
+	dropMu          sync.Mutex
+	perBoardDropped map[string]uint64
 }
 
 // Subscribe wires the board subjects onto a buffered channel. buf <= 0 means
@@ -84,11 +130,15 @@ type Subscriber struct {
 // built with msg.T(...) — never literals, because T's prefix is the SESSION
 // NAME and a literal "rysh.board.post" breaks the moment a session is called
 // anything else (rysh-shared/msg/topics.go).
-func Subscribe(nc *nats.Conn, codecs *msg.CodecRegistry, buf int, persist *Persistence) (*Subscriber, error) {
+func Subscribe(nc *nats.Conn, codecs *msg.CodecRegistry, buf int, persist PersistenceFor) (*Subscriber, error) {
 	if buf <= 0 {
 		buf = DefaultBufferSize
 	}
-	s := &Subscriber{ch: make(chan Event, buf), persist: persist}
+	s := &Subscriber{
+		ch:              make(chan Event, buf),
+		persist:         persist,
+		perBoardDropped: make(map[string]uint64),
+	}
 
 	decode := func(data []byte) (interface{}, bool) {
 		var env msg.NATSEnvelope
@@ -102,43 +152,72 @@ func Subscribe(nc *nats.Conn, codecs *msg.CodecRegistry, buf int, persist *Persi
 		return d, true
 	}
 
-	postSub, err := nc.Subscribe(msg.BoardPostSubject(), func(n *nats.Msg) {
+	onPost := func(n *nats.Msg) {
+		// The board comes from the SUBJECT the message was delivered on. A
+		// subject that does not parse is dropped rather than defaulted: filing
+		// a fleet's post onto the session board would be a silent misroute,
+		// and there is no subject this subscriber listens to that cannot parse.
+		board, ok := msg.BoardIDFromSubject(n.Subject, "post")
+		if !ok {
+			return
+		}
 		if d, ok := decode(n.Data); ok {
 			if p, ok := d.(*msg.MsgBoardPost); ok {
 				// Unconditional: see the note at the top of this file.
-				if err := s.persist.SavePost(p); err != nil {
+				if err := s.persistFor(board).SavePost(p); err != nil {
 					s.writeErr.Add(1)
 				}
-				s.push(Event{Kind: EventPost, Post: p})
+				s.push(Event{Kind: EventPost, Board: board, Post: p})
 			}
 		}
-	})
-	if err != nil {
-		return nil, err
 	}
-	s.subs = append(s.subs, postSub)
 
-	regSub, err := nc.Subscribe(msg.BoardRegisterSubject(), func(n *nats.Msg) {
+	onRegister := func(n *nats.Msg) {
+		board, ok := msg.BoardIDFromSubject(n.Subject, "register")
+		if !ok {
+			return
+		}
 		if d, ok := decode(n.Data); ok {
 			if r, ok := d.(*msg.MsgBoardRegister); ok {
-				if err := s.persist.SaveRegister(r); err != nil {
+				if err := s.persistFor(board).SaveRegister(r); err != nil {
 					s.writeErr.Add(1)
 				}
-				s.push(Event{Kind: EventRegister, Register: r})
+				s.push(Event{Kind: EventRegister, Board: board, Register: r})
 			}
 		}
-	})
-	if err != nil {
-		// Undo the first subscription rather than leaving half a feed running:
-		// a Subscriber that reports an error but keeps delivering posts is the
-		// worst of both.
-		_ = postSub.Unsubscribe()
-		s.subs = nil
-		return nil, err
 	}
-	s.subs = append(s.subs, regSub)
+
+	// Both shapes of every family. Failing halfway leaves NOTHING running: a
+	// Subscriber that reports an error and keeps delivering posts is the worst
+	// of both, and with four subscriptions the half-open case is likelier than
+	// it was with two.
+	for _, w := range []struct {
+		subject string
+		handler nats.MsgHandler
+	}{
+		{msg.BoardPostSubject(msg.DefaultBoardID), onPost},
+		{msg.BoardPostPattern(), onPost},
+		{msg.BoardRegisterSubject(msg.DefaultBoardID), onRegister},
+		{msg.BoardRegisterPattern(), onRegister},
+	} {
+		sub, err := nc.Subscribe(w.subject, w.handler)
+		if err != nil {
+			s.Close()
+			return nil, err
+		}
+		s.subs = append(s.subs, sub)
+	}
 
 	return s, nil
+}
+
+// persistFor is the writer for one board, or nil for a read-only feed. Nil
+// *Persistence methods are no-ops, so callers need no branch.
+func (s *Subscriber) persistFor(board string) *Persistence {
+	if s.persist == nil {
+		return nil
+	}
+	return s.persist(board)
 }
 
 // push is non-blocking by design: this runs on the NATS callback goroutine and
@@ -148,6 +227,9 @@ func (s *Subscriber) push(ev Event) {
 	case s.ch <- ev:
 	default:
 		s.dropped.Add(1)
+		s.dropMu.Lock()
+		s.perBoardDropped[ev.Board]++
+		s.dropMu.Unlock()
 	}
 }
 
@@ -160,6 +242,16 @@ func (s *Subscriber) Events() <-chan Event { return s.ch }
 // recoverable by re-reading. Without persistence they are gone, and the view
 // must say so.
 func (s *Subscriber) Dropped() uint64 { return s.dropped.Load() }
+
+// DroppedFor is the same count for ONE board, which is what a board view must
+// render: a session-wide number shown on one fleet's board is a claim about
+// that fleet that is not true.
+func (s *Subscriber) DroppedFor(board string) uint64 {
+	id := msg.NormalizeBoardID(board)
+	s.dropMu.Lock()
+	defer s.dropMu.Unlock()
+	return s.perBoardDropped[id]
+}
 
 // WriteErrors counts messages the KV refused. A non-zero value means the board
 // is live-only for those messages: they were delivered but will not survive a

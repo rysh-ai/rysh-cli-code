@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package usage holds the cost-observability pricing table (design 003).
 //
 // Cost is computed in micro-USD (µUSD). A convenient identity keeps the table

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package plugin
 
 // Contract conformance (design 002 §6): drive PluginChannelAdapter through

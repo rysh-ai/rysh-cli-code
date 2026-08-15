@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // SecretNAT / ReSet (Reversible Secret Translation) — workspace-side wiring.

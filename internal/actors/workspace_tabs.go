@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -148,6 +150,66 @@ func (w *WorkspaceActor) moveActiveTab(dir msg.Direction) bool {
 	return true
 }
 
+// moveTabByID reorders any tab, not only the active one, and keeps the human's
+// active tab pointing at the same tab it did before. `##move tab <ref> left`
+// has to be able to name a tab nobody is looking at; moveActiveTab is the
+// keyboard path, where "the tab" can only mean the one on screen.
+func (w *WorkspaceActor) moveTabByID(tabID string, dir msg.Direction) bool {
+	i := -1
+	for idx, t := range w.tabs {
+		if t.id == tabID {
+			i = idx
+			break
+		}
+	}
+	if i < 0 {
+		return false
+	}
+	var j int
+	switch dir {
+	case msg.DirLeft, msg.DirPrev, msg.DirUp:
+		j = i - 1
+	case msg.DirRight, msg.DirNext, msg.DirDown:
+		j = i + 1
+	default:
+		return false
+	}
+	if j < 0 || j >= len(w.tabs) {
+		return false // at edge
+	}
+	active := ""
+	if w.activeTabIdx >= 0 && w.activeTabIdx < len(w.tabs) {
+		active = w.tabs[w.activeTabIdx].id
+	}
+	w.tabs[i], w.tabs[j] = w.tabs[j], w.tabs[i]
+	for idx, t := range w.tabs {
+		if t.id == active {
+			w.activeTabIdx = idx
+			break
+		}
+	}
+	return true
+}
+
+// createEmptyTab creates a tab with NO panes, for a move to fill.
+//
+// createTab seeds cfg.InitialPanes panes, which is right for `##new tab` and
+// wrong here: `##move lane to-new-tab` would land the lane next to a stray pane
+// nobody asked for. The tab is empty for the moment between this call and the
+// adopt that follows it — no snapshot is taken in between, because both run
+// inside one workspace Receive.
+func (w *WorkspaceActor) createEmptyTab(ctx actor.Context) *tabInfo {
+	tabID := uuid.NewString()
+	title := fmt.Sprintf("tab-%d", len(w.tabs)+1)
+
+	ta := NewTabActor(tabID, title, w.cfg, w.pub, w.nc, w.agSetup, w.paneKV, w.childSecretResolver(), nil)
+	pid := ctx.Spawn(actor.PropsFromProducer(func() actor.Actor { return ta }))
+
+	info := &tabInfo{id: tabID, title: title, actor: ta, pid: pid}
+	w.tabs = append(w.tabs, info)
+	return info
+}
+
 // ---------------------------------------------------------------------------
 // Forwarding
 // ---------------------------------------------------------------------------
@@ -214,6 +276,23 @@ func (w *WorkspaceActor) renameTabByID(id, name string) bool {
 	if t.actor != nil {
 		t.actor.title = name
 	}
+	w.persistToKV()
+	return true
+}
+
+// setTabBarVertical records the tab-bar orientation and republishes the layout.
+// Returns true when the orientation actually changed.
+//
+// The orientation is pure presentation, but it goes through persistToKV rather
+// than a bare field write because that is the single hook that invalidates the
+// snapshot caches and marks the layout dirty — without it the TUI keeps
+// serving the cached snapshot and the bar does not move until the next
+// structural change.
+func (w *WorkspaceActor) setTabBarVertical(vertical bool) bool {
+	if w.tabBarVertical == vertical {
+		return false
+	}
+	w.tabBarVertical = vertical
 	w.persistToKV()
 	return true
 }

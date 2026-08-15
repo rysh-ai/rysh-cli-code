@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // workspace_pane_provider.go — `##pane provider [name [model]]` (design 002

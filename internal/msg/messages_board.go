@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package msg
 
 import "strconv"
@@ -127,9 +129,20 @@ type MsgCLIBoardPost struct {
 	// bystander is the exact defect this message exists to avoid.
 	AsPaneID string `json:"as_pane_id"`
 
-	Kind     string `json:"kind,omitempty"`      // default: BoardKindMilestone
+	Kind     string `json:"kind,omitempty"` // default: BoardKindMilestone
 	Text     string `json:"text"`
 	ThreadID string `json:"thread_id,omitempty"` // empty = start a new root
+
+	// Board names which board to post to (design 028). Empty means "resolve it
+	// from the poster", which the workspace does: the pane's own board.id meta,
+	// then the session board.
+	//
+	// It rides the CLI message and NOT MsgBoardPost, and the difference is the
+	// whole of D-12: this is a request that says where to deliver, while the
+	// post itself stays free of any board or fleet identity. Adding it here
+	// costs nothing to gate 4, which is about the schema on the wire between
+	// agents.
+	Board string `json:"board,omitempty"`
 }
 
 // NewBoardPost stamps the schema version and the poster's clock. Every producer
@@ -208,7 +221,6 @@ func containsUnitSep(s string) bool {
 	return false
 }
 
-
 // BoardAliveSubject is where the recorder answers "are you recording?".
 //
 // A REQUEST, not a heartbeat. Every failure on this track came from inferring
@@ -223,8 +235,43 @@ func containsUnitSep(s string) bool {
 // falsify the single-writer detector in internal/actors/abla_test.go — that
 // bucket's precondition is "nothing else writes here", and liveness has no
 // business breaking it.
-func BoardAliveSubject() string { return T("board", "alive") }
+// Per board since design 028: a caller asks whether the recorder for a NAMED
+// board is listening. One recorder serves every board in a session today
+// (internal/actors/abla.go), so every board's alive subject is answered by the
+// same actor — but the subject is per board so that stays an implementation
+// detail rather than something callers encode.
+func BoardAliveSubject(board string) string { return boardSubject(board, "alive") }
+
+// BoardAlivePattern is the wildcard a recorder subscribes to in order to answer
+// for every named board. Like the post pattern, it does not match the default
+// board's shorter subject.
+func BoardAlivePattern() string { return T("board", "*", "alive") }
 
 // BoardAliveReply is what a live recorder answers. The content is deliberately
 // trivial: the fact that a reply arrived at all is the signal.
 const BoardAliveReply = "recording"
+
+// BoardQuerySubject is where the recorder answers "what is ON the board?".
+//
+// A SECOND REQUEST SUBJECT IN THE SHAPE OF BoardAliveSubject, deliberately, and
+// served by the same actor for the same two reasons.
+//
+//  1. ASK THE RECORDER, DO NOT READ THE TRACE IT LEFT (design 026 §5.4). ABLA
+//     holds the authoritative in-memory board — restored from the KV at start
+//     and fed by the live subscription since. Its answer is what the session
+//     actually heard. The KV is a durable copy of that, one restore behind, and
+//     reading it would be inferring the board's state from an artifact instead
+//     of asking the thing that owns it.
+//
+//  2. F-23 IS WHAT HAPPENS WHEN A SECOND CALL SITE DERIVES THE BUCKET NAME.
+//     runAttachUI built a bus.Config with no SessionName, so an attaching TUI
+//     opened rysh-board-default while the daemon wrote rysh-board-<session>.
+//     Subjects were fine; only the restore was dead, and it failed LOOKING
+//     HEALTHY — an empty board renders identically to a quiet one. A read path
+//     that goes through this subject cannot reintroduce that: it has no bucket
+//     name to get wrong, and a recorder that does not answer is an ERROR rather
+//     than an empty result (board.ErrNoRecorder).
+func BoardQuerySubject(board string) string { return boardSubject(board, "query") }
+
+// BoardQueryPattern is the wildcard the recorder serves every named board on.
+func BoardQueryPattern() string { return T("board", "*", "query") }

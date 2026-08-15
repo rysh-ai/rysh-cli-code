@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package agentic
 
 // Wiring tests for the record/replay provider seam (design 009 §3.2): the

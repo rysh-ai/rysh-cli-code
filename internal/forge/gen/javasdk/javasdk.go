@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package javasdk is a Forge generator that emits a Java client SDK for an API
 // described by the IR. The generated client uses only the JDK (java.net.http
 // HttpClient, available since Java 11) plus a tiny embedded JSON reader, so it

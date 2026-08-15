@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // Tests for `rysh channel install|list|remove` (design 002, WS2 P3). All runs

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package web provides an embedded web server that mirrors the rysh TUI in a
 // browser. It connects to the same NATS bus as the TUI, polls workspace
 // snapshots, and pushes them to WebSocket clients. Commands from the browser
@@ -58,15 +60,15 @@ type Server struct {
 	// WHICH DOOR a request came through decides whether the gate applies at all
 	// — see authMiddleware and StartShared.
 	//
-	// credsDir, when set, is the workspace rysh dir holding web-auth.json, and
-	// the file — not this snapshot — becomes the source of truth. Every daemon
-	// rooted at a workspace shares that one file (rysh state is project-local;
-	// there is no ~/.rysh), so a second daemon running `##rysh web auth` mints a
-	// new signing key that this process would otherwise never see. See
-	// refreshCredentials and F-9.
+	// credsRef, when set, names the credentials FILE this server follows — that
+	// session's own login, falling back to the project's — and the file, not
+	// this snapshot, becomes the source of truth. Several daemons can share one
+	// file (rysh state is project-local; there is no ~/.rysh), so a second
+	// daemon running `##rysh web auth` mints a new signing key that this process
+	// would otherwise never see. See refreshCredentials and F-9.
 	credsMu   sync.RWMutex
 	creds     *Credentials
-	credsDir  string
+	credsRef  CredentialsRef
 	credsStat credsFileStamp
 
 	// fsBrowse serves the web UI's file browser (GET /fs/list, /fs/read).
@@ -95,7 +97,7 @@ type Server struct {
 	webPaneMu sync.Mutex
 	webPanes  map[string]*webPaneSession
 
-	httpSrv          *http.Server
+	httpSrv *http.Server
 
 	// engine is the built route set, kept after Start so a SHARED listener can
 	// be attached to the same routes, the same hub and the same session.
@@ -104,10 +106,10 @@ type Server struct {
 	// routes, on which a login is ALWAYS required. It exists so the desktop app
 	// can keep its unauthenticated loopback connection while the same UI is
 	// handed to a browser (or a phone) behind a password. nil ⇒ no shared door.
-	sharedSrv  *http.Server
-	sharedLn   net.Listener
-	sharedHost string
-	sharedPort int
+	sharedSrv        *http.Server
+	sharedLn         net.Listener
+	sharedHost       string
+	sharedPort       int
 	hub              *Hub
 	cancel           context.CancelFunc
 	mu               sync.Mutex
@@ -1094,6 +1096,29 @@ func (s *Server) handleCommand(action string, data json.RawMessage) {
 			}
 			_ = s.pub.Send(wsInbox, &msg.MsgMoveTab{Direction: dir})
 		}
+	case "set_tab_orientation":
+		// The web/desktop client's `##tab orientation` — same typed message the
+		// TUI's ctrl+t v sends, so the two surfaces cannot drift. The resulting
+		// orientation comes back to every client on the snapshot's
+		// tab_bar_vertical field.
+		//
+		// Only the three known values act. An unrecognised one (an older client,
+		// a typo) is dropped rather than defaulting to toggle: a caller that
+		// asked for a specific orientation and got a flip would move the bar the
+		// wrong way half the time.
+		var cmd struct {
+			Orientation string `json:"orientation"`
+		}
+		if json.Unmarshal(data, &cmd) == nil {
+			switch cmd.Orientation {
+			case "toggle":
+				_ = s.pub.Send(wsInbox, &msg.MsgSetTabBarOrientation{Toggle: true})
+			case "vertical":
+				_ = s.pub.Send(wsInbox, &msg.MsgSetTabBarOrientation{Vertical: true})
+			case "horizontal":
+				_ = s.pub.Send(wsInbox, &msg.MsgSetTabBarOrientation{})
+			}
+		}
 	case "switch_workspace":
 		var cmd struct {
 			Index     int    `json:"index"`
@@ -1227,25 +1252,48 @@ func (s *Server) handleCommand(action string, data json.RawMessage) {
 			Decision  string `json:"decision"`
 			Reason    string `json:"reason"`
 		}
-		if json.Unmarshal(data, &cmd) == nil && cmd.PaneID != "" {
-			subject := msg.T("pane", cmd.PaneID, "approval", "response")
-			resp := &msg.MsgApprovalResponse{
-				RequestID: cmd.RequestID,
-				Decision:  msg.ApprovalDecision(cmd.Decision),
-				Reason:    cmd.Reason,
-			}
-			_ = s.pub.Send(subject, resp)
-
-			// Also echo the decision to the pane's output.
-			label := "approved"
-			switch msg.ApprovalDecision(cmd.Decision) {
-			case msg.DecisionNo, msg.DecisionNoWithExplanation:
-				label = "rejected"
-			case msg.DecisionYesAlways:
-				label = "approved (always)"
-			}
-			_ = s.pub.SendPaneAIOutput(cmd.PaneID, fmt.Sprintf("[%s]\n", label))
+		// Every rejection answers with approval_error (same fail-visible rule
+		// as webpane_input). A dropped approval is indistinguishable from a
+		// slow one, and the client that sends this now includes a phone, where
+		// there is no console to notice the silence — meanwhile the tool blocks
+		// to waitForApproval's five-minute timeout and is then rejected.
+		if err := json.Unmarshal(data, &cmd); err != nil {
+			s.pushApprovalError("", "", fmt.Sprintf("malformed approval_response: %v", err))
+			break
 		}
+		if cmd.PaneID == "" {
+			s.pushApprovalError("", cmd.RequestID, "approval_response needs a pane_id")
+			break
+		}
+		// An unrecognised decision is not forwarded, because the two ends
+		// disagree about what it means: the echo below would call it approved
+		// while the orchestrator's switch (agentic/orchestrator.go) takes its
+		// default branch and does NOT run the tool. Reject it here, where the
+		// client can be told.
+		if !validApprovalDecision(cmd.Decision) {
+			s.pushApprovalError(cmd.PaneID, cmd.RequestID, fmt.Sprintf(
+				"unknown approval decision %q (want yes, yes_always, no, no_with_explanation or choice_selected)",
+				cmd.Decision))
+			break
+		}
+
+		subject := msg.T("pane", cmd.PaneID, "approval", "response")
+		resp := &msg.MsgApprovalResponse{
+			RequestID: cmd.RequestID,
+			Decision:  msg.ApprovalDecision(cmd.Decision),
+			Reason:    cmd.Reason,
+		}
+		_ = s.pub.Send(subject, resp)
+
+		// Also echo the decision to the pane's output.
+		label := "approved"
+		switch msg.ApprovalDecision(cmd.Decision) {
+		case msg.DecisionNo, msg.DecisionNoWithExplanation:
+			label = "rejected"
+		case msg.DecisionYesAlways:
+			label = "approved (always)"
+		}
+		_ = s.pub.SendPaneAIOutput(cmd.PaneID, fmt.Sprintf("[%s]\n", label))
 
 	// -----------------------------------------------------------------------
 	// Browser-action result (web pane → AI's browser_action tool)

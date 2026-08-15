@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // `rysh prompt` — submit a prompt to a pane in a RUNNING session and block

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -45,7 +47,7 @@ func TestEveryCommandReportsAnUnknownSubcommand(t *testing.T) {
 		}
 		t.Run(spec.name, func(t *testing.T) {
 			w := newDispatchTestWorkspace(t)
-			_, err := w.handleRyshCommand(nil, "", "rysh", spec.name+" "+nonsense, false)
+			_, err := w.handleRyshCommand(nil, "", "rysh", spec.name+" "+nonsense, false, ryshBuiltinCmd)
 			if err == nil {
 				t.Errorf("##%s %s reported success — a script would not see the typo.\n"+
 					"Mark the failure with w.failRyshUsage(...) in the handler's default branch, "+
@@ -92,7 +94,7 @@ func TestSuccessfulCommandsReportNoFailure(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.input, func(t *testing.T) {
 			w := newDispatchTestWorkspace(t)
-			out, err := w.handleRyshCommand(nil, "", "rysh", c.input, false)
+			out, err := w.handleRyshCommand(nil, "", "rysh", c.input, false, ryshBuiltinCmd)
 			if err != nil {
 				t.Errorf("##%s reported failure (%v) but %s.\nOutput:\n%s", c.input, err, c.why, out)
 			}
@@ -107,13 +109,13 @@ func TestSuccessfulCommandsReportNoFailure(t *testing.T) {
 func TestFailureSinkIsDrainedBetweenCommands(t *testing.T) {
 	w := newDispatchTestWorkspace(t)
 
-	if _, err := w.handleRyshCommand(nil, "", "rysh", "tab zzzznotasubcommand", false); err == nil {
+	if _, err := w.handleRyshCommand(nil, "", "rysh", "tab zzzznotasubcommand", false, ryshBuiltinCmd); err == nil {
 		t.Fatal("setup: expected the bad command to fail")
 	}
 	if w.ryshFail != nil {
 		t.Errorf("the sink still holds %v after the command returned", w.ryshFail)
 	}
-	if _, err := w.handleRyshCommand(nil, "", "rysh", "help", false); err != nil {
+	if _, err := w.handleRyshCommand(nil, "", "rysh", "help", false, ryshBuiltinCmd); err != nil {
 		t.Errorf("##help inherited the previous command's failure: %v", err)
 	}
 }

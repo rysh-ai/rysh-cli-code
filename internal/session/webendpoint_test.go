@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package session
 
 // Tests for the web-server endpoint (port) recorded on the session record.
@@ -112,5 +114,83 @@ func TestWebEndpointSurvivesJSONRoundTrip(t *testing.T) {
 		if !strings.Contains(string(raw), key) {
 			t.Errorf("record JSON is missing %s — the desktop app reads this key:\n%s", key, raw)
 		}
+	}
+}
+
+// TestUpdateWebMeta covers the wider hand-off: not just the port the app dials,
+// but the bind address, the login name and the public URL a phone would use —
+// the three things a session that is reachable from off this machine has to be
+// able to say about itself.
+func TestUpdateWebMeta(t *testing.T) {
+	cfg := webEndpointCfg(t)
+	store, err := NewStore(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self := os.Getpid()
+	if _, err := store.Upsert(Record{
+		Name: "s1", Path: "/tmp/p", State: "running", PID: self, TUIPIDs: []int{self},
+		NATSPort: 4222, AppClients: 2, ProxyPort: 51413,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	UpdateWebMeta(cfg, "s1", WebMeta{
+		Port: 23001, Host: "0.0.0.0", User: "alice",
+		PublicURL: "https://rysh-web.ngrok.app",
+	})
+
+	rec, err := store.Get("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.WebPort != 23001 || rec.WebHost != "0.0.0.0" ||
+		rec.WebUser != "alice" || rec.WebPublicURL != "https://rysh-web.ngrok.app" {
+		t.Fatalf("web meta not recorded: %+v", rec)
+	}
+	// Other writers' bookkeeping survives the read-modify-write.
+	if rec.NATSPort != 4222 || rec.AppClients != 2 || rec.ProxyPort != 51413 || len(rec.TUIPIDs) != 1 {
+		t.Fatalf("clobbered another writer's fields: %+v", rec)
+	}
+
+	// A stopped server has no address, no login and no public URL — clearing
+	// the port must clear the rest, or the record advertises a door that is
+	// closed.
+	UpdateWebMeta(cfg, "s1", WebMeta{Port: 0, Host: "0.0.0.0", User: "alice", PublicURL: "https://stale"})
+	rec, err = store.Get("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.WebPort != 0 || rec.WebHost != "" || rec.WebUser != "" || rec.WebPublicURL != "" {
+		t.Fatalf("stopped server still advertised: %+v", rec)
+	}
+
+	// An unknown session is never conjured into existence.
+	UpdateWebMeta(cfg, "nope", WebMeta{Port: 8080})
+	if _, err := store.Get("nope"); err == nil {
+		t.Error("UpdateWebMeta created a record for an unknown session")
+	}
+}
+
+// The password is the one thing that must never reach the registry: the record
+// is an ordinary file other tools read.
+func TestWebMetaCarriesNoPassword(t *testing.T) {
+	cfg := webEndpointCfg(t)
+	store, err := NewStore(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self := os.Getpid()
+	if _, err := store.Upsert(Record{Name: "s1", Path: "/tmp/p", State: "running", PID: self}); err != nil {
+		t.Fatal(err)
+	}
+	UpdateWebMeta(cfg, "s1", WebMeta{Port: 23001, Host: "0.0.0.0", User: "alice"})
+
+	data, err := os.ReadFile(store.pathFor("s1"))
+	if err != nil {
+		t.Fatalf("read record: %v", err)
+	}
+	if strings.Contains(string(data), "password") {
+		t.Fatalf("the session record mentions a password:\n%s", data)
 	}
 }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Lane and pane-group messages: the two middle levels of the tree. Kept
 // together because a pane group only ever exists inside a lane, and the
 // operations on them mirror each other.
@@ -27,6 +29,11 @@ type MsgLaneCreatePaneGroup struct {
 	// never start a shell/PTY). Empty = normal pane. See
 	// MsgTabCreatePaneGroupInLane.
 	PaneType string `json:"pane_type,omitempty"`
+
+	// Meta is metadata the initial pane is born with. See
+	// MsgTabCreatePaneGroupInLane.Meta for why birth rather than a follow-up
+	// message.
+	Meta map[string]string `json:"meta,omitempty"`
 }
 
 // MsgLaneClosePaneGroup closes the active pane group in the lane.
@@ -46,6 +53,12 @@ type MsgLaneFocusGroup struct {
 // active group within the lane, so the lane snapshot reports it as active.
 type MsgLaneFocusPaneByID struct {
 	ID string `json:"id"`
+}
+
+// MsgLaneSetPaneHidden forwards a hide/reveal to the group holding the pane.
+type MsgLaneSetPaneHidden struct {
+	PaneID string `json:"pane_id"`
+	Hidden bool   `json:"hidden"`
 }
 
 // MsgLaneCreateStackedPane creates a new stacked pane in the active group.
@@ -132,6 +145,13 @@ type MsgPaneGroupStackedPaneSelect struct {
 // expanded while input routed to the newly-"active" invisible one.
 type MsgPaneGroupFocusPaneByID struct {
 	PaneID string `json:"pane_id"`
+}
+
+// MsgPaneGroupSetPaneHidden hides or reveals one pane of this group, moving
+// focus off it first when it is the active one (design 027 §5.1).
+type MsgPaneGroupSetPaneHidden struct {
+	PaneID string `json:"pane_id"`
+	Hidden bool   `json:"hidden"`
 }
 
 // MsgPaneGroupStackedPaneMove reorders the active pane within this group's stack.
