@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // LLM judge for `rysh eval --live` (design 009 §3.2): a case directory may

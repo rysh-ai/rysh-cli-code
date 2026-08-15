@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // humanoid_capabilities.go — provider capability degradation (design 006 §4.4,

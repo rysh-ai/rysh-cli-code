@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package msg
 
 import "fmt"
@@ -169,4 +171,26 @@ func NewAnsaRoute(from, to, mode, text string) *MsgAnsaRoute {
 // remember at eight separate return statements.
 func AnsaRefusal(code, format string, a ...any) *MsgAnsaRouteResult {
 	return &MsgAnsaRouteResult{OK: false, Code: code, Error: fmt.Sprintf(format, a...)}
+}
+
+// MsgBoardAgentPrompt is one line typed into the agents-board input field
+// (design 027 §5.2).
+//
+// It carries NO target. Every prompt goes to the board claude — that is the
+// founder's ruling 2, and there is deliberately no verbatim `@tag` bypass — so
+// naming a target here would create a second way to route that the board claude
+// is not in the path of. Resolving which pane is the board claude belongs to the
+// workspace, which is also where the refusal lives when two panes share the
+// name.
+type MsgBoardAgentPrompt struct {
+	Text string `json:"text"`
+
+	// Board names WHICH board's claude to reach (design 028, `D-13` ruled
+	// per-fleet on 2026-08-11). Empty means the session board.
+	//
+	// It does not weaken ruling 2: every prompt still goes to a board claude
+	// and there is still no bypass. What it fixes is that with one mind per
+	// fleet, "the board claude" stopped being a single pane — and a prompt
+	// typed into fleet epic-07's board must not be acted on by epic-08's.
+	Board string `json:"board,omitempty"`
 }

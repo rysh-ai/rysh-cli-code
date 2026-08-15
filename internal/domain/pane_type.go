@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package domain
 
 // Pane types — what a pane is INSTEAD of a shell.

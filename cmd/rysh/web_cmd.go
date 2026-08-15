@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // `rysh web` — the top-level web-viewer command design 007 promised. The web

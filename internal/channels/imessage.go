@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package channels
 
 // IMessageAdapter — C5 (openclaw_roadmap design 001 §4.5): macOS host bridge.

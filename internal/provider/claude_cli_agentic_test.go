@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package provider
 
 // Tests for ClaudeCLI reachability (design 002 §3.2, roadmap B6). The CLI

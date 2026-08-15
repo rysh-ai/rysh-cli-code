@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // Record→replay determinism, end to end at the harness seam (design 009

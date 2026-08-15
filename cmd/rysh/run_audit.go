@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // The --json-audit artifact for `rysh run` (design 009 §3.1): "every tool

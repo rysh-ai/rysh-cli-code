@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Server-side embedded web panes for browser mode (web_electron_roadmap W12).
 //
 // In the Electron app a web pane is a native WebContentsView overlaid on the
@@ -47,6 +49,27 @@ type webPaneSession struct {
 	mu      sync.Mutex
 	browser *cdp.Browser
 	cancel  context.CancelFunc
+
+	// dispatcher is the sink for forwarded input (webpane_input.go). It is
+	// the browser in production; tests inject a recorder.
+	dispatcher webPaneDispatcher
+	// srcW/srcH are the SOURCE (CSS-pixel) dimensions of the last frame
+	// published for this pane — the space input coordinates map into.
+	srcW, srcH float64
+}
+
+// dispatch returns the session's input sink, or nil if it has no live browser.
+func (w *webPaneSession) dispatch() webPaneDispatcher {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.dispatcher
+}
+
+// sourceSize returns the last published frame's source dimensions.
+func (w *webPaneSession) sourceSize() (float64, float64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.srcW, w.srcH
 }
 
 // webPaneAvailable reports whether server-side web panes can run here.
@@ -90,6 +113,13 @@ func (s *Server) handleWebPaneCommand(action string, data json.RawMessage) {
 		go s.webPaneDo(cmd.PaneID, "forward", "")
 	case "webpane_reload":
 		go s.webPaneDo(cmd.PaneID, "reload", "")
+	case "webpane_input":
+		var in webPaneInputCmd
+		if json.Unmarshal(data, &in) != nil {
+			s.pushWebPaneError(cmd.PaneID, "malformed webpane_input command")
+			return
+		}
+		go s.webPaneInput(in)
 	}
 }
 
@@ -145,6 +175,7 @@ func (s *Server) webPaneOpen(paneID, url, profile string) {
 
 	sess.mu.Lock()
 	sess.browser = b
+	sess.dispatcher = b
 	sess.cancel = cancel
 	sess.mu.Unlock()
 
@@ -210,6 +241,7 @@ func (w *webPaneSession) close() {
 	b := w.browser
 	cancel := w.cancel
 	w.browser = nil
+	w.dispatcher = nil
 	w.cancel = nil
 	w.mu.Unlock()
 	if cancel != nil {
@@ -254,18 +286,26 @@ func (s *Server) pushWebPaneFrame(sess *webPaneSession) {
 		return
 	}
 
+	// Source dimensions ride along with url/title: they are the CSS-pixel
+	// space input coordinates must be mapped into (webpane_input.go), and the
+	// client needs them to hit-test against the frame's SOURCE size rather
+	// than whatever size it scaled the image to.
 	var url, title string
-	if raw, _, err := b.Do("execute_js", json.RawMessage(`{"code":"JSON.stringify({url:location.href,title:document.title})"}`)); err == nil {
+	var srcW, srcH float64
+	if raw, _, err := b.Do("execute_js", json.RawMessage(`{"code":"JSON.stringify({url:location.href,title:document.title,w:window.innerWidth,h:window.innerHeight})"}`)); err == nil {
 		var wrap struct {
 			Result string `json:"result"`
 		}
 		if json.Unmarshal(raw, &wrap) == nil && wrap.Result != "" {
 			var pg struct {
-				URL   string `json:"url"`
-				Title string `json:"title"`
+				URL   string  `json:"url"`
+				Title string  `json:"title"`
+				W     float64 `json:"w"`
+				H     float64 `json:"h"`
 			}
 			if json.Unmarshal([]byte(wrap.Result), &pg) == nil {
 				url, title = pg.URL, pg.Title
+				srcW, srcH = pg.W, pg.H
 			}
 		}
 	}
@@ -275,13 +315,26 @@ func (s *Server) pushWebPaneFrame(sess *webPaneSession) {
 		return
 	}
 
+	// Remember the source size so forwarded input can be mapped into it. Keep
+	// the previous value if this probe failed — a stale-but-real size still
+	// maps better than none, and none is a visible error.
+	if srcW > 0 && srcH > 0 {
+		sess.mu.Lock()
+		sess.srcW, sess.srcH = srcW, srcH
+		sess.mu.Unlock()
+	} else {
+		srcW, srcH = sess.sourceSize()
+	}
+
 	data, err := json.Marshal(map[string]interface{}{
 		"type": "webpane_frame",
 		"data": map[string]interface{}{
-			"pane_id":    sess.paneID,
-			"url":        url,
-			"title":      title,
-			"screenshot": shot, // base64 JPEG
+			"pane_id":       sess.paneID,
+			"url":           url,
+			"title":         title,
+			"screenshot":    shot, // base64 JPEG
+			"source_width":  srcW, // hit-test against THESE, not the displayed size
+			"source_height": srcH,
 		},
 	})
 	if err != nil {

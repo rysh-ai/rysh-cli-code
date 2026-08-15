@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package msg
 
 import (
@@ -21,6 +23,7 @@ const (
 	TagFocusPrevTab        = "MsgFocusPrevTab"
 	TagFocusTabIndex       = "MsgFocusTabIndex"
 	TagMoveTab             = "MsgMoveTab"
+	TagSetTabBarOrient     = "MsgSetTabBarOrientation"
 	TagFocusPane           = "MsgFocusPane"
 	TagFocusPaneByID       = "MsgFocusPaneByID"
 	TagResizePane          = "MsgResizePane"
@@ -54,6 +57,7 @@ const (
 	TagTabClosePane        = "MsgTabClosePane"
 	TagTabFocus            = "MsgTabFocus"
 	TagTabFocusPaneByID    = "MsgTabFocusPaneByID"
+	TagTabSetPaneHidden    = "MsgTabSetPaneHidden"
 	TagTabResizePane       = "MsgTabResizePane"
 	TagTabResizePaneHeight = "MsgTabResizePaneHeight"
 	TagTabSubmitInput      = "MsgTabSubmitInput"
@@ -66,6 +70,7 @@ const (
 	TagLaneCloseActivePane   = "MsgLaneCloseActivePane"
 	TagLaneFocusGroup        = "MsgLaneFocusGroup"
 	TagLaneFocusPaneByID     = "MsgLaneFocusPaneByID"
+	TagLaneSetPaneHidden     = "MsgLaneSetPaneHidden"
 	TagLaneCreateStackedPane = "MsgLaneCreateStackedPane"
 	TagLaneStackedPane       = "MsgLaneStackedPane"
 	TagLaneStackedPaneSelect = "MsgLaneStackedPaneSelect"
@@ -98,16 +103,24 @@ const (
 	TagPaneGroupStackedPane       = "MsgPaneGroupStackedPane"
 	TagPaneGroupStackedPaneSelect = "MsgPaneGroupStackedPaneSelect"
 	TagPaneGroupFocusPaneByID     = "MsgPaneGroupFocusPaneByID"
+	TagPaneGroupSetPaneHidden     = "MsgPaneGroupSetPaneHidden"
 	TagPaneGroupStackedPaneMove   = "MsgPaneGroupStackedPaneMove"
 
 	// Given-name messages (Workspace → Pane, direct)
 	TagPaneSetGivenName = "MsgPaneSetGivenName"
+
+	// Off-screen toggle for a live pane (Workspace → Pane, direct).
+	TagPaneSetHidden = "MsgPaneSetHidden"
 
 	// Per-pane metadata for whoever is driving the pane (Workspace → Pane,
 	// direct), and the foreground-program announcement (Pane → anyone).
 	TagPaneSetMeta        = "MsgPaneSetMeta"
 	TagLaunchClaudeInPane = "MsgLaunchClaudeInPane"
 	TagPaneProcess        = "MsgPaneProcess"
+
+	// Native agent panes — `##claude` / `##codex` (design 029).
+	TagDiscoverCodexSession = "MsgDiscoverCodexSession"
+	TagResumeNativeAgents   = "MsgResumeNativeAgents"
 
 	// Per-pane provider override (Workspace → Pane, direct; design 002 §3.4)
 	TagPaneSetProvider = "MsgPaneSetProvider"
@@ -156,7 +169,8 @@ const (
 	TagMirrorPaneVTFrame        = "MsgMirrorPaneVTFrame"
 
 	// Supervision notifications
-	TagPaneTerminated = "MsgPaneTerminated"
+	TagPaneTerminated     = "MsgPaneTerminated"
+	TagPaneKillForeground = "MsgPaneKillForeground"
 	TagTabTerminated  = "MsgTabTerminated"
 
 	// TabActor active-pane query
@@ -358,6 +372,7 @@ const (
 	TagBoardPost                   = "MsgBoardPost"
 	TagBoardRegister               = "MsgBoardRegister"
 	TagCLIBoardPost                = "MsgCLIBoardPost"
+	TagBoardAgentPrompt            = "MsgBoardAgentPrompt"
 	TagAnsaRoute                   = "MsgAnsaRoute"
 	TagAnsaRouteResult             = "MsgAnsaRouteResult"
 	TagCLIAnsaSend                 = "MsgCLIAnsaSend"
@@ -404,6 +419,7 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagFocusPrevTab, "*msg.MsgFocusPrevTab", jsonDecoder[MsgFocusPrevTab]())
 	r.Register(TagFocusTabIndex, "*msg.MsgFocusTabIndex", jsonDecoder[MsgFocusTabIndex]())
 	r.Register(TagMoveTab, "*msg.MsgMoveTab", jsonDecoder[MsgMoveTab]())
+	r.Register(TagSetTabBarOrient, "*msg.MsgSetTabBarOrientation", jsonDecoder[MsgSetTabBarOrientation]())
 	r.Register(TagFocusPane, "*msg.MsgFocusPane", jsonDecoder[MsgFocusPane]())
 	r.Register(TagFocusPaneByID, "*msg.MsgFocusPaneByID", jsonDecoder[MsgFocusPaneByID]())
 	r.Register(TagResizePane, "*msg.MsgResizePane", jsonDecoder[MsgResizePane]())
@@ -426,6 +442,7 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagTabClosePane, "*msg.MsgTabClosePane", jsonDecoder[MsgTabClosePane]())
 	r.Register(TagTabFocus, "*msg.MsgTabFocus", jsonDecoder[MsgTabFocus]())
 	r.Register(TagTabFocusPaneByID, "*msg.MsgTabFocusPaneByID", jsonDecoder[MsgTabFocusPaneByID]())
+	r.Register(TagTabSetPaneHidden, "*msg.MsgTabSetPaneHidden", jsonDecoder[MsgTabSetPaneHidden]())
 	r.Register(TagTabResizePane, "*msg.MsgTabResizePane", jsonDecoder[MsgTabResizePane]())
 	r.Register(TagTabResizePaneHeight, "*msg.MsgTabResizePaneHeight", jsonDecoder[MsgTabResizePaneHeight]())
 	r.Register(TagTabSubmitInput, "*msg.MsgTabSubmitInput", jsonDecoder[MsgTabSubmitInput]())
@@ -440,6 +457,7 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagLaneCloseActivePane, "*msg.MsgLaneCloseActivePane", jsonDecoder[MsgLaneCloseActivePane]())
 	r.Register(TagLaneFocusGroup, "*msg.MsgLaneFocusGroup", jsonDecoder[MsgLaneFocusGroup]())
 	r.Register(TagLaneFocusPaneByID, "*msg.MsgLaneFocusPaneByID", jsonDecoder[MsgLaneFocusPaneByID]())
+	r.Register(TagLaneSetPaneHidden, "*msg.MsgLaneSetPaneHidden", jsonDecoder[MsgLaneSetPaneHidden]())
 	r.Register(TagLaneCreateStackedPane, "*msg.MsgLaneCreateStackedPane", jsonDecoder[MsgLaneCreateStackedPane]())
 	r.Register(TagLaneStackedPane, "*msg.MsgLaneStackedPane", jsonDecoder[MsgLaneStackedPane]())
 	r.Register(TagLaneStackedPaneSelect, "*msg.MsgLaneStackedPaneSelect", jsonDecoder[MsgLaneStackedPaneSelect]())
@@ -460,8 +478,11 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagPaneExecChat, "*msg.MsgPaneExecChat", jsonDecoder[MsgPaneExecChat]())
 	r.Register(TagPaneSetTitle, "*msg.MsgPaneSetTitle", jsonDecoder[MsgPaneSetTitle]())
 	r.Register(TagPaneSetGivenName, "*msg.MsgPaneSetGivenName", jsonDecoder[MsgPaneSetGivenName]())
+	r.Register(TagPaneSetHidden, "*msg.MsgPaneSetHidden", jsonDecoder[MsgPaneSetHidden]())
 	r.Register(TagPaneSetMeta, "*msg.MsgPaneSetMeta", jsonDecoder[MsgPaneSetMeta]())
 	r.Register(TagLaunchClaudeInPane, "*msg.MsgLaunchClaudeInPane", jsonDecoder[MsgLaunchClaudeInPane]())
+	r.Register(TagDiscoverCodexSession, "*msg.MsgDiscoverCodexSession", jsonDecoder[MsgDiscoverCodexSession]())
+	r.Register(TagResumeNativeAgents, "*msg.MsgResumeNativeAgents", jsonDecoder[MsgResumeNativeAgents]())
 	r.Register(TagPaneProcess, "*msg.MsgPaneProcess", jsonDecoder[MsgPaneProcess]())
 	r.Register(TagPaneSetProvider, "*msg.MsgPaneSetProvider", jsonDecoder[MsgPaneSetProvider]())
 	r.Register(TagLLMPickerOpen, "*msg.MsgLLMPickerOpen", jsonDecoder[MsgLLMPickerOpen]())
@@ -487,6 +508,7 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagBoardPost, "*msg.MsgBoardPost", jsonDecoder[MsgBoardPost]())
 	r.Register(TagBoardRegister, "*msg.MsgBoardRegister", jsonDecoder[MsgBoardRegister]())
 	r.Register(TagCLIBoardPost, "*msg.MsgCLIBoardPost", jsonDecoder[MsgCLIBoardPost]())
+	r.Register(TagBoardAgentPrompt, "*msg.MsgBoardAgentPrompt", jsonDecoder[MsgBoardAgentPrompt]())
 	r.Register(TagAnsaRoute, "*msg.MsgAnsaRoute", jsonDecoder[MsgAnsaRoute]())
 	r.Register(TagAnsaRouteResult, "*msg.MsgAnsaRouteResult", jsonDecoder[MsgAnsaRouteResult]())
 	r.Register(TagCLIAnsaSend, "*msg.MsgCLIAnsaSend", jsonDecoder[MsgCLIAnsaSend]())
@@ -517,6 +539,7 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagMirrorPaneVTReply, "*msg.MsgMirrorPaneVTReply", jsonDecoder[MsgMirrorPaneVTReply]())
 	r.Register(TagMirrorPaneVTFrame, "*msg.MsgMirrorPaneVTFrame", jsonDecoder[MsgMirrorPaneVTFrame]())
 	r.Register(TagPaneTerminated, "*msg.MsgPaneTerminated", jsonDecoder[MsgPaneTerminated]())
+	r.Register(TagPaneKillForeground, "*msg.MsgPaneKillForeground", jsonDecoder[MsgPaneKillForeground]())
 	r.Register(TagTabTerminated, "*msg.MsgTabTerminated", jsonDecoder[MsgTabTerminated]())
 	r.Register(TagGetActivePane, "*msg.MsgGetActivePane", jsonDecoder[MsgGetActivePane]())
 	r.Register(TagActivePaneReply, "*msg.MsgActivePaneReply", jsonDecoder[MsgActivePaneReply]())
@@ -615,6 +638,7 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagPaneGroupStackedPane, "*msg.MsgPaneGroupStackedPane", jsonDecoder[MsgPaneGroupStackedPane]())
 	r.Register(TagPaneGroupStackedPaneSelect, "*msg.MsgPaneGroupStackedPaneSelect", jsonDecoder[MsgPaneGroupStackedPaneSelect]())
 	r.Register(TagPaneGroupFocusPaneByID, "*msg.MsgPaneGroupFocusPaneByID", jsonDecoder[MsgPaneGroupFocusPaneByID]())
+	r.Register(TagPaneGroupSetPaneHidden, "*msg.MsgPaneGroupSetPaneHidden", jsonDecoder[MsgPaneGroupSetPaneHidden]())
 	r.Register(TagPaneGroupStackedPaneMove, "*msg.MsgPaneGroupStackedPaneMove", jsonDecoder[MsgPaneGroupStackedPaneMove]())
 
 	// Approval flow among panes

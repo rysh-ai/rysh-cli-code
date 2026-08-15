@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package registry implements the client side of the rysh agent registry
 // (design 005): install .md agents / loops / recipes / humanoids into a
 // project's .rysh/ tree, reproducibly (lockfile) and with install-time consent

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package plugin
 
 // The reference mock plugin used by the conformance/supervisor tests. It is a

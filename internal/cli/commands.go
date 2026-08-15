@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package cli
 
 import (
@@ -7,7 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/board"
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
+	"github.com/rysh-ai/rysh-cli-code/internal/fleet"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 	"github.com/rysh-ai/rysh-cli-code/internal/session"
 )
@@ -739,7 +743,9 @@ func PipelineDisable(store *session.Store, sessionName, tabID string) error {
 // There is no envelope, fleet, role or unit parameter by founder ruling (gate
 // 4): a board post is chat — who spoke, under which thread — and fleet routing
 // is a separate concern that does not enter this schema.
-func BoardPost(store *session.Store, sessionName, asPaneID, kind, threadID, text string) (*msg.MsgCLIResponse, error) {
+// boardID names the board; "" lets the daemon resolve it from the poster's
+// pane, which is what every pre-028 caller does.
+func BoardPost(store *session.Store, sessionName, asPaneID, kind, threadID, boardID, text string) (*msg.MsgCLIResponse, error) {
 	c, err := connect(store, sessionName)
 	if err != nil {
 		return nil, err
@@ -751,7 +757,83 @@ func BoardPost(store *session.Store, sessionName, asPaneID, kind, threadID, text
 		Kind:     kind,
 		Text:     text,
 		ThreadID: threadID,
+		Board:    boardID,
 	})
+}
+
+// boardQueryTimeout bounds a board read.
+//
+// Deliberately not defaultTimeout (30s) and deliberately not the TUI's 400ms
+// liveness budget. A read is a one-shot command a human or an agent is waiting
+// on, and the recorder answers it from memory — so anything approaching a
+// second means it is not coming. 5s leaves room for a 5000-post board to
+// marshal on a loaded machine without making a missing recorder feel like a
+// hang. A missing recorder is usually instant anyway: NATS answers a request
+// with no subscriber with ErrNoResponders rather than waiting out the timeout.
+const boardQueryTimeout = 5 * time.Second
+
+// BoardTail asks the session's recorder what is on the agents board.
+//
+// It ASKS ABLA over msg.BoardQuerySubject; it does not open the board's KV
+// bucket. That is the whole point of the read path and it is not an
+// implementation detail — see internal/board/query.go and F-23, where a second
+// call site deriving the bucket name read an empty board and reported it as a
+// quiet one.
+//
+// A recorder that does not answer comes back as board.ErrNoRecorder with a NIL
+// reply. Callers must branch on it: "nobody answered" is not "nothing was
+// posted", and the whole value of this command depends on not conflating them.
+// boardID names which board to read; "" is the session board (design 028).
+func BoardTail(store *session.Store, sessionName, boardID string, q board.Query) (*board.QueryReply, error) {
+	c, err := connect(store, sessionName)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+
+	return board.Ask(c.nc, boardID, q, boardQueryTimeout)
+}
+
+// ---------------------------------------------------------------------------
+// Fleet registry (design 028 §6.5)
+// ---------------------------------------------------------------------------
+
+// fleetTimeout bounds a registry round trip. Same budget and same reasoning as
+// boardQueryTimeout: the registry answers from memory, so anything approaching
+// a second means it is not coming.
+const fleetTimeout = 5 * time.Second
+
+// FleetList asks the session's registry which fleets exist. name selects one;
+// empty lists all.
+//
+// It ASKS THE REGISTRY ACTOR and never opens its KV bucket, which is the rule
+// the board's read path already established — a second call site that derives a
+// bucket name is how F-23 happened, and it failed while looking healthy.
+//
+// A registry that does not answer comes back as fleet.ErrNoRegistry with a NIL
+// reply. Callers must branch on it: "nobody answered" is not "no fleets exist".
+func FleetList(store *session.Store, sessionName, name string) (*fleet.Reply, error) {
+	c, err := connect(store, sessionName)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	return fleet.Ask(c.nc, fleet.Query{Name: name}, fleetTimeout)
+}
+
+// FleetUpdate writes to the registry: register, forget, state, membership.
+//
+// The reply is returned even when the registry REFUSED, so a caller can print
+// what was wrong rather than a generic failure — `fleetctl` registers a fleet
+// and immediately puts agents in it, and "why" is the difference between
+// retrying and stopping.
+func FleetUpdate(store *session.Store, sessionName string, u fleet.Update) (*fleet.UpdateReply, error) {
+	c, err := connect(store, sessionName)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	return fleet.Send(c.nc, u, fleetTimeout)
 }
 
 // ---------------------------------------------------------------------------

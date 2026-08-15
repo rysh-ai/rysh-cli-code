@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // skill_scaffold.go — shared humanoid-scaffolding helpers (design 008 TO1).

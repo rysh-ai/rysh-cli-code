@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package provider
 
 // Which HOST does a config-level `provider.name:` selection actually talk to?

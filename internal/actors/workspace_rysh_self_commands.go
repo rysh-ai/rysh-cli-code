@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -43,7 +45,12 @@ func (w *WorkspaceActor) handleRyshSelfCommand(ctx actor.Context, out *strings.B
 			// not start without one — passed here with --username/--password, or
 			// stored earlier by `##rysh web auth`. Control mode is the exception
 			// (see webLoginRequired).
-			opts, warnings := parseWebStartArgs(args[2:], w.cfg.WebHost, w.cfg.WebPort)
+			// Defaults come from THIS SESSION's saved settings (falling back to
+			// the project-wide [web] block for a session that has none), so a
+			// bare `##rysh web start` repeats what this session was last told —
+			// not what some sibling session in the same project was told.
+			sessionWeb := w.sessionWebSettings()
+			opts, warnings := parseWebStartArgs(args[2:], sessionWeb.Host, sessionWeb.Port)
 			for _, warn := range warnings {
 				fmt.Fprintf(out, "\n[rysh] %s\n", warn)
 			}
@@ -82,7 +89,7 @@ func (w *WorkspaceActor) handleRyshSelfCommand(ctx actor.Context, out *strings.B
 			// Follow the workspace's credentials file, not just the snapshot
 			// resolved above: a sibling daemon rooted at this project shares it
 			// and rotating the key there must not 401 everyone here (F-9).
-			w.webServer.TrackCredentialsFile(w.cfg.RyshDir)
+			w.webServer.TrackCredentialsRef(w.credentialsRef())
 			w.webServer.SetFSBrowser(w.webFSBrowser())
 			if opts.Host != "" {
 				w.webServer.SetHost(opts.Host)
@@ -104,11 +111,6 @@ func (w *WorkspaceActor) handleRyshSelfCommand(ctx actor.Context, out *strings.B
 				w.webServer = nil
 				break
 			}
-			// Advertise the endpoint on the session record: this is how the
-			// desktop app adopts a command-line session's daemon, which it can
-			// otherwise never reach (its renderer speaks only HTTP/WebSocket,
-			// and it knows the port of nothing it did not spawn itself).
-			w.recordWebEndpoint(w.webServer)
 			base := webBaseURL(opts.Host, opts.Port)
 			if opts.Control {
 				fmt.Fprintf(out, "\n[rysh] control plane ENABLED (loopback only) — channels, pairings and humanoids are manageable from the dashboard\n")
@@ -124,9 +126,25 @@ func (w *WorkspaceActor) handleRyshSelfCommand(ctx actor.Context, out *strings.B
 			// The default bind is loopback, so a user expecting to open the UI
 			// from a phone or another machine gets told how, instead of
 			// debugging a silent connection refused.
-			if webBindIsLoopback(opts.Host) {
+			if webBindIsLoopback(opts.Host) && !opts.Ngrok {
 				fmt.Fprintf(out, "[rysh] not reachable from other machines — restart with --bind 0.0.0.0 to expose it on your network\n")
 			}
+			// The public door, when one was asked for. It goes up after the
+			// server so the tunnel never points at a port nothing is serving.
+			if opts.Ngrok || sessionWeb.Ngrok {
+				w.startWebTunnel(out, opts.Port, opts.NgrokDomain)
+			}
+			// Persist what was typed, so the next start of this session repeats
+			// it: address and tunnel to rysh.config.yaml, login to the secret
+			// store, auto_start with them.
+			w.persistWebStart(out, opts, creds)
+			// Advertise the endpoint on the session record: this is how the
+			// desktop app adopts a command-line session's daemon, which it can
+			// otherwise never reach (its renderer speaks only HTTP/WebSocket,
+			// and it knows the port of nothing it did not spawn itself). The
+			// bind address, login name and public URL travel with it, so what
+			// serves this session is legible without attaching to it.
+			w.recordWebMeta(w.webServer)
 		case "stop":
 			// `--shared` closes only the shared address, leaving the server (and
 			// the desktop app on it) running. Checked before everything else: it
@@ -148,6 +166,12 @@ func (w *WorkspaceActor) handleRyshSelfCommand(ctx actor.Context, out *strings.B
 					break
 				}
 				fmt.Fprintf(out, "\n[rysh] stopped serving %s — the session itself is untouched\n", webBaseURL(host, port))
+				// The tunnel published THAT address; leaving it up would point
+				// the public URL at a door that no longer opens.
+				if w.webTunnel != nil && w.webTunnel.Port == port {
+					w.stopWebTunnel(out)
+				}
+				w.recordWebMeta(w.webServer)
 				break
 			}
 			if w.webServer == nil {
@@ -171,10 +195,14 @@ func (w *WorkspaceActor) handleRyshSelfCommand(ctx actor.Context, out *strings.B
 			} else if w.webServer.IsRunning() {
 				_ = w.webServer.Stop()
 				w.webServer = nil
+				// A tunnel outliving the server it publishes would point the
+				// public URL at a closed port. One this session did not open is
+				// still left alone (tunnel.Stop).
+				w.stopWebTunnel(nil)
 				// Withdraw the advertised endpoint in the same breath, so a
 				// desktop app looking for a door to adopt is never sent to a
 				// port nothing is listening on.
-				w.recordWebEndpoint(nil)
+				w.recordWebMeta(nil)
 				fmt.Fprintf(out, "\n[rysh] web server stopped\n")
 			} else {
 				// A server object that is not running is a dead instance
@@ -182,7 +210,8 @@ func (w *WorkspaceActor) handleRyshSelfCommand(ctx actor.Context, out *strings.B
 				// holds and forget it, so the next start is clean.
 				_ = w.webServer.Stop()
 				w.webServer = nil
-				w.recordWebEndpoint(nil)
+				w.stopWebTunnel(nil)
+				w.recordWebMeta(nil)
 				fmt.Fprintf(out, "\n[rysh] web server is not running\n")
 				w.failRysh("web server is not running")
 			}
@@ -212,7 +241,7 @@ func (w *WorkspaceActor) handleRyshSelfCommand(ctx actor.Context, out *strings.B
 				// at the worst possible moment. That leaves the server on the
 				// last good login it loaded, which to a user just looks like the
 				// password not working. Say so, with the remedy (F-9).
-				if _, err := web.LoadCredentials(w.cfg.RyshDir); err != nil {
+				if _, err := web.LoadCredentialsFor(w.credentialsRef()); err != nil {
 					fmt.Fprintf(out, "[rysh] the stored login is unreadable: %v\n", err)
 					fmt.Fprintf(out, "[rysh] the server is still serving the last login it read — set it again with `##rysh web auth username=<u> password=<p>`\n")
 				}
@@ -222,6 +251,13 @@ func (w *WorkspaceActor) handleRyshSelfCommand(ctx actor.Context, out *strings.B
 					fmt.Fprintf(out, "[rysh] shared at %s — sign in as %q (##rysh web stop --shared to close)\n",
 						webBaseURL(sh, sp), user)
 				}
+				// The public door and what a restart will do with all of it —
+				// the two things a status query about a shared session is
+				// actually asking.
+				if w.webTunnel != nil && w.webTunnel.URL != "" {
+					fmt.Fprintf(out, "[rysh] published at %s (%s)\n", w.webTunnel.URL, w.webTunnel.Origin)
+				}
+				w.writeWebRestartStatus(out)
 			} else {
 				// "It is not running" is the answer to a status query, not a
 				// failure — the same rule ##replay status and ##upstream status
@@ -229,6 +265,8 @@ func (w *WorkspaceActor) handleRyshSelfCommand(ctx actor.Context, out *strings.B
 				// something and it could not.
 				fmt.Fprintf(out, "\n[rysh] web server is not running\n")
 			}
+		case "ngrok", "publish", "tunnel":
+			w.handleWebNgrok(out, args[2:])
 		case "auth":
 			w.handleWebAuth(out, args[2:])
 		case "token":

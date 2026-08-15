@@ -1,6 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
+	"strings"
 	"time"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
@@ -33,7 +36,26 @@ func (p *PaneActor) registerOnBoard() {
 	// roster is a SECOND surface that could otherwise print an approval pane's
 	// "requestID\x1FresponseSubject" as somebody's name.
 	persona := msg.BoardPersona(p.givenName, p.title, p.id)
-	_ = msg.SendBoardRegister(p.pub, msg.NewBoardRegister(p.id, persona, time.Now().UnixMilli()))
+	_ = msg.SendBoardRegister(p.pub, p.boardID(), msg.NewBoardRegister(p.id, persona, time.Now().UnixMilli()))
+}
+
+// boardID is the board this pane belongs to: its own `board.id` meta, or the
+// session board (design 028).
+//
+// The pane reads its OWN meta rather than asking the workspace, which is the
+// same reason registration lives here at all: a pane knows its identity, and a
+// round trip to the workspace during pane startup is both slower and one more
+// thing that can fail while a pane is being born. An invalid stored value falls
+// back to the session board rather than becoming a subject token.
+func (p *PaneActor) boardID() string {
+	if p.meta == nil {
+		return msg.DefaultBoardID
+	}
+	id := strings.TrimSpace(p.meta[paneMetaBoardID])
+	if id == "" || msg.ValidateBoardID(id) != nil {
+		return msg.DefaultBoardID
+	}
+	return msg.NormalizeBoardID(id)
 }
 
 // paneCanHostAnAgent delegates to domain so the actor producer and the TUI

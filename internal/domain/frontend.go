@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package domain
 
 // Front-end capabilities — what each rysh front-end can actually *render*.

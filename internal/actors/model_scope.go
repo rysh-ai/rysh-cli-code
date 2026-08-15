@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // model_scope.go — the LLM model inheritance hierarchy.

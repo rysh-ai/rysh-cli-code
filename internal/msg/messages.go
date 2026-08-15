@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package msg contains all typed message structs used for inter-actor
 // communication via NATS. Messages are plain Go structs (no protobuf).
 // They are serialized into NATSEnvelope for transport.

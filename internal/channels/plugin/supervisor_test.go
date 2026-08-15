@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package plugin
 
 // Lifecycle tests (design 002 §4.5): crash → backoff restart → connected;

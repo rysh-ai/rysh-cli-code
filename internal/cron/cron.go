@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package cron holds the pure scheduling domain for rysh's in-daemon cron
 // service: the Job model, schedule parsing/validation (via robfig/cron), and
 // next-run computation. It has no actor or NATS dependencies so it is fully

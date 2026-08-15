@@ -2,7 +2,7 @@ module github.com/rysh-ai/rysh-cli-code
 
 go 1.25.3
 
-require github.com/rysh-ai/rysh-cli-shared v0.2.5
+require github.com/rysh-ai/rysh-cli-shared v0.2.6
 
 require (
 	github.com/asynkron/protoactor-go v0.0.0-20260118094027-288962e52f3f

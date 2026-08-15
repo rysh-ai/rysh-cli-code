@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package channels
 
 // Tests for the optional non-binding Validator interface (design 004 §4.3):

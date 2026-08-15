@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // R7: admission-gate defaults (design 003 G5). The shipped default is

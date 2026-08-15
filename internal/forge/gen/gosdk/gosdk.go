@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package gosdk is a Forge generator that emits a self-contained Go client SDK
 // for an API described by the IR. The generated package depends only on the
 // standard library (net/http, encoding/json) and exposes one exported method

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package cdp is a minimal Chrome DevTools Protocol client used by rysh's
 // headless web mode: it launches a Chromium with --remote-debugging-port,
 // attaches over the browser-level WebSocket (flat session mode), and executes
@@ -10,6 +12,7 @@ package cdp
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -100,11 +103,10 @@ func launchArgs(o LaunchOptions) []string {
 		sbxArgs, _ := sandboxArgs(probeSandboxEnv())
 		args = append(args, sbxArgs...)
 	}
-	url := o.URL
-	if url == "" {
-		url = "about:blank"
-	}
-	return append(args, url)
+	// Always start at about:blank and navigate afterwards; see Launch. Passing
+	// the target URL here instead is what made every CDP-injected key repeat
+	// forever (F-46).
+	return append(args, "about:blank")
 }
 
 // Launch starts Chromium and connects to its DevTools WebSocket. The caller
@@ -190,6 +192,25 @@ func Launch(ctx context.Context, o LaunchOptions) (*Browser, error) {
 	if err := b.attachFirstPage(); err != nil {
 		b.Close()
 		return nil, err
+	}
+	// Navigate AFTER attaching rather than passing the URL on the command line.
+	//
+	// F-46: a Chromium started with a URL argument auto-repeats every key that
+	// CDP injects — one Input.dispatchKeyEvent pair produced an unbounded
+	// ~400/second stream of keydown/keypress with no matching keyUp, forever,
+	// while nothing further was dispatched. Measured on the same binary, same
+	// flags, same page and the same dispatch code: launched AT a file:// URL,
+	// 1241 events two seconds after ONE press; launched at about:blank and then
+	// navigated, 3. The repeats carry code "NumpadDecimal" rather than the key
+	// that was sent, which is how a stuck key was mistaken for a bad event
+	// shape. Navigating here is also strictly better for observability — the
+	// session is attached before the page loads, so nothing that happens during
+	// load is missed.
+	if o.URL != "" && o.URL != "about:blank" {
+		if _, _, err := b.Do("navigate", json.RawMessage(`{"url":`+jsStr(o.URL)+`}`)); err != nil {
+			b.Close()
+			return nil, fmt.Errorf("navigate to %s: %w", o.URL, err)
+		}
 	}
 	// Headless launches record their PID so SweepOrphanedHeadless can reap a
 	// Chromium that outlives a force-killed daemon. Headed (login) launches

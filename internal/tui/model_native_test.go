@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 // Phase 6 (bash-shell-mode): native pass-through mode tests — the double-Esc

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package plugin
 
 // natsTransport — the preferred transport (design 002 §4.1): the plugin

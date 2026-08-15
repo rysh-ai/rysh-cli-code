@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package worktree wraps git-worktree operations for per-agent isolation
 // (design 008): give a pane/agent its own git worktree so parallel agents never
 // collide on the same repo — "N agents, N branches, one tab, zero collisions."

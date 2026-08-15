@@ -1,0 +1,898 @@
+{
+  "outbound": [
+    {
+      "type": "agent_list",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_go_expr": "r.Agents"
+    },
+    {
+      "type": "approval_error",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "error",
+        "pane_id",
+        "request_id"
+      ]
+    },
+    {
+      "type": "approval_request",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "pane_id",
+        "request"
+      ]
+    },
+    {
+      "type": "board_result",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "board",
+        "pane_id",
+        "request_id"
+      ],
+      "data_fields_optional": [
+        "error",
+        "filtered",
+        "no_recorder",
+        "roster",
+        "roster_reconciled",
+        "stats",
+        "threads",
+        "withheld"
+      ]
+    },
+    {
+      "type": "browser_action",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "pane_id",
+        "request"
+      ]
+    },
+    {
+      "type": "clipboard_content",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "err",
+        "pane_id",
+        "request_id",
+        "source",
+        "text",
+        "truncated"
+      ]
+    },
+    {
+      "type": "completion_result",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "candidates",
+        "pane_id",
+        "request_id"
+      ]
+    },
+    {
+      "type": "control_status",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "control",
+        "session"
+      ]
+    },
+    {
+      "type": "email_detail",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "email",
+        "err",
+        "humanoid_name"
+      ]
+    },
+    {
+      "type": "email_inbox_changed",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "humanoid_name"
+      ]
+    },
+    {
+      "type": "email_list",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "emails",
+        "err",
+        "humanoid_name"
+      ]
+    },
+    {
+      "type": "humanoid_list",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_go_expr": "r.Humanoids"
+    },
+    {
+      "type": "import_cookies",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "cookies",
+        "profile"
+      ]
+    },
+    {
+      "type": "pairing_list",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "allowlist",
+        "humanoid_name",
+        "pending"
+      ],
+      "data_fields_optional": [
+        "channel"
+      ]
+    },
+    {
+      "type": "pairing_qr",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_go_expr": "m"
+    },
+    {
+      "type": "pairing_request",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_go_expr": "m"
+    },
+    {
+      "type": "pairing_status",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_go_expr": "m"
+    },
+    {
+      "type": "pane_content",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "panes"
+      ]
+    },
+    {
+      "type": "pane_output",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "mode",
+        "pane_id",
+        "text",
+        "turn_id"
+      ]
+    },
+    {
+      "type": "pane_vt",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "pane_id",
+        "raw_mode",
+        "remote_interactive"
+      ],
+      "data_fields_optional": [
+        "remote_vt_cursor_col",
+        "remote_vt_cursor_row",
+        "remote_vt_screen",
+        "vt_cursor_col",
+        "vt_cursor_row",
+        "vt_screen"
+      ]
+    },
+    {
+      "type": "pipeline_output",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "tab_id",
+        "text"
+      ]
+    },
+    {
+      "type": "share_list",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_go_expr": "r.Shares"
+    },
+    {
+      "type": "snapshot",
+      "envelope": [
+        "data",
+        "layout_only",
+        "type"
+      ],
+      "data_go_expr": "\u0026r.Snapshot"
+    },
+    {
+      "type": "web_activate",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "pane_id",
+        "profile",
+        "url"
+      ]
+    },
+    {
+      "type": "web_deactivate",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "pane_id"
+      ]
+    },
+    {
+      "type": "web_prompt",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "pane_id",
+        "prompt"
+      ]
+    },
+    {
+      "type": "webpane_error",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "error",
+        "pane_id"
+      ]
+    },
+    {
+      "type": "webpane_frame",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "pane_id",
+        "screenshot",
+        "source_height",
+        "source_width",
+        "title",
+        "url"
+      ]
+    },
+    {
+      "type": "whatsapp_detail",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "err",
+        "humanoid_name",
+        "message"
+      ]
+    },
+    {
+      "type": "whatsapp_inbox_changed",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "humanoid_name"
+      ]
+    },
+    {
+      "type": "whatsapp_list",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "err",
+        "humanoid_name",
+        "messages"
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "action": "agent_activate",
+      "params": [
+        "name"
+      ]
+    },
+    {
+      "action": "agent_create",
+      "params": [
+        "name",
+        "system_prompt"
+      ]
+    },
+    {
+      "action": "agent_deactivate",
+      "params": [
+        "name"
+      ]
+    },
+    {
+      "action": "agent_delete",
+      "params": [
+        "name"
+      ]
+    },
+    {
+      "action": "agent_list"
+    },
+    {
+      "action": "agent_prompt",
+      "params": [
+        "agent_name",
+        "prompt",
+        "source_pane_id"
+      ]
+    },
+    {
+      "action": "agent_register_output",
+      "params": [
+        "agent_name",
+        "pane_id",
+        "pane_name"
+      ]
+    },
+    {
+      "action": "agent_unregister_output",
+      "params": [
+        "agent_name",
+        "pane_id"
+      ]
+    },
+    {
+      "action": "agentic_cancel",
+      "params": [
+        "pane_id"
+      ]
+    },
+    {
+      "action": "approval_response",
+      "params": [
+        "decision",
+        "pane_id",
+        "reason",
+        "request_id"
+      ]
+    },
+    {
+      "action": "board_get",
+      "params": [
+        "board",
+        "limit",
+        "pane_id",
+        "request_id",
+        "since"
+      ]
+    },
+    {
+      "action": "browser_result",
+      "params": [
+        "error",
+        "pane_id",
+        "request_id",
+        "result",
+        "screenshot",
+        "success"
+      ]
+    },
+    {
+      "action": "clipboard_copy",
+      "params": [
+        "max_bytes",
+        "pane_id",
+        "request_id",
+        "source"
+      ]
+    },
+    {
+      "action": "close_pane"
+    },
+    {
+      "action": "completion_get",
+      "params": [
+        "cwd",
+        "is_first_token",
+        "line",
+        "pane_id",
+        "request_id",
+        "shell_pid",
+        "token"
+      ]
+    },
+    {
+      "action": "control_status"
+    },
+    {
+      "action": "create_pane"
+    },
+    {
+      "action": "create_pane_down"
+    },
+    {
+      "action": "create_stacked_pane"
+    },
+    {
+      "action": "create_tab"
+    },
+    {
+      "action": "email_focus",
+      "params": [
+        "body",
+        "from",
+        "humanoid_name",
+        "listing",
+        "message_id",
+        "subject",
+        "thread_id",
+        "uid"
+      ]
+    },
+    {
+      "action": "email_list",
+      "params": [
+        "count",
+        "humanoid_name",
+        "search"
+      ]
+    },
+    {
+      "action": "email_read",
+      "params": [
+        "humanoid_name",
+        "uid"
+      ]
+    },
+    {
+      "action": "email_refresh",
+      "params": [
+        "count",
+        "humanoid_name",
+        "search"
+      ]
+    },
+    {
+      "action": "equalize_all"
+    },
+    {
+      "action": "equalize_horizontal"
+    },
+    {
+      "action": "equalize_panes"
+    },
+    {
+      "action": "equalize_vertical"
+    },
+    {
+      "action": "focus_next_pane"
+    },
+    {
+      "action": "focus_next_tab"
+    },
+    {
+      "action": "focus_pane_by_id",
+      "params": [
+        "id"
+      ]
+    },
+    {
+      "action": "focus_pane_down"
+    },
+    {
+      "action": "focus_pane_left"
+    },
+    {
+      "action": "focus_pane_right"
+    },
+    {
+      "action": "focus_pane_up"
+    },
+    {
+      "action": "focus_prev_pane"
+    },
+    {
+      "action": "focus_prev_tab"
+    },
+    {
+      "action": "focus_tab_index",
+      "params": [
+        "index"
+      ]
+    },
+    {
+      "action": "humanoid_activate",
+      "params": [
+        "name"
+      ]
+    },
+    {
+      "action": "humanoid_channel_start",
+      "params": [
+        "channel_type",
+        "humanoid_name"
+      ]
+    },
+    {
+      "action": "humanoid_channel_stop",
+      "params": [
+        "channel_type",
+        "humanoid_name"
+      ]
+    },
+    {
+      "action": "humanoid_create",
+      "params": [
+        "name",
+        "system_prompt"
+      ]
+    },
+    {
+      "action": "humanoid_deactivate",
+      "params": [
+        "name"
+      ]
+    },
+    {
+      "action": "humanoid_delete",
+      "params": [
+        "name"
+      ]
+    },
+    {
+      "action": "humanoid_list"
+    },
+    {
+      "action": "humanoid_prompt",
+      "params": [
+        "humanoid_name",
+        "prompt",
+        "source_pane_id"
+      ]
+    },
+    {
+      "action": "humanoid_set_governance",
+      "params": [
+        "humanoid_name",
+        "mode"
+      ]
+    },
+    {
+      "action": "humanoid_set_reply_mode",
+      "params": [
+        "channel_type",
+        "humanoid_name",
+        "mode"
+      ]
+    },
+    {
+      "action": "move_tab",
+      "params": [
+        "direction"
+      ]
+    },
+    {
+      "action": "pairing_allow",
+      "params": [
+        "channel",
+        "humanoid_name",
+        "sender_id"
+      ]
+    },
+    {
+      "action": "pairing_approve",
+      "params": [
+        "channel",
+        "code",
+        "humanoid_name"
+      ]
+    },
+    {
+      "action": "pairing_list",
+      "params": [
+        "channel",
+        "humanoid_name"
+      ]
+    },
+    {
+      "action": "pane_clear_output",
+      "params": [
+        "pane_id"
+      ]
+    },
+    {
+      "action": "pane_native_mode",
+      "params": [
+        "action",
+        "pane_id"
+      ]
+    },
+    {
+      "action": "pane_resize",
+      "params": [
+        "cols",
+        "pane_id",
+        "rows"
+      ]
+    },
+    {
+      "action": "raw_key_input",
+      "params": [
+        "data",
+        "pane_id"
+      ]
+    },
+    {
+      "action": "remote_forward_command",
+      "params": [
+        "command_type",
+        "payload"
+      ]
+    },
+    {
+      "action": "rename_lane",
+      "params": [
+        "name"
+      ]
+    },
+    {
+      "action": "rename_pane",
+      "params": [
+        "title"
+      ]
+    },
+    {
+      "action": "rename_tab",
+      "params": [
+        "title"
+      ]
+    },
+    {
+      "action": "resize_pane",
+      "params": [
+        "delta"
+      ]
+    },
+    {
+      "action": "resize_pane_height",
+      "params": [
+        "delta"
+      ]
+    },
+    {
+      "action": "resize_pane_width",
+      "params": [
+        "delta"
+      ]
+    },
+    {
+      "action": "set_tab_orientation",
+      "params": [
+        "orientation"
+      ]
+    },
+    {
+      "action": "share_entity",
+      "params": [
+        "entity_id",
+        "entity_type",
+        "mode"
+      ]
+    },
+    {
+      "action": "share_list"
+    },
+    {
+      "action": "stacked_pane_move",
+      "params": [
+        "direction"
+      ]
+    },
+    {
+      "action": "stacked_pane_next"
+    },
+    {
+      "action": "stacked_pane_prev"
+    },
+    {
+      "action": "stacked_pane_select",
+      "params": [
+        "index"
+      ]
+    },
+    {
+      "action": "submit_input",
+      "params": [
+        "mode",
+        "pane_id",
+        "text"
+      ]
+    },
+    {
+      "action": "swap_pane"
+    },
+    {
+      "action": "switch_workspace",
+      "params": [
+        "direction",
+        "index"
+      ]
+    },
+    {
+      "action": "toggle_pipeline_mode"
+    },
+    {
+      "action": "unshare_entity",
+      "params": [
+        "entity_id"
+      ]
+    },
+    {
+      "action": "webpane_back",
+      "params": [
+        "pane_id",
+        "profile",
+        "url"
+      ]
+    },
+    {
+      "action": "webpane_close",
+      "params": [
+        "pane_id",
+        "profile",
+        "url"
+      ]
+    },
+    {
+      "action": "webpane_forward",
+      "params": [
+        "pane_id",
+        "profile",
+        "url"
+      ]
+    },
+    {
+      "action": "webpane_input",
+      "params": [
+        "button",
+        "delta_x",
+        "delta_y",
+        "display_height",
+        "display_width",
+        "key",
+        "kind",
+        "modifiers",
+        "pane_id",
+        "profile",
+        "url",
+        "x",
+        "y"
+      ]
+    },
+    {
+      "action": "webpane_navigate",
+      "params": [
+        "pane_id",
+        "profile",
+        "url"
+      ]
+    },
+    {
+      "action": "webpane_open",
+      "params": [
+        "pane_id",
+        "profile",
+        "url"
+      ]
+    },
+    {
+      "action": "webpane_reload",
+      "params": [
+        "pane_id",
+        "profile",
+        "url"
+      ]
+    },
+    {
+      "action": "whatsapp_focus",
+      "params": [
+        "body",
+        "from",
+        "humanoid_name",
+        "id",
+        "listing"
+      ]
+    },
+    {
+      "action": "whatsapp_list",
+      "params": [
+        "count",
+        "humanoid_name"
+      ]
+    },
+    {
+      "action": "whatsapp_read",
+      "params": [
+        "humanoid_name",
+        "id"
+      ]
+    },
+    {
+      "action": "whatsapp_refresh",
+      "params": [
+        "count",
+        "humanoid_name"
+      ]
+    }
+  ]
+}

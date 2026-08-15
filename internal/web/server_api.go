@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Parity API surface (web_electron_roadmap Phase 3, tasks W7–W10).
 //
 // The Electron desktop app gets a handful of conveniences from its main
@@ -407,16 +409,21 @@ func (s *Server) releasePaneSizes(c *wsClient) {
 }
 
 // handleClientCommand routes ws commands that need the ORIGINATING client —
-// request/reply exchanges (completion, W7) and per-client web-pane streams
-// (W12) — and falls back to the broadcast-style handleCommand for the rest.
+// request/reply exchanges (completion W7, board_get in board.go) and per-client
+// web-pane streams (W12) — and falls back to the broadcast-style handleCommand
+// for the rest.
 func (s *Server) handleClientCommand(c *wsClient, action string, data json.RawMessage) {
 	switch action {
 	case "completion_get":
 		s.handleCompletionGet(c, data)
 	case "pane_resize":
 		s.handlePaneResize(c, data)
+	case "clipboard_copy":
+		s.handleClipboardCopy(c, data)
+	case "board_get":
+		s.handleBoardGet(c, data)
 	case "webpane_open", "webpane_navigate", "webpane_back", "webpane_forward",
-		"webpane_reload", "webpane_close":
+		"webpane_reload", "webpane_close", "webpane_input":
 		s.handleWebPaneCommand(action, data)
 	default:
 		s.handleCommand(action, data)

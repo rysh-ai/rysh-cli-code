@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // resolveChannelEnvVars expands ${VAR} field by field from an explicit list, so

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package gen defines the Forge generator framework: a pluggable Generator
 // interface, a registry, and a FileSet output collector. Each concrete target
 // (docs, mcp server, Go/TS/Python SDKs, tool-pack manifest) lives in a subpackage

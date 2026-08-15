@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // Hermetic tests for the eval LLM judge (design 009 §3.2): judge/assertion

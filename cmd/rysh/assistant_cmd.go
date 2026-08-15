@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // assistant_cmd.go — `rysh assistant`: one-command bring-up of the single-user

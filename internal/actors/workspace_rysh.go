@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -26,13 +28,17 @@ func (w *WorkspaceActor) handleSubmitInput(ctx actor.Context, m *msg.MsgSubmitIn
 		w.handleMirrorTabInput(mt, m)
 		return
 	}
-	// Explicit target (desktop app): the input was typed into a SPECIFIC
+	// Explicit target (desktop app): the input was TYPED into a SPECIFIC
 	// pane's box. Align workspace focus to it before routing — the user's
 	// typing is the strongest focus signal there is, and this heals any
 	// focus drift from a starved/late MsgFocusPaneByID (under heavy PTY
 	// churn the click's focus command could lag, making "active pane"
 	// routing execute the input in the previously-active pane).
-	if m.PaneID != "" && m.PaneID != w.activePaneID {
+	//
+	// Programmatic input is the opposite case: an agent's rysh tool submitting
+	// on a pane's behalf. It routes to the pane just the same, and moves
+	// nobody's focus.
+	if m.PaneID != "" && m.PaneID != w.activePaneID && !m.Programmatic {
 		w.focusPaneByID(m.PaneID)
 	}
 	// Heal any active-tab drift before resolving the target: the focused pane is
@@ -108,9 +114,24 @@ func (w *WorkspaceActor) routeInput(ctx actor.Context, paneID string, tab *tabIn
 		return w.runRyshCommandOut(ctx, paneID, mode, text)
 	}
 
+	// # prefix -> user-defined command (design 032). Checked after "##" so a
+	// system command can never be read as one.
+	//
+	// ONLY when the word actually resolves to a script. A "#" line is ordinary
+	// text in every mode rysh does not claim it in — a comment in shell mode, a
+	// heading in a prompt — so intercepting one that rysh cannot run would break
+	// input that has always worked, to no benefit. An unresolved "#foo"
+	// therefore falls through untouched; the user learns what exists from
+	// ##commands list, and ##foo still points them at the file to create.
+	if word := userCommandLineWord(text); word != "" {
+		if _, ok := w.findUserCommand(word); ok {
+			return w.runRyshCommandOut(ctx, paneID, mode, text)
+		}
+	}
+
 	// rysh mode: treat input as a rysh system command (implicit ## prefix).
 	if mode == "rysh" {
-		out, _ := w.handleRyshCommand(ctx, paneID, mode, text, false)
+		out, _ := w.handleRyshCommand(ctx, paneID, mode, text, false, ryshBuiltinCmd)
 		// Record the command in the pane's rysh history directly, masking the
 		// value of a "secret new/set" line so it is not persisted in plaintext.
 		_ = w.pub.Send(
@@ -171,6 +192,28 @@ func (w *WorkspaceActor) routeInput(ctx actor.Context, paneID string, tab *tabIn
 //
 // It returns the command's textual result (the same string published to the
 // pane output) so callers such as the CLI bridge can surface it to stdout.
+// ryshCmdKind is which prefix invoked a command. The two vocabularies are
+// disjoint by construction: "##" reaches only the dispatch table, "#" reaches
+// only .rysh/commands/.
+type ryshCmdKind int
+
+const (
+	// ryshBuiltinCmd is a "##" line, or a bare line typed in rysh mode.
+	ryshBuiltinCmd ryshCmdKind = iota
+	// ryshUserCmd is a "#" line — a user-defined command (design 032).
+	ryshUserCmd
+)
+
+// splitRyshPrefix classifies a command line and strips its prefix, so the rest
+// of the pipeline works in terms of the body and the kind rather than counting
+// hashes again at every layer.
+func splitRyshPrefix(fullText string) (ryshCmdKind, string) {
+	if userCommandLineWord(fullText) != "" {
+		return ryshUserCmd, strings.TrimPrefix(fullText, "#")
+	}
+	return ryshBuiltinCmd, strings.TrimPrefix(fullText, "##")
+}
+
 func (w *WorkspaceActor) runRyshCommand(ctx actor.Context, paneID, mode, fullText string) (string, error) {
 	// Mask the value of a "##secret new/set" line so the plaintext secret is
 	// never echoed into the pane output or recorded in shell/rysh history.
@@ -194,7 +237,8 @@ func (w *WorkspaceActor) runRyshCommand(ctx actor.Context, paneID, mode, fullTex
 	cmdEcho := echoText + "\n"
 	_ = w.pub.SendPaneOutput(paneID, cmdEcho)
 	_ = w.pub.SendPaneRyshOutput(paneID, cmdEcho)
-	return w.handleRyshCommand(ctx, paneID, "", strings.TrimPrefix(fullText, "##"), true)
+	kind, body := splitRyshPrefix(fullText)
+	return w.handleRyshCommand(ctx, paneID, "", body, true, kind)
 }
 
 // runRyshCommandOut is runRyshCommand for callers that only want the text.
@@ -346,7 +390,13 @@ func (w *WorkspaceActor) handleRemoteRyshCommand(paneID, body string) {
 // Non-interactive callers (the CLI, and `rysh script` behind it) turn it into
 // an exit code. Only handlers whose table entry sets statusAware report
 // failures reliably; see ryshCommand.statusAware.
-func (w *WorkspaceActor) handleRyshCommand(ctx actor.Context, paneID, inputMode, cmdText string, mirrorToRysh bool) (string, error) {
+//
+// kind is which prefix invoked the command, and the two vocabularies do not
+// overlap: ryshBuiltinCmd (`##`, or an implicit command in rysh mode) resolves
+// only against the dispatch table, ryshUserCmd (`#`) only against
+// `.rysh/commands/`. See workspace_user_commands.go for why that separation is
+// the point rather than a convenience.
+func (w *WorkspaceActor) handleRyshCommand(ctx actor.Context, paneID, inputMode, cmdText string, mirrorToRysh bool, kind ryshCmdKind) (string, error) {
 	parts := strings.Fields(strings.TrimSpace(cmdText))
 
 	var out strings.Builder
@@ -356,10 +406,35 @@ func (w *WorkspaceActor) handleRyshCommand(ctx actor.Context, paneID, inputMode,
 	// is drained below — but a handler that panicked past its drain must not
 	// make the next command look broken.
 	w.ryshFail = nil
+	// Same discipline for the user-command handle: only the command dispatched
+	// by THIS call may leave one behind, so an interactive #foo that nobody
+	// waited on cannot be picked up by the next `rysh exec` to arrive.
+	w.pendingUserCommand = nil
+	// Remember where the HUMAN is looking before this command runs anything, so
+	// a create can put focus back there rather than on whoever issued the
+	// command (restoreFocusAfterCreate).
+	defer w.captureHumanFocus()()
+
+	sink := w.ryshOutputSink(paneID, inputMode, mirrorToRysh)
 
 	switch {
 	case len(parts) == 0:
 		w.ryshHelp(&out)
+
+	case kind == ryshUserCmd:
+		// A "#" line resolves against this session's .rysh/commands/ (and the
+		// shared directory under it) and nowhere else. The
+		// script runs on its own goroutine and publishes through the same sink
+		// this function's own output uses, so its stdout lands in the buffers
+		// the command would have printed to — see workspace_user_commands.go
+		// for why it cannot run inline.
+		if path, ok := w.findUserCommand(parts[0]); ok {
+			w.pendingUserCommand = w.startUserCommand(paneID, parts[0], path, parts[1:], sink)
+		} else {
+			w.unknownUserCommand(&out, parts[0])
+			cmdErr = fmt.Errorf("unknown user command: %q", parts[0])
+		}
+
 	default:
 		cmd := &ryshCmd{
 			ctx:       ctx,
@@ -389,22 +464,37 @@ func (w *WorkspaceActor) handleRyshCommand(ctx actor.Context, paneID, inputMode,
 	}
 
 	if out.Len() > 0 {
-		switch {
-		case mirrorToRysh:
-			// Explicit ## command: surface the result in BOTH the merged/shell
-			// output (visible in shell mode) and the rysh output buffer
-			// (visible in rysh mode), so ## commands appear in both modes.
-			_ = w.pub.SendPaneOutput(paneID, out.String())
-			_ = w.pub.SendPaneRyshOutput(paneID, out.String())
-		case inputMode == "rysh":
-			_ = w.pub.SendPaneRyshOutput(paneID, out.String())
-		default:
-			// System output in non-rysh mode goes to the merged output buffer.
-			_ = w.pub.SendPaneOutput(paneID, out.String())
-		}
+		sink(out.String())
 	}
 
 	return out.String(), cmdErr
+}
+
+// ryshOutputSink returns the publisher a ## command's output goes through.
+//
+// It is a function rather than a switch at the end of handleRyshCommand because
+// a user command keeps producing output after that function has returned, and
+// text arriving late must land in exactly the same buffers as text a built-in
+// printed synchronously.
+//
+// mirrorToRysh means the command was entered with an explicit ## prefix: the
+// result is published to BOTH the merged/shell output buffer and the rysh
+// output buffer, so it is visible in either mode. An implicit command (typed
+// while already in rysh mode) goes to the buffer matching inputMode.
+func (w *WorkspaceActor) ryshOutputSink(paneID, inputMode string, mirrorToRysh bool) func(string) {
+	pub := w.pub
+	switch {
+	case mirrorToRysh:
+		return func(s string) {
+			_ = pub.SendPaneOutput(paneID, s)
+			_ = pub.SendPaneRyshOutput(paneID, s)
+		}
+	case inputMode == "rysh":
+		return func(s string) { _ = pub.SendPaneRyshOutput(paneID, s) }
+	default:
+		// System output in non-rysh mode goes to the merged output buffer.
+		return func(s string) { _ = pub.SendPaneOutput(paneID, s) }
+	}
 }
 
 // handleCLIRyshCommand runs a "##" system command on behalf of the CLI and
@@ -417,6 +507,13 @@ func (w *WorkspaceActor) handleRyshCommand(ctx actor.Context, paneID, inputMode,
 //     TabID set      -> focus the target tab's active pane.
 //   - both empty     -> use the workspace's current active pane.
 func (w *WorkspaceActor) handleCLIRyshCommand(ctx actor.Context, m *msg.MsgCLIRyshCommand) *msg.MsgCLIResponse {
+	// Every path below that returns before runRyshCommand — an empty command, an
+	// unresolvable pane — must not leave a user-command handle behind for the
+	// caller to wait on. It would be some EARLIER command's, so the reply would
+	// be held until an unrelated script finished. handleRyshCommand clears it on
+	// entry too; this covers the returns that never reach it.
+	w.pendingUserCommand = nil
+
 	cmd := strings.TrimSpace(m.Command)
 	if cmd == "" {
 		return &msg.MsgCLIResponse{OK: false, Error: "empty rysh command"}
@@ -429,7 +526,12 @@ func (w *WorkspaceActor) handleCLIRyshCommand(ctx actor.Context, m *msg.MsgCLIRy
 		if paneID == "" {
 			return &msg.MsgCLIResponse{OK: false, Error: fmt.Sprintf("pane not found: %s", m.PaneID)}
 		}
-		w.focusPaneByID(paneID)
+		// Scope this command to the target's tab, but do NOT focus it. A
+		// command ARRIVING for a pane is not the human asking to be taken
+		// there — and with several agents running, every dispatch used to yank
+		// the cursor (and, across tabs, the whole visible tab) to whichever
+		// agent was addressed last.
+		defer w.scopeToTab(w.findPaneTab(paneID))()
 	case m.TabID != "":
 		target := w.resolveTabArg(m.TabID)
 		if target == nil {
@@ -441,7 +543,7 @@ func (w *WorkspaceActor) handleCLIRyshCommand(ctx actor.Context, m *msg.MsgCLIRy
 		if paneID == "" {
 			return &msg.MsgCLIResponse{OK: false, Error: fmt.Sprintf("tab %s has no active pane", m.TabID)}
 		}
-		w.focusPaneByID(paneID)
+		defer w.scopeToTab(target)()
 	default:
 		w.reconcileActiveTab()
 		paneID = w.activePaneID
@@ -463,7 +565,7 @@ func (w *WorkspaceActor) handleCLIRyshCommand(ctx actor.Context, m *msg.MsgCLIRy
 		return &msg.MsgCLIResponse{OK: false, Error: "no target pane (specify --pane-id or --tab-id)"}
 	}
 
-	out, cmdErr := w.runRyshCommand(ctx, paneID, "", "##"+cmd)
+	out, cmdErr := w.runRyshCommand(ctx, paneID, "", ryshCommandLine(cmd))
 	w.persistToKV()
 	if cmdErr != nil {
 		return &msg.MsgCLIResponse{OK: false, Output: out, Error: cmdErr.Error()}

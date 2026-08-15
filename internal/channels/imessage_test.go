@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package channels
 
 // Unit tests for the iMessage adapter (C5, design 001 §4.5). Everything here

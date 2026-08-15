@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Pane-level messages: input and lifecycle for a single pane, its LLM
 // actor, cross-pane listening, pipeline mode, attention and replay.
 package msg
@@ -55,6 +57,15 @@ type MsgPaneSetGivenName struct {
 	Name string `json:"name"`
 }
 
+// MsgPaneSetHidden takes a pane off screen, or puts it back (design 027 §5.1).
+//
+// Rendering only. The pane keeps its PTY and its program, and stays addressable
+// by ANSA and by every `##pane` command — this is not a way to stop a pane, and
+// anything that treats it as one is a bug.
+type MsgPaneSetHidden struct {
+	Hidden bool `json:"hidden"`
+}
+
 // MsgPaneSetMeta writes one entry of a pane's metadata map (`##pane meta`).
 // An empty Value deletes the key — the same convention as an env var, and it
 // keeps deletion from needing a second message type.
@@ -80,6 +91,57 @@ type MsgLaunchClaudeInPane struct {
 	SessionID  string `json:"session_id"`
 	PromptFile string `json:"prompt_file,omitempty"`
 	Retries    int    `json:"retries"`
+
+	// GivenName and Hidden are applied once the pane resolves, by the same
+	// retry loop that starts claude (design 027 §5.5). They ride along rather
+	// than getting a loop of their own because they have the identical problem:
+	// the pane is created by a message travelling down the actor hierarchy, so
+	// its id does not exist when the command returns. A second timer would be a
+	// second thing to get wrong, and the board claude needs BOTH — a pane that
+	// comes up named but visible puts an agent on everyone's screen, and one
+	// that comes up hidden but unnamed cannot be found again.
+	GivenName string `json:"given_name,omitempty"`
+	Hidden    bool   `json:"hidden,omitempty"`
+
+	// ExtraArgs are appended to the claude invocation verbatim. Empty for
+	// `##pane new --claude`, where a human is watching the pane and manual
+	// approval is the safe default. The BOARD CLAUDE sets it, because an agent
+	// whose entire job is to act on the fleet cannot do that job while it is
+	// asking a human to approve each action — and its pane is hidden, so there
+	// is nobody there to ask.
+	ExtraArgs string `json:"extra_args,omitempty"`
+}
+
+// MsgDiscoverCodexSession is the workspace's note to itself to find out which
+// session a just-launched codex opened (design 029).
+//
+// It exists because codex, unlike claude, has no launch-time session-id flag:
+// it issues its own id and the only place it publishes it is the rollout file
+// it writes under $CODEX_HOME/sessions. That file appears a moment AFTER the
+// launch command is delivered, so the lookup has to be retried rather than done
+// inline — hence a self-addressed message with a countdown, the same shape
+// MsgLaunchClaudeInPane uses for the same class of problem.
+type MsgDiscoverCodexSession struct {
+	PaneID string `json:"pane_id"`
+	// Cwd is the directory the agent was launched in, and the field discovery
+	// matches on — codex records it in the rollout's first line.
+	Cwd string `json:"cwd"`
+	// NotBefore is the launch time as a unix timestamp. A rollout older than
+	// this belongs to an earlier session.
+	NotBefore int64 `json:"not_before"`
+	Retries   int   `json:"retries"`
+}
+
+// MsgResumeNativeAgents asks the workspace to bring back the agents it had
+// launched itself, after a stop/start has rebuilt the session from KV
+// (design 029).
+//
+// Scheduled once the layout is restored, and retried while panes are still
+// coming up: a restored pane's shell is spawned by its own actor's Started
+// hook, so "the pane exists" and "the pane can run a command" are separated by
+// a few hundred milliseconds.
+type MsgResumeNativeAgents struct {
+	Retries int `json:"retries"`
 }
 
 // MsgPaneProcess announces a change in a pane's FOREGROUND program: a command
@@ -235,6 +297,23 @@ type MsgCancelPrompt struct{}
 // ---------------------------------------------------------------------------
 // Supervision notifications
 // ---------------------------------------------------------------------------
+
+// MsgPaneKillForeground asks a pane to SIGNAL its foreground process group —
+// the hard stop, founder ruling 2026-08-11 reversing 027 ruling 3 for the
+// fleet-stop verb. ESC ends a turn but cannot cancel a pending
+// task-notification, so an interrupted agent with a background task wakes
+// itself (F-41); a dead process cannot be woken, and its absence is verifiable
+// by process state rather than by reading a screen. The claude session is
+// resumable afterwards: the session id is pinned at launch, so
+// `claude --resume <id>` restores the conversation.
+//
+// Hard=false sends SIGTERM to the group; Hard=true sends SIGKILL. The caller
+// escalates only after verifying the group survived — policy lives in the
+// router, where it is testable.
+type MsgPaneKillForeground struct {
+	PaneID string `json:"pane_id"`
+	Hard   bool   `json:"hard,omitempty"`
+}
 
 // MsgPaneTerminated is published when a PaneActor stops.
 type MsgPaneTerminated struct {

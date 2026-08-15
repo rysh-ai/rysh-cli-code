@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package channels
 
 // PhoneAdapter — B12 / roadmap design 014 §2.3. Bridges Twilio Programmable

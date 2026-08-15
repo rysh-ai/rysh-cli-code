@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package pipeline provides a thread-safe runtime registry for pipeline
 // prompts.  Both the tools package (which writes entries) and the actors
 // package (which reads them) import this package, avoiding an import cycle.

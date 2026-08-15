@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package plugin
 
 // PluginChannelAdapter — the in-core shim (design 002 §4.2). It IS a real

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package ingest converts source API descriptions into the Forge IR. OpenAPI
 // 3.0/3.1 is the primary format; GraphQL (introspection) is also supported.
 package ingest

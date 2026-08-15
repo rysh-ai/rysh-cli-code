@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package provider
 
 // A cross-family ##llm switch has to change WHICH CLIENT the request goes to.

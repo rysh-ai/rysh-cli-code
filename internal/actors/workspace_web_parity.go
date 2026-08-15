@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // workspace_web_parity.go — wires the web server's electronAPI-parity surface
@@ -15,28 +17,6 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/session"
 	"github.com/rysh-ai/rysh-cli-code/internal/web"
 )
-
-// recordWebEndpoint publishes a running web server's loopback endpoint (port)
-// onto this session's registry record, or clears it when the server is not
-// running. Call it after every Start/Stop at both start sites.
-//
-// This is the hand-off that lets the desktop app open a session it did not
-// create. The app's renderer reaches a daemon only over HTTP/WebSocket, so
-// without a recorded endpoint it could adopt only daemons it spawned itself and
-// therefore knew the port of — which is precisely why command-line sessions
-// used to be unreachable from the app. With the endpoint on the record, any
-// front-end can find a live daemon's door.
-//
-// The endpoint is guarded exactly as `##rysh web start` left it — the
-// workspace's login, or nothing in control mode; recording it changes nothing
-// about who can reach the port, only whether a local front-end can discover it.
-func (w *WorkspaceActor) recordWebEndpoint(srv *web.Server) {
-	if srv == nil || !srv.IsRunning() {
-		session.UpdateWebEndpoint(w.cfg, w.sessionName, 0)
-		return
-	}
-	session.UpdateWebEndpoint(w.cfg, w.sessionName, srv.Port())
-}
 
 // configureWebParity injects everything the parity API (/api/env,
 // /api/workspaces, /api/voice/*, ws completion, server-side web panes) needs.

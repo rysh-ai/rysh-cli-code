@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package proxy implements the Universal Agent Governance Proxy (design 001):
 // a loopback HTTP proxy that intercepts the LLM provider traffic of third-party
 // agent CLIs (Claude Code, Codex, aider, …) running inside panes and applies

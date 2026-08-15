@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package vterm wraps a virtual terminal emulator (vt10x) that interprets
 // PTY output into a 2D screen buffer suitable for rendering in the TUI.
 // This enables support for interactive programs like vim, htop, and less.
@@ -555,9 +557,18 @@ func glyphAt(cells []vt10x.Glyph, col int) vt10x.Glyph {
 // renderGlyphsANSI renders a single row of glyphs to an ANSI string using the
 // same SGR-run encoding as renderANSILocked, trimming trailing blank/default
 // cells. Used to render scrollback history rows (which carry no cursor).
-func renderGlyphsANSI(cells []vt10x.Glyph, cols int) string {
+//
+// The scan is bounded by the row's OWN length, never by the terminal's current
+// width. A scrollback row was captured at whatever width was in effect when it
+// scrolled off (captureScrollback trims it to its last written cell), and
+// resize() does not touch the scrollback ring — so a row captured at 78 columns
+// is still 78 columns after the pane narrows to 70. Bounding by the current
+// width silently dropped everything past it: a soft-wrapped line lost the tail
+// of its first visual row while the continuation row survived intact, which is
+// how `…/marketing/assets/videos/…` came back as `…/marketing/a` + `deos/…`.
+func renderGlyphsANSI(cells []vt10x.Glyph) string {
 	lastCol := -1
-	for col := cols - 1; col >= 0; col-- {
+	for col := len(cells) - 1; col >= 0; col-- {
 		cell := glyphAt(cells, col)
 		ch := cell.Char
 		if ch == 0 {
@@ -625,7 +636,7 @@ func (v *VTerm) ScrollbackANSI() []string {
 	sb := v.term.Scrollback()
 	out := make([]string, len(sb))
 	for i, row := range sb {
-		out[i] = renderGlyphsANSI(row, v.cols)
+		out[i] = renderGlyphsANSI(row)
 	}
 	return out
 }
@@ -647,7 +658,7 @@ func (v *VTerm) ScrollbackTailANSI(n int) []string {
 	tail := v.term.ScrollbackTail(n)
 	out := make([]string, len(tail))
 	for i, row := range tail {
-		out[i] = renderGlyphsANSI(row, v.cols)
+		out[i] = renderGlyphsANSI(row)
 	}
 	return out
 }

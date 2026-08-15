@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Prometheus exporter for the agentic MetricsSink (follow-up 3b).
 //
 // PromSink is a drop-in MetricsSink that records into a private

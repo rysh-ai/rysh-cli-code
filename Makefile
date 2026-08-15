@@ -15,6 +15,7 @@ export GOWORK=off
         deps \
         test test-cover wire-test wire-test-real registry registry-serve \
         lint vet \
+        bundle-check bundle-rebuild build-frontend frontend-dev \
         clean \
         release release-snapshot release-check goreleaser-install goreleaser-local \
         setup-dist \
@@ -58,14 +59,24 @@ deps: ## Tidy Go module dependencies
 # canonical build is `make -f Makefile.internal_web all` at the repo root; these
 # targets are conveniences that defer to the shared renderer.
 
+# bundle-check answers "is internal/web/static what the renderer actually builds
+# to?" — the thing nothing verified while the bundle went stale twice in one
+# afternoon (E-50). It is deliberately NOT part of `test`: it needs node and npm,
+# and the Go suite must not grow a JavaScript toolchain dependency.
+bundle-check: ## Verify internal/web/static matches a fresh build of the renderer (E-50)
+	@./scripts/check-embedded-bundle.sh
+
+bundle-rebuild: ## Rebuild internal/web/static from the renderer, then commit it
+	@./scripts/check-embedded-bundle.sh --write
+
+# build-frontend used to test for ../rysh-cli-app-code and, when it was missing,
+# print a note and exit 0. From a worktree that path never exists, so it
+# rebuilt nothing and reported success — which is how the bundle went stale
+# while everyone believed they had refreshed it. It now goes through the same
+# script, which finds the renderer from a worktree too and FAILS when it cannot.
 build-frontend: ## Build embedded web assets from the shared rysh-cli-app renderer
-	@if [ -f ../rysh-cli-app-code/vite.web.config.ts ]; then \
-		echo "Building shared renderer (web) → internal/web/static"; \
-		cd ../rysh-cli-app-code && npx vite build --config vite.web.config.ts; \
-		echo "NOTE: rebuild the rysh binary so //go:embed static/* refreshes."; \
-	else \
-		echo "Shared renderer not found at ../rysh-cli-app-code — see web_electron_roadmap."; \
-	fi
+	@./scripts/check-embedded-bundle.sh --write
+	@echo "NOTE: rebuild the rysh binary so //go:embed static/* refreshes."
 
 frontend-dev: ## Run the shared renderer dev server (rysh-cli-app)
 	cd ../rysh-cli-app-code && npm run dev

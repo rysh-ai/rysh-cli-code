@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 // Regression tests for the full-terminal relay escalation gate in syncRawMode.

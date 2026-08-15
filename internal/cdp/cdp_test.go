@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package cdp
 
 import (
@@ -11,12 +13,23 @@ import (
 func TestLaunchArgs(t *testing.T) {
 	args := launchArgs(LaunchOptions{UserDataDir: "/tmp/x", Headless: true, URL: "https://example.com"})
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"--remote-debugging-port=0", "--user-data-dir=/tmp/x", "--headless=new", "https://example.com"} {
+	for _, want := range []string{"--remote-debugging-port=0", "--user-data-dir=/tmp/x", "--headless=new"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("args missing %q: %s", want, joined)
 		}
 	}
-	// Headed launch omits the headless flag; empty URL becomes about:blank.
+	// F-46: the target URL must NOT be on the command line. A Chromium launched
+	// at a URL auto-repeats every key injected over CDP — one press produced an
+	// unbounded ~400/second stream — so Launch starts at about:blank and
+	// navigates after attaching. This assertion replaces one that required the
+	// opposite; it is the behaviour that was measured, not a convention.
+	if strings.Contains(joined, "https://example.com") {
+		t.Errorf("the target URL must not be a launch argument (F-46): %s", joined)
+	}
+	if !strings.HasSuffix(joined, "about:blank") {
+		t.Errorf("launch must start at about:blank: %s", joined)
+	}
+	// Headed launch omits the headless flag.
 	headed := strings.Join(launchArgs(LaunchOptions{UserDataDir: "/tmp/x"}), " ")
 	if strings.Contains(headed, "--headless") {
 		t.Error("headed launch must not pass --headless")

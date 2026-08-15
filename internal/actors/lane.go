@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -128,12 +130,12 @@ func (l *LaneActor) Receive(ctx actor.Context) {
 			l.doRestoreFromKV(ctx, *l.restoreData)
 			l.restoreData = nil
 		} else if l.initialPaneID != "" {
-			l.createPaneGroup(ctx, l.initialPaneID, l.initialTitle, "", "", "")
+			l.createPaneGroup(ctx, l.initialPaneID, l.initialTitle, "", "", "", nil)
 			l.initialPaneID = ""
 			l.initialTitle = ""
 			// Grid seed: build the remaining pane groups inline.
 			for _, p := range l.initialExtraPanes {
-				l.createPaneGroup(ctx, p.id, p.title, "", "", "")
+				l.createPaneGroup(ctx, p.id, p.title, "", "", "", nil)
 			}
 			l.initialExtraPanes = nil
 			if len(l.groupRefs) > 1 {
@@ -159,7 +161,7 @@ func (l *LaneActor) Receive(ctx actor.Context) {
 		}
 
 	case *msg.MsgLaneCreatePaneGroup:
-		l.createPaneGroup(ctx, m.PaneID, m.Title, m.GroupID, m.WorkingDir, m.PaneType)
+		l.createPaneGroup(ctx, m.PaneID, m.Title, m.GroupID, m.WorkingDir, m.PaneType, m.Meta)
 
 	case *msg.MsgLaneClosePaneGroup:
 		l.closeActiveGroup(ctx)
@@ -195,6 +197,16 @@ func (l *LaneActor) Receive(ctx actor.Context) {
 		l.forwardToActiveGroup(&msg.MsgPaneGroupStackedPaneSelect{Index: m.Index})
 		l.updateActivePaneFromGroup()
 
+	case *msg.MsgLaneSetPaneHidden:
+		// Addressed at the group that HOLDS the pane, not the active one: a
+		// pane can be hidden from anywhere, including a lane the human is not
+		// looking at.
+		if groupID, ok := l.paneToGroup[m.PaneID]; ok {
+			if subject, ok := l.groupSubjects[groupID]; ok {
+				_ = l.pub.Send(subject, &msg.MsgPaneGroupSetPaneHidden{PaneID: m.PaneID, Hidden: m.Hidden})
+			}
+		}
+
 	case *msg.MsgLaneStackedPaneMove:
 		// If the active group is a real stack (>1 pane), reorder the active
 		// pane within that stack. Otherwise reorder the whole group within the
@@ -227,6 +239,32 @@ func (l *LaneActor) Receive(ctx actor.Context) {
 
 	case *msg.MsgLaneCreateStackedPaneInGroup:
 		l.createStackedPaneInGroup(m.PaneGroupID, m.PaneID, m.Title)
+
+	// --- live pane transfer (##move); see pane_move.go ---
+
+	case *laneReleasePaneRequest:
+		handle, empty, ok := l.releasePane(ctx, m.paneID)
+		ctx.Respond(&laneReleasePaneReply{handle: handle, empty: empty, ok: ok})
+
+	case *laneAdoptPaneRequest:
+		groupID, ok := l.adoptPane(ctx, m)
+		ctx.Respond(&laneAdoptPaneReply{groupID: groupID, ok: ok})
+
+	case *laneMoveGroupRequest:
+		ctx.Respond(&laneMoveGroupReply{ok: l.moveGroup(m.groupID, m.dir)})
+
+	case *groupMovePaneRequest:
+		// Reorder a pane inside whichever of this lane's stacks holds it.
+		ok := false
+		if groupID, found := l.paneToGroup[m.paneID]; found {
+			if reply, got := requestMove[*groupMovePaneReply](ctx, l.groupPIDs[groupID], m); got && reply != nil {
+				ok = reply.ok
+			}
+			if ok {
+				l.updateActivePaneFromGroup()
+			}
+		}
+		ctx.Respond(&groupMovePaneReply{ok: ok})
 
 	case *msg.RequestEnvelope:
 		switch inner := m.Inner.(type) {
@@ -268,7 +306,7 @@ func paneGroupCfg(base config.Config, workingDir string) config.Config {
 // parameters (design 008; see MsgLaneCreatePaneGroup). paneType marks the
 // initial pane as a special variant ("replay" panes never start a shell);
 // empty = normal pane.
-func (l *LaneActor) createPaneGroup(ctx actor.Context, paneID, title, groupID, workingDir, paneType string) {
+func (l *LaneActor) createPaneGroup(ctx actor.Context, paneID, title, groupID, workingDir, paneType string, meta map[string]string) {
 	if groupID == "" {
 		groupID = uuid.NewString()
 	}
@@ -281,6 +319,7 @@ func (l *LaneActor) createPaneGroup(ctx actor.Context, paneID, title, groupID, w
 
 	ga := NewPaneGroupActor(groupID, l.tabID, l.id, paneID, title, paneGroupCfg(l.cfg, workingDir), l.pub, l.nc, l.agSetup, l.kvStore, l.secrets)
 	ga.initialPaneType = paneType
+	ga.initialMeta = meta
 	groupProps := actor.PropsFromProducer(func() actor.Actor { return ga })
 	pid := ctx.Spawn(groupProps)
 
@@ -485,36 +524,34 @@ func (l *LaneActor) createStackedPaneInActiveGroup(paneID, title string) {
 // Resize
 // ---------------------------------------------------------------------------
 
-// resizeActiveGroup moves the split boundary on one side of the active group in
-// the arrow's direction. dir encodes the screen direction: dir > 0 points
-// toward the higher index (down), dir < 0 toward the lower index (up).
+// resizeActiveGroup is resizeActiveLane's vertical twin, and follows the same
+// rule on the same reasoning — read that one first. dir > 0 (↓) makes the ACTIVE
+// group taller, dir < 0 (↑) shorter; the height is taken from — or handed back
+// to — the group BELOW it, so only the boundary under the active group moves and
+// its top edge stays where it is.
 //
-// The boundary always follows the arrow, regardless of which group is focused:
-//   - If the active group has a neighbor on the arrow side, the boundary between
-//     them moves that way, so the active group GROWS into the neighbor.
-//   - If the active group is already at that edge, the boundary on its other
-//     side moves that way instead, so the active group SHRINKS.
+// The bottommost group is the exception the anchor cannot cover: its lower edge
+// is the bottom of the lane. It borrows from the group above instead, and ↓
+// still means taller.
 //
-// e.g. with the bottom group focused, pressing ↓ moves the divider down (the
-// focused group shrinks); pressing ↑ moves it up (the focused group grows).
+// dir keeps its screen-direction encoding (+1 = down) so callers are unchanged.
+// Note that a CLIENT has to agree on that encoding for any of this to be true on
+// screen: the desktop app sent ↑ as +1 and ↓ as -1 for the height axis, which
+// inverted every vertical resize there (fixed in rysh-cli-app, same change).
 func (l *LaneActor) resizeActiveGroup(dir int) {
 	if dir == 0 || len(l.groupRefs) < 2 {
 		return
 	}
-	step := 1
-	if dir < 0 {
-		step = -1
-	}
 
-	// Prefer the neighbor on the arrow side (grow); fall back to the opposite
-	// neighbor (shrink) when the active group is at that edge.
-	grow := true
-	neighborIdx := l.activeGroup + step
-	if neighborIdx < 0 || neighborIdx >= len(l.groupRefs) {
-		neighborIdx = l.activeGroup - step
-		grow = false
+	// The partner is always the group BELOW — that is the boundary the arrows
+	// are allowed to move. Only the bottommost group, which has none, falls
+	// back to the group above it.
+	grow := dir > 0
+	neighborIdx := l.activeGroup + 1
+	if neighborIdx >= len(l.groupRefs) {
+		neighborIdx = l.activeGroup - 1
 	}
-	if neighborIdx < 0 || neighborIdx >= len(l.groupRefs) {
+	if neighborIdx < 0 {
 		return
 	}
 

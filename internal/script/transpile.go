@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package script turns a .rysh file — a bash script whose statement-position
 // "##" lines are rysh commands — into plain bash (design 021).
 //

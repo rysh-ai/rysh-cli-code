@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package board
 
 import (
@@ -83,19 +85,19 @@ func TestSubscriberEndToEnd(t *testing.T) {
 
 	root := msg.NewBoardPost(paneA, "mgr-01", msg.BoardKindMilestone, "wave 1 done", 1)
 	root.ThreadID = thread
-	if err := msg.SendBoardPost(pub, root); err != nil {
+	if err := msg.SendBoardPost(pub, "", root); err != nil {
 		t.Fatalf("SendBoardPost: %v", err)
 	}
 	store.ApplyEvent(waitEvent(t, sub))
 
 	reply := msg.NewBoardPost(paneB, "wkr-01", msg.BoardKindReply, "confirmed", 2)
 	reply.ThreadID = thread
-	if err := msg.SendBoardPost(pub, reply); err != nil {
+	if err := msg.SendBoardPost(pub, "", reply); err != nil {
 		t.Fatalf("SendBoardPost: %v", err)
 	}
 	store.ApplyEvent(waitEvent(t, sub))
 
-	if err := msg.SendBoardRegister(pub, &msg.MsgBoardRegister{
+	if err := msg.SendBoardRegister(pub, "", &msg.MsgBoardRegister{
 		V: msg.BoardSchemaVersion, PaneID: paneB, Persona: "wkr-01", TS: 3,
 	}); err != nil {
 		t.Fatalf("SendBoardRegister: %v", err)
@@ -136,7 +138,7 @@ func TestSubscriberDropsAreCountedNotHidden(t *testing.T) {
 	const n = 50
 	for i := 0; i < n; i++ {
 		p := msg.NewBoardPost(paneA, "a", msg.BoardKindMilestone, "burst", int64(i))
-		if err := msg.SendBoardPost(pub, p); err != nil {
+		if err := msg.SendBoardPost(pub, "", p); err != nil {
 			t.Fatalf("SendBoardPost: %v", err)
 		}
 	}
@@ -163,7 +165,7 @@ func TestPersistenceSurvivesRestart(t *testing.T) {
 	codecs := msg.DefaultCodecRegistry()
 	pub := msg.NewNATSPublisher(nc, codecs)
 
-	sub, err := Subscribe(nc, codecs, 64, NewPersistence(kv))
+	sub, err := Subscribe(nc, codecs, 64, SingleBoardPersistence("", NewPersistence(kv, "")))
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -172,15 +174,15 @@ func TestPersistenceSurvivesRestart(t *testing.T) {
 
 	root := msg.NewBoardPost(paneA, "mgr-01", msg.BoardKindMilestone, "root text", 10)
 	root.ThreadID = thread
-	_ = msg.SendBoardPost(pub, root)
+	_ = msg.SendBoardPost(pub, "", root)
 	live.ApplyEvent(waitEvent(t, sub))
 
 	reply := msg.NewBoardPost(paneB, "wkr-01", msg.BoardKindReply, "reply text", 11)
 	reply.ThreadID = thread
-	_ = msg.SendBoardPost(pub, reply)
+	_ = msg.SendBoardPost(pub, "", reply)
 	live.ApplyEvent(waitEvent(t, sub))
 
-	_ = msg.SendBoardRegister(pub, &msg.MsgBoardRegister{
+	_ = msg.SendBoardRegister(pub, "", &msg.MsgBoardRegister{
 		V: msg.BoardSchemaVersion, PaneID: paneA, Persona: "mgr-01", TS: 12,
 	})
 	live.ApplyEvent(waitEvent(t, sub))
@@ -192,7 +194,7 @@ func TestPersistenceSurvivesRestart(t *testing.T) {
 
 	// The "daemon" restarts: brand-new store, same bucket.
 	restored := New(0)
-	posts, regs, err := NewPersistence(kv).Restore(restored)
+	posts, regs, err := NewPersistence(kv, "").Restore(restored)
 	if err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
@@ -231,7 +233,7 @@ func TestPersistenceOutlivesARenderDrop(t *testing.T) {
 	pub := msg.NewNATSPublisher(nc, codecs)
 
 	// Buffer of 1, never drained: every post after the first is dropped live.
-	sub, err := Subscribe(nc, codecs, 1, NewPersistence(kv))
+	sub, err := Subscribe(nc, codecs, 1, SingleBoardPersistence("", NewPersistence(kv, "")))
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -240,7 +242,7 @@ func TestPersistenceOutlivesARenderDrop(t *testing.T) {
 	const n = 10
 	for i := 0; i < n; i++ {
 		p := msg.NewBoardPost(paneA, "a", msg.BoardKindMilestone, "post", int64(i))
-		_ = msg.SendBoardPost(pub, p)
+		_ = msg.SendBoardPost(pub, "", p)
 	}
 	_ = nc.Flush()
 
@@ -253,7 +255,7 @@ func TestPersistenceOutlivesARenderDrop(t *testing.T) {
 	}
 
 	restored := New(0)
-	posts, _, err := NewPersistence(kv).Restore(restored)
+	posts, _, err := NewPersistence(kv, "").Restore(restored)
 	if err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
@@ -271,7 +273,7 @@ func TestRestoreOnEmptyBucketIsNotAnError(t *testing.T) {
 	kv := newTestKV(t, nc)
 
 	s := New(0)
-	posts, regs, err := NewPersistence(kv).Restore(s)
+	posts, regs, err := NewPersistence(kv, "").Restore(s)
 	if err != nil {
 		t.Fatalf("Restore on an empty bucket: %v", err)
 	}
@@ -283,9 +285,9 @@ func TestRestoreOnEmptyBucketIsNotAnError(t *testing.T) {
 // TestNilPersistenceIsLiveOnly: no JetStream means a live-only board, not a
 // crash and not a refusal to start.
 func TestNilPersistenceIsLiveOnly(t *testing.T) {
-	var p *Persistence = NewPersistence(nil)
+	var p *Persistence = NewPersistence(nil, "")
 	if p != nil {
-		t.Fatal("NewPersistence(nil) should yield a nil Persistence")
+		t.Fatal("NewPersistence(nil, ...) should yield a nil Persistence")
 	}
 	if err := p.SavePost(msg.NewBoardPost(paneA, "a", "", "x", 1)); err != nil {
 		t.Fatalf("nil Persistence SavePost: %v", err)
@@ -305,14 +307,14 @@ func TestRestoreContinuesTheOrdinal(t *testing.T) {
 	nc := newTestNATS(t)
 	kv := newTestKV(t, nc)
 
-	first := NewPersistence(kv)
+	first := NewPersistence(kv, "")
 	for i := 0; i < 3; i++ {
 		if err := first.SavePost(msg.NewBoardPost(paneA, "a", "", "old", int64(i))); err != nil {
 			t.Fatalf("SavePost: %v", err)
 		}
 	}
 
-	second := NewPersistence(kv)
+	second := NewPersistence(kv, "")
 	if _, _, err := second.Restore(New(0)); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
@@ -321,7 +323,7 @@ func TestRestoreContinuesTheOrdinal(t *testing.T) {
 	}
 
 	final := New(0)
-	posts, _, err := NewPersistence(kv).Restore(final)
+	posts, _, err := NewPersistence(kv, "").Restore(final)
 	if err != nil {
 		t.Fatalf("Restore: %v", err)
 	}

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Humanoid messages, including contact pairing and the allowlist.
 package msg
 

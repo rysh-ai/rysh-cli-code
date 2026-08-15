@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // Tests for `rysh assistant` (design 007, WS7 PM1–PM3): the profile scaffold's

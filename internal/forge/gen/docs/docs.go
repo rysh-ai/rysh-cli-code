@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package docs generates Markdown API reference documentation from the IR.
 package docs
 

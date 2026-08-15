@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package provider
 
 // Tests for the per-request MaxTokens seam through the rysh-cli decorators

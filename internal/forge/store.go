@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package forge ties the Forge pipeline to the live rysh runtime: it stores
 // per-project integration definitions, ingests their specs into the IR, builds
 // tool-packs, and registers the resulting tools into the agent registry under

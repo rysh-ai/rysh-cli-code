@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package llms is the file-backed LLM model registry behind the ##llm
 // command. Each known model is ONE YAML file at
 //

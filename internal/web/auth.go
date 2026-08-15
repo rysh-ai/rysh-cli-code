@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package web
 
 import (
@@ -76,8 +78,17 @@ type credsFileStamp struct {
 // Not a watcher: a stat per auth decision costs a syscall, needs no goroutine
 // and no lifecycle, and cannot leak a watch when the server stops.
 func (s *Server) TrackCredentialsFile(ryshDir string) {
+	s.TrackCredentialsRef(ProjectCredentials(ryshDir))
+}
+
+// TrackCredentialsRef is TrackCredentialsFile for a session-scoped login: the
+// server follows that session's own file, falling back to the project's while
+// the session has none. The ref (not a resolved path) is what is held, so a
+// session that sets its own login mid-run is picked up on the next auth
+// decision rather than at the next restart.
+func (s *Server) TrackCredentialsRef(ref CredentialsRef) {
 	s.credsMu.Lock()
-	s.credsDir = ryshDir
+	s.credsRef = ref
 	s.credsStat = credsFileStamp{}
 	s.credsMu.Unlock()
 }
@@ -86,10 +97,10 @@ func (s *Server) TrackCredentialsFile(ryshDir string) {
 // if it has changed since we last looked.
 func (s *Server) credentials() *Credentials {
 	s.credsMu.RLock()
-	dir := s.credsDir
+	ref := s.credsRef
 	s.credsMu.RUnlock()
-	if dir != "" {
-		s.refreshCredentials(dir)
+	if ref.RyshDir != "" {
+		s.refreshCredentials(ref)
 	}
 
 	s.credsMu.RLock()
@@ -110,8 +121,11 @@ func (s *Server) credentials() *Credentials {
 //     (SaveCredentials truncates in place) must never be read as "no login" —
 //     that would downgrade the gate to nothing at exactly the wrong moment.
 //   - the file is FINE: adopt it, key and password hash together.
-func (s *Server) refreshCredentials(dir string) {
-	path := CredentialsPath(dir)
+func (s *Server) refreshCredentials(ref CredentialsRef) {
+	// Resolved every time: a session that gains its own file must start being
+	// read from it, and one whose file is removed must fall back to the
+	// project's.
+	path := ref.Path()
 	var stamp credsFileStamp
 	if info, err := os.Stat(path); err == nil {
 		stamp = credsFileStamp{mod: info.ModTime(), size: info.Size()}
@@ -126,7 +140,7 @@ func (s *Server) refreshCredentials(dir string) {
 		return
 	}
 
-	creds, err := LoadCredentials(dir)
+	creds, err := loadCredentialsFile(path)
 	if err != nil {
 		// Corrupt or half-written. Do not adopt it, and do not re-read it on
 		// every request either — the next real change moves the stamp again.
@@ -191,13 +205,13 @@ func isAppShell(path string) bool {
 //
 // Order:
 //
-//	1. request came through the shared door → the login is required, skip to 3
-//	2. private door, and either no credentials or control mode → allow
-//	3. path is /health           → allow (liveness probes stay public)
-//	4. valid login JWT           → allow (Bearer header, or ?token= on /ws)
-//	5. the request is the app shell or an /api/auth/* endpoint → allow, so the
-//	   login page can load and submit
-//	6. otherwise                 → 401 Unauthorized
+//  1. request came through the shared door → the login is required, skip to 3
+//  2. private door, and either no credentials or control mode → allow
+//  3. path is /health           → allow (liveness probes stay public)
+//  4. valid login JWT           → allow (Bearer header, or ?token= on /ws)
+//  5. the request is the app shell or an /api/auth/* endpoint → allow, so the
+//     login page can load and submit
+//  6. otherwise                 → 401 Unauthorized
 func (s *Server) authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if !arrivedShared(c.Request) && (s.credentials() == nil || s.ControlEnabled()) {

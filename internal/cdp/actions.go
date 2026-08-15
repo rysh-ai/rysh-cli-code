@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package cdp
 
 import (
@@ -525,39 +527,89 @@ func (b *Browser) pressMainKey(key string, modifiers int) error {
 		return b.pressRawKey(key, modifiers)
 	}
 	if runes := []rune(key); len(runes) == 1 {
-		if modifiers != 0 {
-			// Shortcut combos (Cmd+A, Cmd+Z, Cmd+Alt+1, ...) MUST be real
-			// keyDown/keyUp events carrying a virtual key code — a bare
-			// `char` event never reaches accelerator/shortcut handling.
-			r := runes[0]
-			vk := 0
-			switch {
-			case r >= '0' && r <= '9':
-				vk = int(r)
-			case r >= 'a' && r <= 'z':
-				vk = int(r) - 'a' + 'A'
-			case r >= 'A' && r <= 'Z':
-				vk = int(r)
-			}
-			down := map[string]any{"type": "keyDown", "key": key, "modifiers": modifiers}
-			up := map[string]any{"type": "keyUp", "key": key, "modifiers": modifiers}
-			if vk != 0 {
-				down["windowsVirtualKeyCode"] = vk
-				down["nativeVirtualKeyCode"] = vk
-				up["windowsVirtualKeyCode"] = vk
-				up["nativeVirtualKeyCode"] = vk
-			}
-			if _, err := b.Page("Input.dispatchKeyEvent", down); err != nil {
-				return err
-			}
-			_, err := b.Page("Input.dispatchKeyEvent", up)
-			return err
-		}
-		ev := map[string]any{"type": "char", "key": key, "text": key, "modifiers": modifiers}
-		_, err := b.Page("Input.dispatchKeyEvent", ev)
-		return err
+		return b.pressCharKey(key, runes[0], modifiers)
 	}
 	return b.pressRawKey(key, modifiers)
+}
+
+// shortcutModifiers are the modifier bits that make a keystroke a COMMAND
+// rather than typing. Shift is deliberately absent: Shift+a is still the
+// character "A" and must carry text, while Cmd+a must not or the page receives
+// an "a" instead of a select-all.
+const shortcutModifiers = 1 | 2 | 4 // alt | ctrl | meta
+
+// pressCharKey dispatches one printable character as a real keyDown/keyUp pair.
+//
+// F-46: this used to be two branches, and the no-modifier one sent a BARE `char`
+// event. Measured against real Chrome, that produces a `keypress` and NOTHING
+// ELSE — no keydown, no keyup. Every page that listens for keydown (editors,
+// shortcut handlers, terminal emulators, and the web pane's own test page) sees
+// exactly nothing, while press_key returns {"pressed":"a","trusted":true} and a
+// nil error. Typing into a web pane silently did nothing, and the success
+// report is why it went unnoticed.
+//
+// The modifier branch was already the right shape and is now the only shape.
+// Measured: keyDown{key,text,code,vkey} + keyUp{key,code,vkey} yields
+// keydown + keypress + keyup and then goes quiet.
+func (b *Browser) pressCharKey(key string, r rune, modifiers int) error {
+	down := map[string]any{"type": "keyDown", "key": key, "modifiers": modifiers}
+	up := map[string]any{"type": "keyUp", "key": key, "modifiers": modifiers}
+
+	if vk := charVirtualKey(r); vk != 0 {
+		down["windowsVirtualKeyCode"] = vk
+		down["nativeVirtualKeyCode"] = vk
+		up["windowsVirtualKeyCode"] = vk
+		up["nativeVirtualKeyCode"] = vk
+	}
+	// `code` is the PHYSICAL key. Only letters and digits get one: every other
+	// printable character sits at a layout-dependent position, and a guessed
+	// code is worse than none for a page that reads event.code.
+	if code := charPhysicalCode(r); code != "" {
+		down["code"] = code
+		up["code"] = code
+	}
+	// text is what actually types the character. Withheld for shortcut combos,
+	// where the page wants the accelerator and not an inserted glyph — that is
+	// the one thing the old modifier branch got right.
+	if modifiers&shortcutModifiers == 0 {
+		down["text"] = key
+	}
+
+	if _, err := b.Page("Input.dispatchKeyEvent", down); err != nil {
+		return err
+	}
+	// The keyUp is not optional bookkeeping: a key that is never released stays
+	// down for the page's own key-state tracking.
+	_, err := b.Page("Input.dispatchKeyEvent", up)
+	return err
+}
+
+// charVirtualKey is the Windows virtual key code for a printable character, or
+// 0 where there is no stable one. Letters map to their UPPERCASE code — a
+// virtual key names the physical key, not the character it produced.
+func charVirtualKey(r rune) int {
+	switch {
+	case r >= '0' && r <= '9':
+		return int(r)
+	case r >= 'a' && r <= 'z':
+		return int(r) - 'a' + 'A'
+	case r >= 'A' && r <= 'Z':
+		return int(r)
+	}
+	return 0
+}
+
+// charPhysicalCode is the DOM `code` for a printable character on a US layout.
+func charPhysicalCode(r rune) string {
+	switch {
+	case r >= '0' && r <= '9':
+		return "Digit" + string(r)
+	case r >= 'a' && r <= 'z':
+		return "Key" + string(r-'a'+'A')
+	case r >= 'A' && r <= 'Z':
+		return "Key" + string(r)
+	}
+	return ""
 }
 
 func (b *Browser) doDragDrop(p actionParams) (json.RawMessage, string, error) {

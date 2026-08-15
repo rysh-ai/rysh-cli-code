@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package tools registry.go — re-exports rysh-shared/tools types as aliases.
 // All CLI-specific tools (bash.go, file_read.go, etc.) implement the shared
 // ToolExecutor interface and use the shared ToolRegistry/ToolSpec/ToolOutput types.

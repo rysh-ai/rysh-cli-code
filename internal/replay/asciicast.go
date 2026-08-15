@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package replay implements session replay / time-travel (design 006): capture
 // a session's pane output and export it as an asciicast (.cast) file so demos
 // and incidents become reproducible artifacts.

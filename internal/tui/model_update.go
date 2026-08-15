@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 import (
@@ -588,6 +590,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyBoardEvent(msg.ev)
 		return m, m.listenBoardEventCmd()
 
+	case boardPromptResultMsg:
+		// What the router actually said about the last line typed into the
+		// board's input field — success or refusal. Rendered under the field
+		// rather than dropped, because a prompt that went nowhere has to look
+		// different from one that landed (design 027 §5.2).
+		m.applyBoardPromptResult(msg)
+		return m, nil
+
 	case boardRecorderMsg:
 		// Record the answer and ask again later. Re-arming here rather than on
 		// a shared tick keeps the question off the render path entirely: the
@@ -984,6 +994,12 @@ func (m Model) updateTabMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.sendMsg(&msgpkg.MsgCreateTab{})
 		m.mode = modeNormal
 		m.syncPaneInputFocus()
+		return m, m.refreshCmd()
+	case "v", "V":
+		// Flip the tab bar between the horizontal strip and the left-hand
+		// column. Same path as `##tab orientation toggle`; stay in tab mode so
+		// the result can be eyeballed and flipped straight back.
+		m.sendMsg(&msgpkg.MsgSetTabBarOrientation{Toggle: true})
 		return m, m.refreshCmd()
 	case "r", "R":
 		// Rename the active tab. Pre-fill the current title for convenience.

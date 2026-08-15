@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // Tests for the setup-rysh composite GitHub Action (action/, design 009 §3.3).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 import (
@@ -48,14 +50,16 @@ func (m *Model) recomputePaneRects() {
 	if m.fullscreenPaneID != "" {
 		for _, pane := range tab.FlatPanes() {
 			if pane.ID == m.fullscreenPaneID {
-				fsWidth := max(20, m.width-4)
-				fsHeight := max(8, m.height-8)
+				fsWidth := m.fullscreenWidth()
+				fsHeight := m.bodyHeight()
 				m.paneRects = []paneRect{{
 					paneID: pane.ID,
-					x:      1 + 2, // outer Padding(0,1) + border + inner padding
-					y:      headerHeight + 1,
-					w:      fsWidth - 2,
-					h:      fsHeight,
+					// bodyXOffset (vertical tab column + outer Padding(0,1))
+					// + border + inner padding.
+					x: m.bodyXOffset() + 2,
+					y: headerHeight + 1,
+					w: fsWidth - 2,
+					h: fsHeight,
 				}}
 				return
 			}
@@ -65,10 +69,10 @@ func (m *Model) recomputePaneRects() {
 
 	lanes := tab.FlatLanes()
 	colWidths := laneWidths(lanes, m.paneAvailWidth(len(lanes)))
-	totalHeight := max(8, m.height-8)
+	totalHeight := m.bodyHeight()
 
 	var rects []paneRect
-	xOffset := 1 // body outer Padding(0,1) left
+	xOffset := m.bodyXOffset() // vertical tab column + body outer Padding(0,1) left
 
 	for c, lane := range lanes {
 		colWidth := colWidths[c]

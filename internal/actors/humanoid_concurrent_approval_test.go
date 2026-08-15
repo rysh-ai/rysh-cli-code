@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // Regression tests for X5: concurrent chat threads must not share a single

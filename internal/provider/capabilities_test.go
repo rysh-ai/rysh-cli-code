@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package provider
 
 // Tests for the capability table (design 002 §3.3, R3). The property that

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // humanoid_trust.go — session-scoped trust grants (design 008 RA5).

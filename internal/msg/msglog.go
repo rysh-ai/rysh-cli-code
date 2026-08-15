@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package msg
 
 import sharedmsg "github.com/rysh-ai/rysh-cli-shared/msg"

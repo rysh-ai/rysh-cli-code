@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // `rysh script` — run a .rysh file: a bash script whose statement-position "##"

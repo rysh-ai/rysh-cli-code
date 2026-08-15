@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -23,6 +25,7 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/proxy"
 	"github.com/rysh-ai/rysh-cli-code/internal/replay"
 	"github.com/rysh-ai/rysh-cli-code/internal/session"
+	"github.com/rysh-ai/rysh-cli-code/internal/tunnel"
 	"github.com/rysh-ai/rysh-cli-code/internal/usage"
 	"github.com/rysh-ai/rysh-cli-code/internal/web"
 	"github.com/rysh-ai/rysh-cli-code/internal/worktree"
@@ -44,18 +47,29 @@ type WorkspaceActor struct {
 	// ryshFail is the failure recorded by the ## command currently in flight,
 	// or nil. Set by failRysh, drained by handleRyshCommand — see the failure
 	// section of workspace_out.go for why it lives here and why that is safe.
-	ryshFail   error
-	cfg        config.Config
-	pub        *msg.NATSPublisher
-	agSetup    *agentic.Setup
-	nc         *nats.Conn
-	wKV        nats.KeyValue // rysh-workspace bucket
-	paneKV     nats.KeyValue // rysh-panes bucket
-	agentKV    nats.KeyValue // rysh-agents bucket
-	secretKV   nats.KeyValue // rysh-secrets bucket
-	secrets    *namedStore   // session→config→env secret resolver (.rysh/secrets)
-	variableKV nats.KeyValue // rysh-variables bucket
-	variables  *namedStore   // session→config→env variable resolver (.rysh/variables)
+	ryshFail error
+	// pendingUserCommand is the wait handle for a user command (design 032)
+	// that handleRyshCommand just started and that is still running, or nil.
+	//
+	// It is a field for the same reason ryshFail is: it has to cross
+	// handleRyshCommand's fixed (string, error) signature to reach the CLI
+	// case in Receive, which is the one caller that can afford to wait for it —
+	// off this goroutine. Set at dispatch, cleared at the top of the next
+	// handleRyshCommand and by takePendingUserCommand, so it never outlives the
+	// command that produced it. Safe unguarded because the mailbox serialises
+	// every touch; the goroutine it closes over never reads this field.
+	pendingUserCommand func() (string, error)
+	cfg                config.Config
+	pub                *msg.NATSPublisher
+	agSetup            *agentic.Setup
+	nc                 *nats.Conn
+	wKV                nats.KeyValue // rysh-workspace bucket
+	paneKV             nats.KeyValue // rysh-panes bucket
+	agentKV            nats.KeyValue // rysh-agents bucket
+	secretKV           nats.KeyValue // rysh-secrets bucket
+	secrets            *namedStore   // session→config→env secret resolver (.rysh/secrets)
+	variableKV         nats.KeyValue // rysh-variables bucket
+	variables          *namedStore   // session→config→env variable resolver (.rysh/variables)
 	// sessionLLMRef is the ##llm-activated registry reference
 	// ("provider/name"), "" when the session runs on the config default. The
 	// actual model override lives in agSetup.SessionLLM; this is display state.
@@ -120,10 +134,31 @@ type WorkspaceActor struct {
 	tabs         []*tabInfo
 	activeTabIdx int
 	activePaneID string
+	// scopedTab, when set, is the tab w.currentTab() answers with for the
+	// duration of ONE command that named a pane or tab (see scopeToTab). It
+	// exists so addressing a pane no longer has to move the human's focus to
+	// scope the command's tab lookups. Never persisted, never in a snapshot.
+	scopedTab *tabInfo
+	// focusBeforeCommand is the pane the human was on when the ## command
+	// currently running started, or "" outside a command. It is what a create
+	// restores focus to — see restoreFocusAfterCreate.
+	focusBeforeCommand string
+
+	// tabBarVertical draws the tab bar as a left-hand column rather than a
+	// horizontal strip. Presentation only — it changes no layout weights, just
+	// how the TUI spends its screen. Persisted in workspaceKV.
+	tabBarVertical bool
 
 	// lastSharedRootSource records how the most recent ##share resolved its
 	// browse root ("live"/"startup"/"daemon"/""), for the confirmation note.
 	lastSharedRootSource string
+
+	// nativeResumed marks the panes this daemon's post-restore sweep has
+	// already relaunched an agent in (design 029). In memory, not in the pane's
+	// metadata, and deliberately: it answers "did I already do this SINCE THIS
+	// DAEMON STARTED", which is exactly a daemon's lifetime. Persisting it
+	// would make the next stop/start think the work was already done.
+	nativeResumed map[string]bool
 
 	// KV persistence debounce. persistToKV marks the workspace dirty and writes
 	// at most once per workspaceKVInterval, coalescing bursts of structural
@@ -181,6 +216,18 @@ type WorkspaceActor struct {
 
 	// Web UI server (started via ##rysh web start).
 	webServer *web.Server
+
+	// webSettings is how THIS session is served — bind address, shared door and
+	// tunnel — loaded once from .rysh/web/<session>.json (falling back to the
+	// project-wide [web] defaults) and updated in place by `##rysh web start`.
+	// Per session, not per config file: see session.WebSettings.
+	webSettings       session.WebSettings
+	webSettingsLoaded bool
+
+	// webTunnel publishes the web server at a public HTTPS URL (ngrok), when
+	// the session asked to be reachable from off this machine. Nil when there
+	// is no tunnel. Owned by the workspace actor's goroutine, like webServer.
+	webTunnel *tunnel.Tunnel
 
 	// richClients is the number of connected renderers that can paint the
 	// surfaces the terminal cannot — the desktop app and the browser UI, both
@@ -257,13 +304,17 @@ type WorkspaceActor struct {
 	// pane at a time — matching the single replayPlayer field.
 	replayPaneID string
 
-	// boardPaneID is the agents-board pane for this session (design 025), or
-	// "" when the board is not open. One board per session: it is a single
-	// view over every agent, and a second copy would only halve the screen
-	// each gets. Not persisted deliberately -- on restart the pane comes back
-	// through the normal KV pane-restore path with its PaneType intact, and
-	// the id is re-learned rather than trusted from a stale field.
-	boardPaneID string
+	// boardPanes maps a BOARD ID to the agents-board pane rendering it (design
+	// 025, made plural by 028). One pane per board rather than one per
+	// session: a second view of the SAME board would only halve the screen
+	// each gets, while a session with several fleets legitimately has several
+	// boards to watch.
+	//
+	// Not persisted deliberately -- on restart the panes come back through the
+	// normal KV pane-restore path with their PaneType and their `board.id`
+	// meta intact, and this map is re-learned from them rather than trusted
+	// from a stale field.
+	boardPanes map[string]string
 
 	// Local share tracking: paneID/entityID → shareID.
 	// Maintained by the workspace so subscribe can resolve without querying the registry.
@@ -514,6 +565,18 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 			w.autoShareFirstTab()
 		}
 
+		// Native agent panes (design 029): a stop/start kills every pane's
+		// shell and its children, so the claude/codex sessions `##claude` and
+		// `##codex` started have to be resumed once the layout is back.
+		//
+		// Restore only — a fresh bootstrap has no panes carrying agent
+		// metadata, so sweeping there would be work with nothing to find.
+		// Detach/attach never reaches this code at all: it leaves the daemon,
+		// and therefore every PTY, alive.
+		if !bootstrapped && w.cfg.AgentAutoresume {
+			w.scheduleNativeAgentResume(nativeResumeDelay, nativeResumeRetries)
+		}
+
 		// Agent/humanoid registries subscribe to session-scoped subjects that are
 		// NOT namespaced per workspace, so they would collide if every workspace
 		// spawned them. Until that cascade is implemented, only the primary
@@ -650,50 +713,12 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 		// already tracked per-workspace.
 		w.initLimitChecker(ctx)
 
-		// Auto-start web server if configured (used by Electron sidecar mode).
-		// The web server is a session singleton (binds one port), so only the
-		// primary workspace starts it.
-		if w.cfg.WebAutoStart && w.spawnRegistries {
-			port := w.cfg.WebPort
-			if port <= 0 {
-				port = 23232
-			}
-			w.webServer = web.NewServer(port, w.sessionName, w.pub, w.nc, w.pub.Codecs())
-			w.webServer.SetFSBrowser(w.webFSBrowser())
-			if w.cfg.WebHost != "" {
-				w.webServer.SetHost(w.cfg.WebHost)
-			}
-			// A `##rysh web auth` login set earlier in this workspace applies
-			// here too — there is no pane to report a broken file to, so a
-			// failure only skips the login. NewServer has already read
-			// RYSH_WEB_CONTROL, so setWebCredentials can see that this is the
-			// desktop app's own sidecar and leave it ungated: a stored login
-			// must never lock the app out of the daemon it just spawned.
-			w.applyWebCredentials(w.webServer, nil)
-			// Auto-start serves the desktop app's own sidecar (control mode,
-			// loopback), which runs without a login by design. Anywhere else,
-			// refuse to auto-start an unauthenticated UI rather than quietly
-			// exposing the workspace — [web] host 0.0.0.0 + auto_start with no
-			// `##rysh web auth` login is exactly the accident worth refusing.
-			if w.webServer.LoginUsername() == "" && webLoginRequired(w.webServer.ControlEnabled()) {
-				slog.Error("auto-start web server skipped: no web login configured",
-					"hint", "##rysh web auth username=<u> password=<p>")
-				w.webServer = nil
-			} else {
-				w.wireWebPresence(w.webServer)
-				w.configureWebParity(w.webServer)
-				if err := w.webServer.Start(); err != nil {
-					slog.Error("auto-start web server failed", "err", err)
-					w.webServer = nil
-				} else {
-					// Advertise the endpoint on the session record so any local
-					// front-end — including a desktop app that did not spawn this
-					// daemon — can discover and adopt it.
-					w.recordWebEndpoint(w.webServer)
-					slog.Info("web server auto-started", "host", w.cfg.WebHost, "port", port,
-						"login", w.webServer.LoginUsername())
-				}
-			}
+		// Auto-start the web server if configured. This is what makes a session
+		// come back serving the same address, behind the same login, at the same
+		// public URL as the start that configured it — see
+		// workspace_web_autostart.go.
+		if w.spawnRegistries && w.sessionWebSettings().AutoStart {
+			w.autoStartWebServer()
 		}
 
 		// Apply this WORKSPACE's declarative forge config (its own integrations to
@@ -939,6 +964,13 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 			w.persistToKV()
 		}
 
+	case *msg.MsgSetTabBarOrientation:
+		want := m.Vertical
+		if m.Toggle {
+			want = !w.tabBarVertical
+		}
+		w.setTabBarVertical(want)
+
 	case *msg.MsgFocusPane:
 		if mt := w.activeMirrorTab(); mt != nil {
 			// Move the subscriber's focus among the mirror tab's panes.
@@ -1126,6 +1158,16 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 		// exists (see workspace_pane_claude.go).
 		w.handleLaunchClaudeInPane(m)
 
+	case *msg.MsgDiscoverCodexSession:
+		// The second half of `##codex`: codex issues its own session id, so it
+		// is read back off the rollout file it writes (design 029).
+		w.handleDiscoverCodexSession(m)
+
+	case *msg.MsgResumeNativeAgents:
+		// Post-restore sweep: bring back the agents `##claude` / `##codex`
+		// started, which a stop/start killed along with their shells.
+		w.handleResumeNativeAgents(m)
+
 	case *msg.MsgSwitchWorkspace:
 		// Fire-and-forget switch (no snapshot reply). The request/reply path
 		// (handled under RequestEnvelope) is preferred so the TUI gets the new
@@ -1280,7 +1322,22 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 
 		case *msg.MsgCLIRyshCommand:
 			resp := w.handleCLIRyshCommand(ctx, inner)
-			_ = m.Reply(resp)
+			if wait := w.takePendingUserCommand(); wait != nil {
+				// A user command (design 032) is still running. Reply when it
+				// finishes so `rysh exec` gets its output and its exit code
+				// rather than an empty success — and do it from a goroutine,
+				// because waiting here would put every pane in the session
+				// behind someone's shell script. RequestEnvelope.Reply only
+				// touches immutable fields and nc.Publish, so it is safe off
+				// the mailbox.
+				reply := m.Reply
+				go func() {
+					out, err := wait()
+					_ = reply(mergeUserCommandResponse(resp, out, err))
+				}()
+			} else {
+				_ = m.Reply(resp)
+			}
 
 		// The agents-board post is its OWN CLI message rather than a ##board
 		// run through MsgCLIRyshCommand above, because that path focuses the
@@ -1296,6 +1353,13 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 		// not focus a pane or echo into one as a side effect of routing.
 		case *msg.MsgCLIAnsaSend:
 			resp := w.handleCLIAnsaSend(inner)
+			_ = m.Reply(resp)
+
+		// The board's input field. It carries no target: resolving WHICH pane
+		// is the board claude is this actor's job, not the view's, so the
+		// refuse-on-two-panes-called-board rule lives in exactly one place.
+		case *msg.MsgBoardAgentPrompt:
+			resp := w.handleBoardAgentPrompt(inner)
 			_ = m.Reply(resp)
 		}
 	}

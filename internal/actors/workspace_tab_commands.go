@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -87,6 +89,18 @@ func (w *WorkspaceActor) handleTabCommand(ctx actor.Context, out *strings.Builde
 				w.failRysh("no active tab to rename")
 			}
 		}
+	case "orientation", "horizontal", "vertical":
+		// ##tab orientation [horizontal|vertical|toggle]  -> show or set the
+		// tab-bar orientation. `##tab horizontal` / `##tab vertical` are the
+		// shorthands, so the argument is the subcommand itself in that form.
+		arg := sub
+		if sub == "orientation" {
+			arg = ""
+			if len(args) > 1 {
+				arg = args[1]
+			}
+		}
+		w.handleTabOrientation(out, arg)
 	case "pipeline":
 		// ##tab pipeline enable|disable
 		action := ""
@@ -129,7 +143,48 @@ func (w *WorkspaceActor) handleTabCommand(ctx actor.Context, out *strings.Builde
 			"##tab model [<provider>/<name>]  bind the tab's LLM model",
 			"##tab delete <tab-id>",
 			"##tab pipeline enable|disable",
+			"##tab orientation [horizontal|vertical|toggle]",
 		)
 		w.failRyshUsage("unknown subcommand for ##%s: %q", "tab", sub)
 	}
+}
+
+// handleTabOrientation implements `##tab orientation [horizontal|vertical|
+// toggle]` and its `##tab horizontal` / `##tab vertical` shorthands. An empty
+// arg reports the current orientation without changing it.
+func (w *WorkspaceActor) handleTabOrientation(out *strings.Builder, arg string) {
+	name := func(vertical bool) string {
+		if vertical {
+			return tabBarVertical
+		}
+		return tabBarHorizontal
+	}
+
+	var want bool
+	switch strings.ToLower(strings.TrimSpace(arg)) {
+	case "":
+		fmt.Fprintf(out, "\n[rysh] tab bar is %s\n", name(w.tabBarVertical))
+		return
+	case tabBarHorizontal, "h", "horiz":
+		want = false
+	case tabBarVertical, "v", "vert":
+		want = true
+	case "toggle", "t":
+		want = !w.tabBarVertical
+	default:
+		ryshWriter(out).Usage(
+			"##tab orientation              show the current tab-bar orientation",
+			"##tab orientation horizontal   tab bar as a strip under the workspace row",
+			"##tab orientation vertical     tab bar as a column down the left edge",
+			"##tab orientation toggle       flip between the two (also: ctrl+t v)",
+		)
+		w.failRyshUsage("unknown ##tab orientation: %q", arg)
+		return
+	}
+
+	if !w.setTabBarVertical(want) {
+		fmt.Fprintf(out, "\n[rysh] tab bar is already %s\n", name(want))
+		return
+	}
+	fmt.Fprintf(out, "\n[rysh] tab bar is now %s\n", name(want))
 }

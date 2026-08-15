@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // ##variable — the environment-variable flavour of the named-value store (see

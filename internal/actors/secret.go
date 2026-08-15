@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // ##secret — the secret flavour of the named-value store (see store.go for the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package bus
 
 // JetStream Object Store image persistence (follow-up 1b).

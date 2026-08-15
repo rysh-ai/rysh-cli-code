@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // rysh onboard — guided first-run setup for using rysh AT the keyboard

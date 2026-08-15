@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package channels
 
 // R5: email.go is 1316 lines of hand-rolled IMAP (incl. IDLE) + SMTP and had

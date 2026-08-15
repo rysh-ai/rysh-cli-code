@@ -23,7 +23,7 @@ the shared one.
      no public URL for this asset exists yet. rysh.ai already serves ~111 tutorial videos under
      /video-tutorials-assets/, so the hosting mechanism exists; using it needs a deploy, which is
      a founder gate. Substituting a guessed URL would render as a broken image on github.com,
-     which is worse than this block. See new_roadmap/tracks/fleet/epic01-launch-readiness.md. -->
+     which is worse than this block. See new_roadmap/archive/epics-2026-08/epic01-launch-readiness.md. -->
 
 SecretNAT is on by default. Secrets are substituted with tokens in the request body
 before it leaves the machine, and a response carrying a live credential in plaintext

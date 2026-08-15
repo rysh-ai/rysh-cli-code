@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 import (
@@ -73,7 +75,7 @@ func TestAcceptanceTwoAgentsPostAndAReplyThreads(t *testing.T) {
 	replyPost.ThreadID = thread
 
 	for _, p := range []*msg.MsgBoardPost{rootPost, replyPost} {
-		if err := msg.SendBoardPost(pub, p); err != nil {
+		if err := msg.SendBoardPost(pub, "", p); err != nil {
 			t.Fatalf("SendBoardPost(%s): %v", p.Persona, err)
 		}
 	}
@@ -91,7 +93,7 @@ func TestAcceptanceTwoAgentsPostAndAReplyThreads(t *testing.T) {
 	}
 
 	m := buildBoardModel(store)
-	rendered := strings.Join(m.boardRows(100), "\n")
+	rendered := strings.Join(m.boardRows("", 100), "\n")
 
 	// Both agents are visible, each under its own pane given-name.
 	for _, persona := range []string{

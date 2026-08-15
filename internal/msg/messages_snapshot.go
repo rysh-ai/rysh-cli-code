@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Snapshot request/reply messages. Every level of the tree answers one of
 // these; they are grouped here rather than split across the four
 // level-specific files because they are a single request/reply protocol.

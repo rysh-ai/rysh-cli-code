@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package web
 
 // Middleware tests for the login gate. The login endpoints themselves, and the

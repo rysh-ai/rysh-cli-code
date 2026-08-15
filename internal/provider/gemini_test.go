@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package provider
 
 // Tests for the Gemini provider wiring (design 002, roadmap B6). Gemini rides

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tools
 
 // Tests for rysh_command (design 008 RA3). The two properties worth protecting

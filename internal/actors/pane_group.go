@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -23,6 +25,16 @@ type paneRefInGroup struct {
 	id       string
 	title    string
 	paneType string // "" or "normal" for regular panes, "approval" for ephemeral approval panes
+	// hidden mirrors the pane's own domain.PaneSnapshot.Hidden (design 027
+	// §5.1). The PANE owns the field; this is a copy the group keeps so it can
+	// skip hidden panes while cycling focus without a round trip per keystroke.
+	//
+	// Kept in step two ways, and it needs both: MsgPaneGroupSetPaneHidden
+	// updates it the moment a human toggles, and collectSnapshot reconciles it
+	// from what the pane itself reports — which is what carries it across a
+	// daemon restart, where the pane restores hidden from KV and the group is
+	// freshly built with no memory of it.
+	hidden bool
 }
 
 // PaneGroupActor manages the panes within a single pane group (stack of panes).
@@ -36,7 +48,7 @@ type PaneGroupActor struct {
 	pub     *msg.NATSPublisher
 	agSetup *agentic.Setup
 	nc      *nats.Conn
-	kvStore nats.KeyValue // rysh-panes bucket
+	kvStore nats.KeyValue   // rysh-panes bucket
 	secrets *secretResolver // workspace-scoped ##secret lookup, threaded to panes
 	br      *bridge.NATSBridge
 
@@ -56,6 +68,8 @@ type PaneGroupActor struct {
 	initialPaneID   string
 	initialTitle    string
 	initialPaneType string
+	// initialMeta is metadata the initial pane is born with (design 028).
+	initialMeta map[string]string
 
 	// restoreData is set when the actor should restore from KV on *actor.Started.
 	// It is consumed once and set to nil.
@@ -135,15 +149,25 @@ func (g *PaneGroupActor) Receive(ctx actor.Context) {
 			g.doRestoreFromKV(ctx, *g.restoreData)
 			g.restoreData = nil
 		} else if g.initialPaneID != "" {
-			g.createPaneTyped(ctx, g.initialPaneID, g.initialTitle, g.initialPaneType)
+			g.createPaneTyped(ctx, g.initialPaneID, g.initialTitle, g.initialPaneType, g.initialMeta)
 			g.initialPaneID = ""
 			g.initialTitle = ""
 			g.initialPaneType = ""
+			g.initialMeta = nil
 		}
 		replayScope(g.agSetup, agentic.ScopeGroup, agentic.ScopeIDs{TabID: g.tabID, LaneID: g.laneID, GroupID: g.id})
 
 	case *actor.Stopping:
 		teardownScope(g.agSetup, agentic.ScopeGroup, g.id)
+		// Panes are spawned detached from supervision (spawnDetached) so that a
+		// pane can outlive the group it was born in — that is what makes ##move
+		// a bookkeeping change rather than a restart. The flip side is that
+		// nothing stops them implicitly, so the group that currently HOLDS them
+		// must, and only those: a pane released to another group is already out
+		// of these maps by the time this runs.
+		for _, pid := range g.panePIDs {
+			ctx.Stop(pid)
+		}
 		if g.br != nil {
 			g.br.Stop()
 			g.br = nil
@@ -175,6 +199,9 @@ func (g *PaneGroupActor) Receive(ctx actor.Context) {
 	case *msg.MsgPaneGroupStackedPaneSelect:
 		g.stackedPaneSelect(m.Index)
 
+	case *msg.MsgPaneGroupSetPaneHidden:
+		g.setPaneHidden(m.PaneID, m.Hidden)
+
 	case *msg.MsgPaneGroupFocusPaneByID:
 		// Workspace focus landed on a member pane (mouse click on a stacked
 		// title bar, focus restore): expand it — the active stack index must
@@ -199,6 +226,18 @@ func (g *PaneGroupActor) Receive(ctx actor.Context) {
 
 	case *msg.MsgPaneGroupDeletePane:
 		g.deletePaneByID(ctx, m.PaneID)
+
+	// --- live pane transfer (##move); see pane_move.go ---
+
+	case *groupReleasePaneRequest:
+		handle, empty, ok := g.releasePane(m.paneID)
+		ctx.Respond(&groupReleasePaneReply{handle: handle, empty: empty, ok: ok})
+
+	case *groupAdoptPaneRequest:
+		ctx.Respond(&groupAdoptPaneReply{ok: g.adoptPane(ctx, m.handle, m.index)})
+
+	case *groupMovePaneRequest:
+		ctx.Respond(&groupMovePaneReply{ok: g.movePaneInStack(m.paneID, m.dir)})
 
 	// Serialise for persistence on THIS actor's goroutine. Pane groups are the
 	// leaves of the KV tree, so no further cascade is needed. See kv_cascade.go.
@@ -225,18 +264,26 @@ func (g *PaneGroupActor) Receive(ctx actor.Context) {
 // ---------------------------------------------------------------------------
 
 func (g *PaneGroupActor) createPane(ctx actor.Context, paneID, title string) {
-	g.createPaneTyped(ctx, paneID, title, "")
+	g.createPaneTyped(ctx, paneID, title, "", nil)
 }
 
 // createPaneTyped creates a pane with an explicit pane type. A "replay" pane
 // is a real PaneActor that never starts a shell/PTY (design 006 v2): its
 // content is exclusively the output published to its subjects, making it
 // read-only by construction.
-func (g *PaneGroupActor) createPaneTyped(ctx actor.Context, paneID, title, paneType string) {
+func (g *PaneGroupActor) createPaneTyped(ctx actor.Context, paneID, title, paneType string, meta map[string]string) {
 	pa := NewPaneActor(paneID, title, g.tabID, g.laneID, g.id, g.cfg, g.pub, g.nc, g.agSetup, g.kvStore, g.secrets)
 	pa.paneType = paneType
+	// Copied, not aliased: the caller's map is a message payload and a pane
+	// that shared it would see later edits to a message it already handled.
+	if len(meta) > 0 {
+		pa.meta = make(map[string]string, len(meta))
+		for k, v := range meta {
+			pa.meta[k] = v
+		}
+	}
 	paneProps := actor.PropsFromProducer(func() actor.Actor { return pa })
-	pid := ctx.Spawn(paneProps)
+	pid := spawnDetached(ctx, paneProps)
 
 	g.panePIDs[paneID] = pid
 	g.paneActors[paneID] = pa
@@ -261,7 +308,7 @@ func (g *PaneGroupActor) spawnRestoredPane(ctx actor.Context, paneID, paneTitle,
 		pa.RestoreState(*snap)
 	}
 	paneProps := actor.PropsFromProducer(func() actor.Actor { return pa })
-	pid := ctx.Spawn(paneProps)
+	pid := spawnDetached(ctx, paneProps)
 
 	g.panePIDs[paneID] = pid
 	g.paneActors[paneID] = pa
@@ -394,30 +441,122 @@ func (g *PaneGroupActor) createStackedPane(ctx actor.Context, m *msg.MsgPaneGrou
 
 // stackedPaneNext advances the active pane index to the next pane in the stack
 // (wraps around). The paneRefs order is never changed — panes stay in creation order.
+//
+// Hidden panes are SKIPPED (design 027 §5.1): cycling into a pane that is not
+// drawn would park the human's keystrokes somewhere invisible, which is
+// indistinguishable from the terminal having frozen.
 func (g *PaneGroupActor) stackedPaneNext() {
-	if len(g.paneRefs) <= 1 {
-		return
-	}
-	g.activePane = (g.activePane + 1) % len(g.paneRefs)
+	g.stepActivePane(+1)
 }
 
 // stackedPanePrev moves the active pane index to the previous pane in the stack
 // (wraps around). The paneRefs order is never changed — panes stay in creation order.
+// Hidden panes are skipped, for stackedPaneNext's reason.
 func (g *PaneGroupActor) stackedPanePrev() {
-	if len(g.paneRefs) <= 1 {
+	g.stepActivePane(-1)
+}
+
+// stepActivePane moves the active index by step, skipping hidden panes and
+// wrapping. It walks at most len(paneRefs) slots, so a group whose panes are
+// ALL hidden leaves the active pane exactly where it was rather than spinning.
+func (g *PaneGroupActor) stepActivePane(step int) {
+	n := len(g.paneRefs)
+	if n <= 1 {
 		return
 	}
-	g.activePane = (g.activePane - 1 + len(g.paneRefs)) % len(g.paneRefs)
+	for i := 1; i <= n; i++ {
+		cand := ((g.activePane+step*i)%n + n) % n
+		if !g.paneRefs[cand].hidden {
+			g.activePane = cand
+			return
+		}
+	}
 }
 
 // stackedPaneSelect activates the stacked pane at the given 0-based index
 // (the [n/N] position shown in the title bars, minus one). Out-of-range indices
 // are ignored. The paneRefs order is never changed — panes stay in creation order.
+//
+// The index counts DRAWN panes, because the number it comes from was read off a
+// title bar that counts drawn panes (domain.drawnPanesInGroup renumbers around
+// hidden panes). Indexing paneRefs directly here would select the wrong pane in
+// any group holding a hidden one — display and selection have to count the same
+// things or the [n/N] a human types means something else by the time it lands.
 func (g *PaneGroupActor) stackedPaneSelect(idx int) {
-	if idx < 0 || idx >= len(g.paneRefs) {
+	if idx < 0 {
 		return
 	}
-	g.activePane = idx
+	for i, ref := range g.paneRefs {
+		if ref.hidden {
+			continue
+		}
+		if idx == 0 {
+			g.activePane = i
+			return
+		}
+		idx--
+	}
+}
+
+// setPaneHidden takes one pane in this group off screen, or puts it back.
+//
+// It moves focus off the pane BEFORE hiding it. That ordering is the whole
+// hazard: the active pane is excluded from cycling once hidden, so hiding a
+// focused pane would strand focus somewhere nothing draws and no key can reach
+// — the pane would still take every keystroke while appearing not to exist.
+// Returns true when the pane was found here.
+func (g *PaneGroupActor) setPaneHidden(paneID string, hidden bool) bool {
+	if !g.setPaneHiddenLocal(paneID, hidden) {
+		return false
+	}
+	// The PANE owns the field — this group holds a copy so it can cycle focus
+	// without a round trip. Telling the pane is what makes it persist and what
+	// puts it in every snapshot the frontends render from.
+	_ = g.pub.Send(msg.T("pane", paneID, "inbox"), &msg.MsgPaneSetHidden{Hidden: hidden})
+	return true
+}
+
+// reconcileRefFromSnapshot brings the group's copy of a pane's rendering state
+// back in step with what the PANE itself reports.
+//
+// `answered` is the whole point. collectSnapshot fills an unreachable pane's
+// slot with a placeholder whose every field is the zero value, so reconciling
+// off it unconditionally would report `hidden: false` for a pane that is
+// hidden — un-hiding it because the daemon was briefly busy. That is the F-23
+// shape exactly: a zero value produced by a broken path, read as a fact.
+//
+// A pane that did not answer keeps whatever the group already believed. Stale
+// is recoverable; wrong is not.
+func reconcileRefFromSnapshot(ref *paneRefInGroup, snap domain.PaneSnapshot, answered bool) {
+	if !answered {
+		return
+	}
+	ref.hidden = snap.Hidden
+}
+
+// setPaneHiddenLocal updates this group's own bookkeeping and moves focus if it
+// has to. Split from the publish above so the focus rule can be tested without
+// a bus: the ordering is the part that is easy to get wrong and the publish is
+// the part that is easy to see.
+func (g *PaneGroupActor) setPaneHiddenLocal(paneID string, hidden bool) bool {
+	idx := -1
+	for i, ref := range g.paneRefs {
+		if ref.id == paneID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return false
+	}
+	g.paneRefs[idx].hidden = hidden
+	if hidden && g.activePane == idx {
+		// stepActivePane skips hidden panes, so this lands on a drawn one —
+		// and leaves the index alone when every pane in the group is hidden,
+		// which is honest: there is nowhere visible to put focus.
+		g.stepActivePane(+1)
+	}
+	return true
 }
 
 // moveStackedPaneUp reorders the active pane one slot toward the front of the
@@ -465,6 +604,12 @@ func (g *PaneGroupActor) collectSnapshot(layoutOnly, noHistories bool) domain.Pa
 	// approval pane with no actor is skipped, preserving prior behaviour).
 	results := make([]domain.PaneSnapshot, len(g.paneRefs))
 	have := make([]bool, len(g.paneRefs))
+	// answered[i] means slot i holds what the PANE said, as opposed to the
+	// placeholder built on a failed round trip. `have` cannot stand in for it:
+	// have is true for an unreachable pane too, and its placeholder carries
+	// every field at its zero value. Reconciling `hidden` off that would
+	// un-hide a pane because the daemon was briefly busy.
+	answered := make([]bool, len(g.paneRefs))
 	fetch := func(i int, id, title string) {
 		reply, err := g.pub.Request(
 			msg.T("pane", id, "snapshot"),
@@ -491,6 +636,7 @@ func (g *PaneGroupActor) collectSnapshot(layoutOnly, noHistories bool) domain.Pa
 			return
 		}
 		results[i] = snReply.Snapshot
+		answered[i] = true
 	}
 	// Fan out concurrently only when the group actually stacks more than one
 	// pane; the common single-pane group runs inline to avoid goroutine +
@@ -503,6 +649,7 @@ func (g *PaneGroupActor) collectSnapshot(layoutOnly, noHistories bool) domain.Pa
 			if apActor, ok := g.approvalPaneActors[ref.id]; ok {
 				results[i] = apActor.BuildSnapshot()
 				have[i] = true
+				answered[i] = true // local state, no round trip to fail
 			}
 			continue
 		}
@@ -519,6 +666,12 @@ func (g *PaneGroupActor) collectSnapshot(layoutOnly, noHistories bool) domain.Pa
 	}
 	for i := range g.paneRefs {
 		if have[i] {
+			// Reconcile the group's copy of `hidden` from what the pane itself
+			// reports. The pane owns the field, so this is asking the owner
+			// rather than reading a trace it left (design 026 §5.4) — and it is
+			// what carries the state across a daemon restart, where the pane
+			// restores hidden from KV into a group that was built without it.
+			reconcileRefFromSnapshot(g.paneRefs[i], results[i], answered[i])
 			snap.Panes = append(snap.Panes, results[i])
 		}
 	}

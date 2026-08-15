@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package channels
 
 // Tests for the Signal adapter (C4, design 001 §4.4 / §6): pure mapping

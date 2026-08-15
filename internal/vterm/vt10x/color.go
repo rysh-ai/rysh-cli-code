@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package vt10x
 
 // ANSI color values

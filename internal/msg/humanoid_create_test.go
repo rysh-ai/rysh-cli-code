@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package msg
 
 // MsgHumanoidCreate gained additive Provider/Profile fields (designs 006 MP2

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 // model_native.go — TUI side of ##native pass-through shell mode (Phase 6 of

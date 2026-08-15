@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Command echo-channel is the reference rysh channel plugin (docs/plugin-authoring.md).
 //
 // It speaks the stdio transport: newline-delimited JSON-RPC 2.0 on

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package runtime is the shared, cross-cutting machinery a generated tool-pack
 // uses at call time: HTTP request assembly, auth injection, retries/backoff,
 // pagination hints, jq-style response trimming, and a secret-redaction hook.

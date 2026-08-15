@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package provider
 
 // Record/replay determinism for the eval harness (design 009 §3.2).

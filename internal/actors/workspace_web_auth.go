@@ -1,13 +1,17 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // `##rysh web auth` — the username/password login for the web UI, and the
 // login resolution shared with `##rysh web start --username/--password`.
 //
 // This login is the ONLY way into the UI; the access token it replaced is gone
-// (internal/web/auth.go). Credentials are stored per-workspace in
-// <ryshDir>/web-auth.json (bcrypt hash + the HS256 signing key, never the
-// password) and the browser trades them for a one-month JWT it keeps in
-// localStorage. When the token expires the login form comes back — there is no
+// (internal/web/auth.go). Credentials are stored per SESSION in
+// <ryshDir>/web/<session>-auth.json — falling back to the project-wide
+// <ryshDir>/web-auth.json while a session has none — as a bcrypt hash plus the
+// HS256 signing key, never the password; the browser trades them for a
+// one-month JWT it keeps in localStorage. (Per session because a session is
+// what gets served: see web.CredentialsRef.) When the token expires the login form comes back — there is no
 // refresh token to implement or leak.
 //
 // Setting credentials mints a fresh signing key, so changing the password
@@ -92,7 +96,7 @@ func (w *WorkspaceActor) handleWebAuth(out *strings.Builder, args []string) {
 
 	switch {
 	case parsed.Clear:
-		removed, err := web.ClearCredentials(w.cfg.RyshDir)
+		removed, err := web.ClearCredentialsFor(w.credentialsRef())
 		if err != nil {
 			fmt.Fprintf(out, "\n[rysh] %v\n", err)
 			w.failRysh("%v", err)
@@ -111,7 +115,7 @@ func (w *WorkspaceActor) handleWebAuth(out *strings.Builder, args []string) {
 		}
 
 	case parsed.Show:
-		creds, err := web.LoadCredentials(w.cfg.RyshDir)
+		creds, err := web.LoadCredentialsFor(w.credentialsRef())
 		if err != nil {
 			fmt.Fprintf(out, "\n[rysh] %v\n", err)
 			w.failRysh("%v", err)
@@ -123,7 +127,7 @@ func (w *WorkspaceActor) handleWebAuth(out *strings.Builder, args []string) {
 			return
 		}
 		fmt.Fprintf(out, "\n[rysh] web login configured for user %q (set %s)\n", creds.Username, creds.UpdatedAt)
-		fmt.Fprintf(out, "[rysh] credentials: %s\n", web.CredentialsPath(w.cfg.RyshDir))
+		fmt.Fprintf(out, "[rysh] credentials: %s\n", w.credentialsRef().OwnPath())
 
 	default:
 		if parsed.Username == "" || parsed.Password == "" {
@@ -131,14 +135,19 @@ func (w *WorkspaceActor) handleWebAuth(out *strings.Builder, args []string) {
 			w.failRyshUsage("##rysh web auth needs both username= and password=")
 			return
 		}
-		creds, err := web.SaveCredentials(w.cfg.RyshDir, parsed.Username, parsed.Password)
+		creds, err := web.SaveCredentialsFor(w.credentialsRef(), parsed.Username, parsed.Password)
 		if err != nil {
 			fmt.Fprintf(out, "\n[rysh] %v\n", err)
 			w.failRysh("%v", err)
 			return
 		}
 		fmt.Fprintf(out, "\n[rysh] web login set for user %q\n", creds.Username)
-		fmt.Fprintf(out, "[rysh] credentials: %s (password hashed; not recoverable)\n", web.CredentialsPath(w.cfg.RyshDir))
+		fmt.Fprintf(out, "[rysh] credentials: %s (password hashed; not recoverable)\n", w.credentialsRef().OwnPath())
+		// The secret tier gets it too, so the two never drift. They did once:
+		// a login set here and secrets set separately meant the running server
+		// checked one password while the durable copy held another, and a
+		// restart could resurrect the older of the two.
+		w.storeWebLoginSecrets(out, parsed.Username, parsed.Password)
 		fmt.Fprintf(out, "[rysh] any browser signed in with the previous password must sign in again\n")
 		if w.webServer != nil {
 			setWebCredentials(w.webServer, creds, out)
@@ -177,7 +186,7 @@ func (w *WorkspaceActor) resolveWebStartLogin(out *strings.Builder, opts webStar
 	}
 
 	if user != "" {
-		creds, err := web.SaveCredentials(w.cfg.RyshDir, user, pass)
+		creds, err := web.SaveCredentialsFor(w.credentialsRef(), user, pass)
 		if err != nil {
 			fmt.Fprintf(out, "\n[rysh] %v\n", err)
 			w.failRysh("%v", err)
@@ -190,13 +199,30 @@ func (w *WorkspaceActor) resolveWebStartLogin(out *strings.Builder, opts webStar
 		return creds, true
 	}
 
-	creds, err := web.LoadCredentials(w.cfg.RyshDir)
+	creds, err := web.LoadCredentialsFor(w.credentialsRef())
 	if err != nil {
 		// A corrupt credentials file must not silently downgrade the UI to no
 		// auth at all, so it stops the start outright.
 		fmt.Fprintf(out, "\n[rysh] %v\n", err)
 		w.failRysh("%v", err)
 		return nil, false
+	}
+	// No hash on disk, but the workspace may still hold the login as secrets —
+	// set by this command on an earlier machine, restored from a backup, or put
+	// there directly with `##secret set RYSH_WEB_USERNAME/-_PASSWORD`. They are
+	// the durable copy (web-auth.json is only a hash), so a start that has them
+	// available should never refuse for want of a login.
+	if creds == nil {
+		if user, pass, ok := w.storedWebCredentials(); ok {
+			restored, serr := web.SaveCredentialsFor(w.credentialsRef(), user, pass)
+			if serr != nil {
+				fmt.Fprintf(out, "\n[rysh] the login in the secret store could not be applied: %v\n", serr)
+			} else {
+				fmt.Fprintf(out, "\n[rysh] login taken from the secret store (%s / %s) — user %q\n",
+					webUserSecret, webPassSecret, restored.Username)
+				creds = restored
+			}
+		}
 	}
 	if creds == nil && webLoginRequired(opts.Control) {
 		fmt.Fprintf(out, "\n[rysh] no web login configured — the UI is not served without one\n")
@@ -242,8 +268,8 @@ func (w *WorkspaceActor) applyWebCredentials(srv *web.Server, out io.Writer) {
 	// rooted at the same project shares that file and may rotate the signing
 	// key at any moment; without this, this process keeps verifying against the
 	// superseded key and 401s every client until it is restarted (F-9).
-	srv.TrackCredentialsFile(w.cfg.RyshDir)
-	creds, err := web.LoadCredentials(w.cfg.RyshDir)
+	srv.TrackCredentialsRef(w.credentialsRef())
+	creds, err := web.LoadCredentialsFor(w.credentialsRef())
 	if err != nil {
 		if out != nil {
 			fmt.Fprintf(out, "\n[rysh] web login not loaded: %v\n", err)
@@ -291,8 +317,20 @@ func (w *WorkspaceActor) openSharedWebDoor(out *strings.Builder, opts webStartOp
 		fmt.Fprintf(out, "[rysh] the desktop app keeps its own connection on %s (loopback, no sign-in)\n",
 			webBaseURL(w.webServer.Host(), w.webServer.Port()))
 	}
-	if webBindIsLoopback(opts.Host) {
+	if webBindIsLoopback(opts.Host) && !opts.Ngrok {
 		fmt.Fprintf(out, "[rysh] not reachable from other machines — use --bind 0.0.0.0 to expose it on your network\n")
 	}
+	if opts.Ngrok || w.sessionWebSettings().Ngrok {
+		w.startWebTunnel(out, opts.Port, opts.NgrokDomain)
+	}
+	// A shared door is persisted under its OWN keys ([web] shared_host /
+	// shared_port). The primary server's port here belongs to whoever started it
+	// — under the desktop app, an ephemeral one the app picked and passes in
+	// RYSH_WEB_PORT — so writing this address as [web] port would be recording
+	// the wrong door and having an env override erase it anyway.
+	shared := opts
+	shared.SharedDoor = true
+	w.persistWebStart(out, shared, creds)
+	w.recordWebMeta(w.webServer)
 	fmt.Fprintf(out, "[rysh] close it again with: ##rysh web stop --shared\n")
 }

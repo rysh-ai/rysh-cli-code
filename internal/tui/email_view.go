@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 // The terminal email client — a three-column, Gmail-style inbox rendered inside a

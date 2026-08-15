@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package forge
 
 // Manager-level lifecycle tests for streaming sessions (design 015 §2.1/§2.2):

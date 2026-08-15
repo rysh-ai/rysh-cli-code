@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // Regression tests for the `mode: relay` config trap (design 017, gap 1):

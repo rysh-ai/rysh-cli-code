@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package plugin
 
 // Dev-tier plugin signing (design 002 §4.6 "signing tiers", bottom tier made

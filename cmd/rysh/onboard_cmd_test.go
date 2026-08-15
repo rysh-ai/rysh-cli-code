@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // Tests for the rysh onboard building blocks (design 004 §6): structured

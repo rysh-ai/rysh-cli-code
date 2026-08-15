@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package metrics implements an in-process metrics sink for the rysh
 // agentic system. It satisfies rysh-shared/agentic.MetricsSink and
 // exposes a simple text dump usable from `##agent metrics`.

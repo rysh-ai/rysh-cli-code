@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //go:build linux || darwin
 
 package actors
@@ -28,7 +30,14 @@ func TestProcessNameResolvesARealProcess(t *testing.T) {
 	// A copy of /bin/sleep under a name of our own, so a match cannot come from
 	// anything but this pid — and so the result is not confusable with the many
 	// other `sleep`s a loaded machine is running.
-	const want = "ryshprocnametest"
+	//
+	// KEEP THIS AT 15 CHARACTERS OR FEWER. Linux exposes a process name through
+	// /proc/<pid>/comm, which is capped at TASK_COMM_LEN-1 = 15 bytes, so a
+	// longer name comes back silently truncated. This read "ryshprocnametest"
+	// (16) and returned "ryshprocnametes" on every Linux runner — a test that
+	// passed on macOS and could never pass in CI. It went unnoticed because CI
+	// was disabled while already red (2026-08-08 to 2026-08-15).
+	const want = "ryshprocname"
 	dir := t.TempDir()
 	bin := filepath.Join(dir, want)
 	src, err := os.ReadFile("/bin/sleep")

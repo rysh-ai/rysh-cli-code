@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -104,10 +106,10 @@ func TestBoardRecordsWithNoTUIAttached(t *testing.T) {
 	}
 
 	thread := msg.MintThreadID(ablaPaneA, 1)
-	if err := msg.SendBoardPost(pub, post(ablaPaneA, "mgr-01", "wave 1 done", thread, 100)); err != nil {
+	if err := msg.SendBoardPost(pub, "", post(ablaPaneA, "mgr-01", "wave 1 done", thread, 100)); err != nil {
 		t.Fatalf("SendBoardPost: %v", err)
 	}
-	if err := msg.SendBoardPost(pub, post(ablaPaneB, "wkr-01", "confirmed", thread, 101)); err != nil {
+	if err := msg.SendBoardPost(pub, "", post(ablaPaneB, "wkr-01", "confirmed", thread, 101)); err != nil {
 		t.Fatalf("SendBoardPost: %v", err)
 	}
 
@@ -132,7 +134,7 @@ func TestBoardRecordsWithNoTUIAttached(t *testing.T) {
 	// 2. It was written down: a cold reader, with ABLA stopped, sees it all.
 	abla.Stop()
 	cold := board.New(0)
-	posts, _, err := board.NewPersistence(kv).Restore(cold)
+	posts, _, err := board.NewPersistence(kv, "").Restore(cold)
 	if err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
@@ -168,7 +170,7 @@ func TestRegistrationHeardBeforeAnyBoardExists(t *testing.T) {
 		{V: msg.BoardSchemaVersion, PaneID: ablaPaneA, Persona: "mgr-01", TS: 1},
 		{V: msg.BoardSchemaVersion, PaneID: ablaPaneB, Persona: "wkr-01", TS: 2},
 	} {
-		if err := msg.SendBoardRegister(pub, r); err != nil {
+		if err := msg.SendBoardRegister(pub, "", r); err != nil {
 			t.Fatalf("SendBoardRegister: %v", err)
 		}
 	}
@@ -180,7 +182,7 @@ func TestRegistrationHeardBeforeAnyBoardExists(t *testing.T) {
 	// And they survive the process: a cold restore rebuilds both.
 	abla.Stop()
 	cold := board.New(0)
-	if _, regs, err := board.NewPersistence(kv).Restore(cold); err != nil || regs != 2 {
+	if _, regs, err := board.NewPersistence(kv, "").Restore(cold); err != nil || regs != 2 {
 		t.Fatalf("want 2 registrations restored, got %d (err %v)", regs, err)
 	}
 }
@@ -199,7 +201,7 @@ func TestStartIsIdempotent(t *testing.T) {
 	abla.Start()
 	t.Cleanup(abla.Stop)
 
-	if err := msg.SendBoardPost(pub, post(ablaPaneA, "mgr-01", "once", "", 200)); err != nil {
+	if err := msg.SendBoardPost(pub, "", post(ablaPaneA, "mgr-01", "once", "", 200)); err != nil {
 		t.Fatalf("SendBoardPost: %v", err)
 	}
 	ablaWaitFor(t, "the post to arrive", func() bool {
@@ -307,7 +309,7 @@ func TestTUISubscriptionDoesNotPersist(t *testing.T) {
 		}
 	}()
 
-	if err := msg.SendBoardPost(pub, post(ablaPaneA, "mgr-01", "one post", "", 300)); err != nil {
+	if err := msg.SendBoardPost(pub, "", post(ablaPaneA, "mgr-01", "one post", "", 300)); err != nil {
 		t.Fatalf("SendBoardPost: %v", err)
 	}
 
@@ -335,7 +337,7 @@ func TestRestoreBeforeSubscribeOrdering(t *testing.T) {
 	pub := msg.NewNATSPublisher(nc, codecs)
 
 	// A previous session wrote two posts.
-	prior := board.NewPersistence(kv)
+	prior := board.NewPersistence(kv, "")
 	for i, text := range []string{"yesterday one", "yesterday two"} {
 		if err := prior.SavePost(post(ablaPaneA, "mgr-01", text, "", int64(i))); err != nil {
 			t.Fatalf("SavePost: %v", err)
@@ -349,7 +351,7 @@ func TestRestoreBeforeSubscribeOrdering(t *testing.T) {
 
 	ablaWaitFor(t, "history to load", func() bool { return abla.Store().Stats().Posts == 2 })
 
-	if err := msg.SendBoardPost(pub, post(ablaPaneB, "wkr-01", "today", "", 500)); err != nil {
+	if err := msg.SendBoardPost(pub, "", post(ablaPaneB, "wkr-01", "today", "", 500)); err != nil {
 		t.Fatalf("SendBoardPost: %v", err)
 	}
 	ablaWaitFor(t, "the live post", func() bool { return abla.Store().Stats().Posts == 3 })
@@ -367,23 +369,48 @@ func TestRestoreBeforeSubscribeOrdering(t *testing.T) {
 	}
 }
 
-// TestASecondWriterDestroysHistory is why ABLA must be a singleton, and it is
-// NOT the tidiness concern it looks like.
+// TestTwoWritersThatBothPrimedFirstStillDestroyHistory is why one writer per
+// board is still a correctness requirement, and it is NOT the tidiness concern
+// it looks like.
 //
-// Two board.Persistence instances each keep their own arrival ordinal, so both
-// write post-...0001. The second Put does not add an entry — it OVERWRITES the
-// first at revision 2. Writer A's post is then gone: not duplicated, not
-// merged, GONE, with nothing anywhere reporting a loss.
+// Two board.Persistence instances that read the bucket at the same moment agree
+// on the next free ordinal, so both write THAT key. The second Put does not add
+// an entry — it OVERWRITES the first. Writer A's post is then gone: not
+// duplicated, not merged, GONE, with nothing anywhere reporting a loss.
 //
-// This is the real cost of a second writer, and it is worse than the "wasted
-// disk" it would be if duplicates simply piled up. It is why the TUI passes a
-// nil persister and why cmd/rysh spawns ABLA with SpawnNamed rather than Spawn.
-func TestASecondWriterDestroysHistory(t *testing.T) {
+// THE HAZARD WAS NARROWED BY DESIGN 028, NOT REMOVED, and the distinction is
+// the whole reason this test was rewritten rather than deleted. Persistence now
+// primes its ordinal from the KV before its first write, so a writer created
+// LATER — the lazy per-board path — continues where the previous one stopped
+// (TestALaterWriterContinuesTheOrdinal). What survives is the concurrent case
+// this test constructs: both writers read first, both believe the bucket is
+// empty, both write ordinal 1. Priming cannot close that; only single-writer
+// ownership can, which is why ABLA holds one Persistence per board in one map,
+// why the TUI passes a nil persister, and why cmd/rysh spawns ABLA with
+// SpawnNamed rather than Spawn.
+func TestTwoWritersThatBothPrimedFirstStillDestroyHistory(t *testing.T) {
 	nc := newABLATestNATS(t)
 	kv := newABLATestKV(t, nc)
 
-	a := board.NewPersistence(kv)
-	b := board.NewPersistence(kv)
+	// A board with history, because that is the state a second writer is most
+	// likely to appear in — and because it makes the collision deterministic
+	// rather than a race the test would have to hope for.
+	seed := board.NewPersistence(kv, "")
+	if err := seed.SavePost(post(ablaPaneA, "seed", "already on the board", "", 0)); err != nil {
+		t.Fatalf("SavePost(seed): %v", err)
+	}
+
+	a := board.NewPersistence(kv, "")
+	b := board.NewPersistence(kv, "")
+	// BOTH READ BEFORE EITHER WRITES — the concurrent shape, made
+	// deterministic. Each now believes the next free ordinal is 2.
+	if _, _, err := a.Restore(board.New(0)); err != nil {
+		t.Fatalf("Restore(a): %v", err)
+	}
+	if _, _, err := b.Restore(board.New(0)); err != nil {
+		t.Fatalf("Restore(b): %v", err)
+	}
+
 	if err := a.SavePost(post(ablaPaneA, "A", "post from writer A", "", 1)); err != nil {
 		t.Fatalf("SavePost: %v", err)
 	}
@@ -392,22 +419,68 @@ func TestASecondWriterDestroysHistory(t *testing.T) {
 	}
 
 	count, rewrites := postEntries(t, kv)
-	if count != 1 || rewrites != 1 {
-		t.Fatalf("expected the clobber to show as 1 entry rewritten once, got %d entries "+
+	if count != 2 || rewrites != 1 {
+		t.Fatalf("expected the clobber to show as 2 entries with 1 rewrite, got %d entries "+
 			"with %d rewrite(s) — if this changed, the key scheme changed and the hazard "+
 			"note in abla.go needs revisiting", count, rewrites)
 	}
 
 	store := board.New(0)
-	posts, _, err := board.NewPersistence(kv).Restore(store)
+	posts, _, err := board.NewPersistence(kv, "").Restore(store)
 	if err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
-	if posts != 1 {
-		t.Fatalf("want 1 surviving post (the loss), got %d", posts)
+	if posts != 2 {
+		t.Fatalf("want 2 surviving posts — the seed and B, with A destroyed — got %d", posts)
 	}
-	if got := store.Threads()[0].Root.Text; got != "post from writer B" {
-		t.Fatalf("survivor is %q; the point of this test is that A was destroyed", got)
+	var texts []string
+	for _, th := range store.Threads() {
+		texts = append(texts, th.Root.Text)
+	}
+	joined := strings.Join(texts, " | ")
+	if strings.Contains(joined, "post from writer A") {
+		t.Fatalf("writer A survived (%s); the point of this test is that a concurrent "+
+			"second writer destroys what it did not read", joined)
+	}
+	if !strings.Contains(joined, "post from writer B") {
+		t.Fatalf("writer B is missing: %s", joined)
+	}
+}
+
+// TestALaterWriterContinuesTheOrdinal is the half design 028 fixed, and it is
+// load-bearing for board ids: a board's Persistence is created the first time a
+// message names that board, which is routinely long after its history was
+// written. Starting at ordinal 0 would overwrite post-...0001 on the first
+// write — the same destruction as above, arriving through the lazy-creation
+// door instead of the second-actor door.
+func TestALaterWriterContinuesTheOrdinal(t *testing.T) {
+	nc := newABLATestNATS(t)
+	kv := newABLATestKV(t, nc)
+
+	first := board.NewPersistence(kv, "")
+	if err := first.SavePost(post(ablaPaneA, "A", "written earlier", "", 1)); err != nil {
+		t.Fatalf("SavePost: %v", err)
+	}
+
+	// A new writer, no Restore, no knowledge of the earlier one.
+	second := board.NewPersistence(kv, "")
+	if err := second.SavePost(post(ablaPaneB, "B", "written later", "", 2)); err != nil {
+		t.Fatalf("SavePost: %v", err)
+	}
+
+	count, rewrites := postEntries(t, kv)
+	if count != 2 || rewrites != 0 {
+		t.Fatalf("got %d entries with %d rewrite(s), want 2 and 0: a later writer "+
+			"must continue the ordinal rather than overwrite what it never read", count, rewrites)
+	}
+
+	store := board.New(0)
+	posts, _, err := board.NewPersistence(kv, "").Restore(store)
+	if err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if posts != 2 {
+		t.Fatalf("restored %d posts, want both", posts)
 	}
 }
 
@@ -428,7 +501,7 @@ func TestASingleWriterAtSeveralPostsIsNotAClobber(t *testing.T) {
 	nc := newABLATestNATS(t)
 	kv := newABLATestKV(t, nc)
 
-	p := board.NewPersistence(kv)
+	p := board.NewPersistence(kv, "")
 	for i, text := range []string{"one", "two", "three"} {
 		if err := p.SavePost(post(ablaPaneA, "A", text, "", int64(i+1))); err != nil {
 			t.Fatalf("SavePost(%q): %v", text, err)
@@ -443,7 +516,7 @@ func TestASingleWriterAtSeveralPostsIsNotAClobber(t *testing.T) {
 	}
 
 	store := board.New(0)
-	posts, _, err := board.NewPersistence(kv).Restore(store)
+	posts, _, err := board.NewPersistence(kv, "").Restore(store)
 	if err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
@@ -479,7 +552,7 @@ func TestStopIsIdempotentAndStopsRecording(t *testing.T) {
 
 	abla := NewAgentBoardListenerActor(nc, codecs, kv)
 	abla.Start()
-	_ = msg.SendBoardPost(pub, post(ablaPaneA, "mgr-01", "before stop", "", 700))
+	_ = msg.SendBoardPost(pub, "", post(ablaPaneA, "mgr-01", "before stop", "", 700))
 	ablaWaitFor(t, "the first post", func() bool { return abla.Store().Stats().Posts == 1 })
 
 	abla.Stop()
@@ -488,12 +561,12 @@ func TestStopIsIdempotentAndStopsRecording(t *testing.T) {
 		t.Fatal("still listening after Stop")
 	}
 
-	_ = msg.SendBoardPost(pub, post(ablaPaneA, "mgr-01", "after stop", "", 701))
+	_ = msg.SendBoardPost(pub, "", post(ablaPaneA, "mgr-01", "after stop", "", 701))
 	_ = nc.Flush()
 	time.Sleep(200 * time.Millisecond)
 
 	cold := board.New(0)
-	posts, _, err := board.NewPersistence(kv).Restore(cold)
+	posts, _, err := board.NewPersistence(kv, "").Restore(cold)
 	if err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
@@ -517,7 +590,7 @@ func TestABLAAnswersLivenessWhileRecording(t *testing.T) {
 	a := NewAgentBoardListenerActor(nc, msg.DefaultCodecRegistry(), kv)
 
 	// Before Start, nobody is recording and nobody must answer.
-	if _, err := nc.Request(msg.BoardAliveSubject(), nil, 300*time.Millisecond); err == nil {
+	if _, err := nc.Request(msg.BoardAliveSubject(""), nil, 300*time.Millisecond); err == nil {
 		t.Fatal("an unstarted recorder answered a liveness request — a view would " +
 			"render a confident empty board on the strength of it")
 	}
@@ -525,7 +598,7 @@ func TestABLAAnswersLivenessWhileRecording(t *testing.T) {
 	a.Start()
 	t.Cleanup(a.Stop)
 
-	reply, err := nc.Request(msg.BoardAliveSubject(), nil, 2*time.Second)
+	reply, err := nc.Request(msg.BoardAliveSubject(""), nil, 2*time.Second)
 	if err != nil {
 		t.Fatalf("a live recorder did not answer: %v", err)
 	}
@@ -535,7 +608,7 @@ func TestABLAAnswersLivenessWhileRecording(t *testing.T) {
 
 	// A stopped recorder must go quiet. Timing out is the honest answer.
 	a.Stop()
-	if _, err := nc.Request(msg.BoardAliveSubject(), nil, 300*time.Millisecond); err == nil {
+	if _, err := nc.Request(msg.BoardAliveSubject(""), nil, 300*time.Millisecond); err == nil {
 		t.Fatal("a STOPPED recorder still answered — that is the confident receipt " +
 			"failure in its purest form: a claim of health from something that is dead")
 	}

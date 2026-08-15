@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package web
 
 // Username/password credentials for the web UI, and where they live.
@@ -30,8 +32,136 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// credentialsFileName is the per-workspace credentials file inside the rysh dir.
+// credentialsFileName is the project-wide credentials file inside the rysh dir.
+// It is the fallback, and what every install had before logins became
+// per-session (see CredentialsRef).
 const credentialsFileName = "web-auth.json"
+
+// CredentialsRef says WHICH login a caller means: a named session's, or the
+// project-wide one.
+//
+// Logins started out per project, on the reasoning that rysh state is
+// project-local and sibling daemons rooted at one project should share a
+// password (that sharing is what F-9 is about — auth.go). But a session is what
+// gets served: two sessions in one project can be two different doors, on two
+// ports, published at two URLs, shown to two different sets of people. Making
+// them share one password meant the second session to set one silently changed
+// the first session's, and logged its browsers out.
+//
+// So a session's login lives at <ryshDir>/web/<session>-auth.json, beside its
+// web settings. Reads fall back to the project file when a session has none, so
+// every existing install keeps working and a session inherits the project login
+// until it sets its own.
+type CredentialsRef struct {
+	RyshDir string
+	// Session names the session whose login is meant. Empty means the
+	// project-wide file — which is what the fallback resolves to anyway.
+	Session string
+}
+
+// ProjectCredentials refers to the project-wide login.
+func ProjectCredentials(ryshDir string) CredentialsRef {
+	return CredentialsRef{RyshDir: ryshDir}
+}
+
+// SessionCredentials refers to one session's login.
+func SessionCredentials(ryshDir, session string) CredentialsRef {
+	return CredentialsRef{RyshDir: ryshDir, Session: session}
+}
+
+// OwnPath is where this ref's credentials are WRITTEN: the session's own file,
+// or the project file when no session is named.
+func (r CredentialsRef) OwnPath() string {
+	if r.RyshDir == "" {
+		return ""
+	}
+	if session := sanitizeSessionName(r.Session); session != "" {
+		return filepath.Join(r.RyshDir, "web", session+"-auth.json")
+	}
+	return CredentialsPath(r.RyshDir)
+}
+
+// Path is where this ref's credentials are READ from: its own file when that
+// exists, else the project-wide one. The fallback is what lets a session
+// inherit the project login until it sets one of its own.
+func (r CredentialsRef) Path() string {
+	own := r.OwnPath()
+	if own == "" {
+		return ""
+	}
+	if _, err := os.Stat(own); err == nil {
+		return own
+	}
+	return CredentialsPath(r.RyshDir)
+}
+
+// HasOwn reports whether this ref has credentials of its own, as opposed to
+// inheriting the project's. The difference matters: an inherited login is what
+// a session serves only while it has nothing to say about the matter.
+func (r CredentialsRef) HasOwn() bool {
+	own := r.OwnPath()
+	if own == "" || own == CredentialsPath(r.RyshDir) {
+		return false
+	}
+	_, err := os.Stat(own)
+	return err == nil
+}
+
+// sanitizeSessionName reduces a session name to a safe single filename segment.
+// Anything outside [A-Za-z0-9._-] becomes '-', so a session name can never
+// escape the directory or collide with the project file.
+func sanitizeSessionName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	out := strings.Trim(b.String(), ".-")
+	if out == "" || out == "web-auth" {
+		return ""
+	}
+	return out
+}
+
+// LoadCredentialsFor reads the credentials a ref resolves to (its own file, or
+// the project one). Same contract as LoadCredentials.
+func LoadCredentialsFor(ref CredentialsRef) (*Credentials, error) {
+	return loadCredentialsFile(ref.Path())
+}
+
+// SaveCredentialsFor writes credentials to the ref's OWN file — a session that
+// sets a login gets its own from that moment on, and stops following the
+// project's.
+func SaveCredentialsFor(ref CredentialsRef, username, password string) (*Credentials, error) {
+	return saveCredentialsFile(ref.OwnPath(), username, password)
+}
+
+// ClearCredentialsFor removes the ref's own credentials file. The project login
+// is left alone: clearing a session's login means "stop having your own", not
+// "unlock every other session in this project".
+func ClearCredentialsFor(ref CredentialsRef) (bool, error) {
+	path := ref.OwnPath()
+	if path == "" {
+		return false, nil
+	}
+	err := os.Remove(path)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, fmt.Errorf("remove web credentials: %w", err)
+}
 
 // Credentials is the on-disk shape of web-auth.json.
 type Credentials struct {
@@ -55,7 +185,15 @@ func LoadCredentials(ryshDir string) (*Credentials, error) {
 	if ryshDir == "" {
 		return nil, nil
 	}
-	data, err := os.ReadFile(CredentialsPath(ryshDir))
+	return loadCredentialsFile(CredentialsPath(ryshDir))
+}
+
+// loadCredentialsFile is the path-based core of LoadCredentials.
+func loadCredentialsFile(path string) (*Credentials, error) {
+	if path == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -64,10 +202,10 @@ func LoadCredentials(ryshDir string) (*Credentials, error) {
 	}
 	var c Credentials
 	if err := json.Unmarshal(data, &c); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", CredentialsPath(ryshDir), err)
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if c.Username == "" || c.PasswordHash == "" || c.Secret == "" {
-		return nil, fmt.Errorf("%s is incomplete — set credentials again with `##rysh web auth username=<u> password=<p>`", CredentialsPath(ryshDir))
+		return nil, fmt.Errorf("%s is incomplete — set credentials again with `##rysh web auth username=<u> password=<p>`", path)
 	}
 	return &c, nil
 }
@@ -76,6 +214,14 @@ func LoadCredentials(ryshDir string) (*Credentials, error) {
 // credentials file (0600 in a 0700 dir). Returns what was written.
 func SaveCredentials(ryshDir, username, password string) (*Credentials, error) {
 	if ryshDir == "" {
+		return nil, errors.New("no rysh dir to store web credentials in")
+	}
+	return saveCredentialsFile(CredentialsPath(ryshDir), username, password)
+}
+
+// saveCredentialsFile is the path-based core of SaveCredentials.
+func saveCredentialsFile(path, username, password string) (*Credentials, error) {
+	if path == "" {
 		return nil, errors.New("no rysh dir to store web credentials in")
 	}
 	username = strings.TrimSpace(username)
@@ -103,10 +249,13 @@ func SaveCredentials(ryshDir, username, password string) (*Credentials, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(ryshDir, 0o700); err != nil {
-		return nil, fmt.Errorf("create %s: %w", ryshDir, err)
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("create %s: %w", dir, err)
+		}
+		ensureCredentialsGitignore(dir)
 	}
-	if err := os.WriteFile(CredentialsPath(ryshDir), append(data, '\n'), 0o600); err != nil {
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
 		return nil, fmt.Errorf("write web credentials: %w", err)
 	}
 	return c, nil
@@ -161,4 +310,25 @@ func newSigningKey() (string, error) {
 		return "", fmt.Errorf("generate signing key: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// ensureCredentialsGitignore drops a .gitignore beside per-session credentials
+// so a project that tracks .rysh/ can never commit one.
+//
+// A credentials file is a password hash AND the HS256 signing key that mints
+// access tokens; committing one publishes the key. The project-wide
+// web-auth.json is covered by rysh's own .gitignore, but the per-session files
+// live in a directory that did not exist when that rule was written — and the
+// session SETTINGS beside them are ordinary state worth tracking, so the
+// directory cannot simply be excluded wholesale.
+//
+// Best effort: a failure here must never stop a login from being set.
+func ensureCredentialsGitignore(dir string) {
+	gi := filepath.Join(dir, ".gitignore")
+	if _, err := os.Stat(gi); err == nil {
+		return
+	}
+	_ = os.WriteFile(gi, []byte(
+		"# rysh web logins — a password hash and a token signing key. Never commit these.\n"+
+			"*-auth.json\n"), 0o600)
 }

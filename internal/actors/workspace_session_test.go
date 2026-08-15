@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -51,7 +53,7 @@ func TestSessionInfoCommand(t *testing.T) {
 		Name: "alpha", Path: "/work/alpha", State: "stopped", Source: "cli",
 	})
 
-	out, _ := w.handleRyshCommand(nil, "", "rysh", "session", false) // default -> info
+	out, _ := w.handleRyshCommand(nil, "", "rysh", "session", false, ryshBuiltinCmd) // default -> info
 
 	for _, want := range []string{
 		"session info",
@@ -86,7 +88,7 @@ func TestSessionInfoShowsDegradations(t *testing.T) {
 		Name: "designs", Path: "/work/designs", State: "stopped", Source: session.SourceApp,
 	})
 
-	out, _ := w.handleRyshCommand(nil, "", "rysh", "session", false)
+	out, _ := w.handleRyshCommand(nil, "", "rysh", "session", false, ryshBuiltinCmd)
 
 	if !strings.Contains(out, "created by  : rysh desktop app") {
 		t.Errorf("##session info should name the creating front-end\n---\n%s", out)
@@ -105,7 +107,7 @@ func TestSessionListCommand(t *testing.T) {
 		session.Record{Name: "beta", Path: "/work/beta", State: "stopped", Source: "cli"},
 	)
 
-	out, _ := w.handleRyshCommand(nil, "", "rysh", "session list", false)
+	out, _ := w.handleRyshCommand(nil, "", "rysh", "session list", false, ryshBuiltinCmd)
 
 	if !strings.Contains(out, "alpha") || !strings.Contains(out, "beta") {
 		t.Errorf("##session list should mention both sessions\n---\n%s", out)
@@ -123,7 +125,7 @@ func TestSessionSwitchSameSession(t *testing.T) {
 		session.Record{Name: "alpha", Path: "/work/alpha", State: "stopped", Source: "cli"},
 	)
 
-	out, _ := w.handleRyshCommand(nil, "", "rysh", "session switch alpha", false)
+	out, _ := w.handleRyshCommand(nil, "", "rysh", "session switch alpha", false, ryshBuiltinCmd)
 	if !strings.Contains(out, "already on session") {
 		t.Errorf("switching to the current session should report it is already active\n---\n%s", out)
 	}
@@ -134,7 +136,7 @@ func TestSessionSwitchNotFound(t *testing.T) {
 		session.Record{Name: "alpha", Path: "/work/alpha", State: "stopped", Source: "cli"},
 	)
 
-	out, _ := w.handleRyshCommand(nil, "", "rysh", "session switch ghost", false)
+	out, _ := w.handleRyshCommand(nil, "", "rysh", "session switch ghost", false, ryshBuiltinCmd)
 	if !strings.Contains(out, "not found") {
 		t.Errorf("switching to an unknown session should report it is not found\n---\n%s", out)
 	}
@@ -143,7 +145,7 @@ func TestSessionSwitchNotFound(t *testing.T) {
 func TestSessionSwitchMissingName(t *testing.T) {
 	w := newSessionTestWorkspace(t, "alpha")
 
-	out, _ := w.handleRyshCommand(nil, "", "rysh", "session switch", false)
+	out, _ := w.handleRyshCommand(nil, "", "rysh", "session switch", false, ryshBuiltinCmd)
 	if !strings.Contains(out, "usage:") {
 		t.Errorf("##session switch with no name should print usage\n---\n%s", out)
 	}
@@ -154,7 +156,7 @@ func TestSessionReloadCommand(t *testing.T) {
 		session.Record{Name: "alpha", Path: "/work/alpha", State: "stopped", Source: "cli"},
 	)
 
-	out, _ := w.handleRyshCommand(nil, "", "rysh", "session reload", false)
+	out, _ := w.handleRyshCommand(nil, "", "rysh", "session reload", false, ryshBuiltinCmd)
 	for _, want := range []string{
 		`reloaded session "alpha"`,
 		"workspace state flushed to KV",
@@ -169,7 +171,7 @@ func TestSessionReloadCommand(t *testing.T) {
 func TestSessionUnknownSubcommand(t *testing.T) {
 	w := newSessionTestWorkspace(t, "alpha")
 
-	out, _ := w.handleRyshCommand(nil, "", "rysh", "session bogus", false)
+	out, _ := w.handleRyshCommand(nil, "", "rysh", "session bogus", false, ryshBuiltinCmd)
 	if !strings.Contains(out, "usage:") {
 		t.Errorf("unknown ##session subcommand should print usage\n---\n%s", out)
 	}

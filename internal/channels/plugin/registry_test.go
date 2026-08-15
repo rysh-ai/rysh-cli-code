@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package plugin
 
 // Registry + factory resolution tests (design 002 §4.4/§6): an installed

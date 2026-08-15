@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package plugin
 
 // Registry — installed channel plugins on disk, plus the wiring that lets

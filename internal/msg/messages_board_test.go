@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package msg
 
 import (
@@ -165,15 +167,15 @@ func TestBoardSubjectsAreBuiltFromT(t *testing.T) {
 	t.Cleanup(func() { SetSessionPrefix(original) })
 
 	SetSessionPrefix("macmini-rysh-elect")
-	if got, want := BoardPostSubject(), "macmini-rysh-elect.board.post"; got != want {
+	if got, want := BoardPostSubject(""), "macmini-rysh-elect.board.post"; got != want {
 		t.Fatalf("BoardPostSubject() = %q, want %q", got, want)
 	}
-	if got, want := BoardRegisterSubject(), "macmini-rysh-elect.board.register"; got != want {
+	if got, want := BoardRegisterSubject(""), "macmini-rysh-elect.board.register"; got != want {
 		t.Fatalf("BoardRegisterSubject() = %q, want %q", got, want)
 	}
 
 	SetSessionPrefix("other")
-	if got := BoardPostSubject(); got != "other.board.post" {
+	if got := BoardPostSubject(""); got != "other.board.post" {
 		t.Fatalf("subject did not follow the session prefix: %q", got)
 	}
 }

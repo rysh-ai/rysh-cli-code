@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // The `##llm select` picker payload: WorkspaceActor → attached front-ends,
 // pushed on pane.<paneID>.llm.picker.
 //

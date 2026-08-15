@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // Drives run() in-process over pipes — the same newline-delimited JSON-RPC

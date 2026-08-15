@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package plugin
 
 // End-to-end check on the SHIPPED example (examples/plugins/echo-channel):

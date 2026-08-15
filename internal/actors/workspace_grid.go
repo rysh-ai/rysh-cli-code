@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -447,16 +449,29 @@ func (w *WorkspaceActor) newUsage(out *strings.Builder) {
 	)
 }
 
-// restoreFocusAfterCreate keeps focus on the pane that issued a ##new command
+// restoreFocusAfterCreate puts focus back where it was before a ##new command,
 // instead of letting it jump to the newly created pane. focusPaneByID resets
 // the active tab, lane, and group consistently and sends an ordered focus
-// message to the originating pane's tab (and lane), so the focus restore lands
-// after the create is processed. Falls back to syncActivePane when there is no
-// originating pane.
+// message to that pane's tab (and lane), so the restore lands after the create
+// is processed.
+//
+// "Where it was" means the HUMAN's pane, not the issuing one. For a person
+// typing `##new pane` they are the same. For an agent — `rysh exec --pane B
+// '##new pane'`, which is how every fleet tool creates panes — they are not,
+// and restoring to B walked the human's cursor (and, across tabs, their whole
+// visible tab) over to the agent that happened to create something. Focus is
+// the human's: a click or a navigation key moves it, and nothing else.
+//
+// Falls back to the issuing pane when no human focus was captured (a headless
+// daemon that has never had one), then to syncActivePane.
 func (w *WorkspaceActor) restoreFocusAfterCreate(focusPaneID string) {
-	if focusPaneID == "" {
+	target := w.focusBeforeCommand
+	if target == "" {
+		target = focusPaneID
+	}
+	if target == "" {
 		w.syncActivePane()
 		return
 	}
-	w.focusPaneByID(focusPaneID)
+	w.focusPaneByID(target)
 }

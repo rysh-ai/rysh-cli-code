@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package web
 
 // File-browser HTTP endpoints for the embedded web UI (mobile drill-down's

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package bridge provides NATSBridge for delivering NATS messages to actor mailboxes.
 // This package re-exports rysh-shared/bridge so both rysh-cli and rysh-server
 // use the same NATSBridge implementation.

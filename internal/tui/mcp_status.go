@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 // Live MCP restart-state surface (follow-up 6b).

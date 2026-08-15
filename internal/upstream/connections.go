@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package upstream provides HTTP helpers for fetching workspace-scoped data
 // from the rysh-server using the local upstream API key.
 package upstream

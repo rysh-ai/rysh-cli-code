@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package channels
 
 // DiscordAdapter — C1 (openclaw_roadmap design 001 §4.1). Bridges Discord to

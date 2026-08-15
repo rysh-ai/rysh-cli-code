@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import "github.com/rysh-ai/rysh-cli-code/internal/agentic"

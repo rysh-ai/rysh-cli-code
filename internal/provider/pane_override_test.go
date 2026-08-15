@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package provider
 
 // Tests for the ##pane provider decorator (design 002 §3.4, roadmap B6). The

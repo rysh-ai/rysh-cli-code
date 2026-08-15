@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package policy implements policy-as-code (design 013 §1): governance rules as
 // a versioned file in the repo (.rysh/policy.yaml), loaded at session start,
 // optionally constrained by an org-level policy file (config `policy.org_file`

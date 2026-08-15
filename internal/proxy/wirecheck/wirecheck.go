@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package wirecheck answers one question about one CLI: if rysh points it at
 // the governance proxy, does its provider traffic actually go there?
 //

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package mcpserver generates a standalone Go MCP server for an API. The emitted
 // program embeds the tool catalog and proxies tools/call to the upstream REST
 // API over either stdio or Streamable HTTP — a generalization of the in-repo

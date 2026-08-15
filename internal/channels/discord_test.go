@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package channels
 
 // Table tests for the Discord adapter's pure mapping/rendering logic

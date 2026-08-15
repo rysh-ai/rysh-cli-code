@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -30,9 +32,18 @@ import (
 // Opening twice reuses the existing pane rather than stacking duplicates — a
 // board is a singleton view of one session, and a second one would silently
 // halve the room each gets on screen.
-func (w *WorkspaceActor) openAgentsBoardPane(out *strings.Builder, curPane string) {
-	if w.boardPaneID != "" && w.findPaneSnapshot(w.boardPaneID) != nil {
-		fmt.Fprintf(out, "board: already open in pane %s\n", shortID(w.boardPaneID))
+func (w *WorkspaceActor) openAgentsBoardPane(out *strings.Builder, curPane, boardID string) {
+	boardID = msg.NormalizeBoardID(boardID)
+
+	// THE SINGLETON IS PER BOARD, NOT PER SESSION (design 028). Re-opening the
+	// same board reuses its pane; opening a different one opens a second pane,
+	// because those are two views of two different things.
+	//
+	// The live snapshot is what decides, not the map alone: a pane closed by
+	// hand leaves an id behind that would otherwise report a board as open
+	// when nothing renders it.
+	if existing := w.boardPaneFor(boardID); existing != "" {
+		fmt.Fprintf(out, "board %s: already open in pane %s\n", boardLabel(boardID), shortID(existing))
 		return
 	}
 
@@ -63,9 +74,16 @@ func (w *WorkspaceActor) openAgentsBoardPane(out *strings.Builder, curPane strin
 		GroupID:  groupID,
 		PaneID:   paneID,
 		PaneType: domain.PaneTypeAgentsBoard,
+		// BORN with its board id. Not a follow-up MsgPaneSetMeta: that races
+		// the pane actor's own subscription, and a board pane that lost the
+		// write would render the session board while claiming to be a fleet's.
+		Meta: map[string]string{paneMetaBoardID: boardID},
 	})
 	w.resCounts.panes++
-	w.boardPaneID = paneID
+	if w.boardPanes == nil {
+		w.boardPanes = map[string]string{}
+	}
+	w.boardPanes[boardID] = paneID
 	w.restoreFocusAfterCreate(curPane)
 	w.persistToKV()
 
@@ -81,9 +99,62 @@ func (w *WorkspaceActor) openAgentsBoardPane(out *strings.Builder, curPane strin
 	//
 	// A roster that silently undercounts is worse than no roster, by the same
 	// argument that a stale name is worse than no name: it looks authoritative.
-	w.announceExistingPanesToBoard()
+	w.announceExistingPanesToBoard(boardID)
 
-	fmt.Fprintf(out, "board: opened agents-board in pane %s (%s)\n", shortID(paneID), alias)
+	fmt.Fprintf(out, "board %s: opened agents-board in pane %s (%s)\n",
+		boardLabel(boardID), shortID(paneID), alias)
+}
+
+// boardPaneFor returns the live pane rendering a board, or "".
+//
+// It CHECKS THE SNAPSHOT rather than trusting the map: a pane the human closed
+// leaves its id behind, and a stale id reported as "already open" is a board
+// nobody can reopen. The map is a cache of a fact the panes own — the same
+// reasoning workspace.go gives for not persisting it.
+func (w *WorkspaceActor) boardPaneFor(boardID string) string {
+	boardID = msg.NormalizeBoardID(boardID)
+	if id := w.boardPanes[boardID]; id != "" {
+		// paneSnapshotByID, NOT findPaneSnapshot: the latter only searches the
+		// ACTIVE tab, and design 028 §6.8 puts each fleet in a tab of its own.
+		// A board pane one tab away would otherwise look closed, and `##board
+		// open` would stack a duplicate view onto a board already on screen.
+		if w.paneSnapshotByID(id) != nil {
+			return id
+		}
+		delete(w.boardPanes, boardID)
+	}
+	// Re-learn from the panes themselves. After a daemon restart the map is
+	// empty while the board panes are back with their meta intact, and without
+	// this every `##board open` would stack a second pane onto a board that is
+	// already on screen.
+	for _, t := range w.tabs {
+		if t == nil {
+			continue
+		}
+		ts := w.queryTabSnapshot(t.id)
+		if ts == nil {
+			continue
+		}
+		for _, lane := range ts.Lanes {
+			for _, g := range lane.PaneGroups {
+				for i := range g.Panes {
+					ps := &g.Panes[i]
+					if ps.PaneType != domain.PaneTypeAgentsBoard {
+						continue
+					}
+					if msg.NormalizeBoardID(ps.Meta[paneMetaBoardID]) != boardID {
+						continue
+					}
+					if w.boardPanes == nil {
+						w.boardPanes = map[string]string{}
+					}
+					w.boardPanes[boardID] = ps.ID
+					return ps.ID
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // announceExistingPanesToBoard publishes one registration per pane that could
@@ -92,7 +163,12 @@ func (w *WorkspaceActor) openAgentsBoardPane(out *strings.Builder, curPane strin
 // Re-announcing is safe and idempotent: the store keys the roster by pane id and
 // last announcement wins (board.Store.Register), so a pane that also announced
 // itself is replaced, not duplicated.
-func (w *WorkspaceActor) announceExistingPanesToBoard() {
+// A pane is announced to ITS OWN board (design 028): the roster of a fleet's
+// board is that fleet's panes, and seeding every board with every pane in the
+// session would make each fleet's roster a session-wide list that happens to be
+// rendered in several places.
+func (w *WorkspaceActor) announceExistingPanesToBoard(boardID string) {
+	boardID = msg.NormalizeBoardID(boardID)
 	now := time.Now().UnixMilli()
 	for _, t := range w.tabs {
 		if t == nil {
@@ -109,9 +185,12 @@ func (w *WorkspaceActor) announceExistingPanesToBoard() {
 					if !paneCanHostAnAgent(ps.PaneType) {
 						continue
 					}
+					if msg.NormalizeBoardID(ps.Meta[paneMetaBoardID]) != boardID {
+						continue
+					}
 					// Through BoardPersona, never the raw given-name — the same
 					// rule the post path and the pane producer use.
-					_ = msg.SendBoardRegister(w.pub, msg.NewBoardRegister(
+					_ = msg.SendBoardRegister(w.pub, boardID, msg.NewBoardRegister(
 						ps.ID, msg.BoardPersona(ps.GivenName, ps.Title, ps.ID), now))
 				}
 			}

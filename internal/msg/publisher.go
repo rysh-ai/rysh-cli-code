@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package msg
 
 import (
@@ -54,12 +56,26 @@ func SendMirrorPaneVTFrame(p *NATSPublisher, mirrorID string, f *MsgMirrorPaneVT
 // rendering, and a literal would break the board the moment a session is named
 // anything else.
 
-// BoardPostSubject is the subject every agent posts to and the board view
-// subscribes to.
-func BoardPostSubject() string { return T("board", "post") }
+// BoardPostSubject is the subject agents post to and a board view subscribes
+// to, for ONE board (design 028; board ids in board_id.go).
+//
+// The empty string and DefaultBoardID both mean the session board, whose
+// subject is unchanged from before board ids existed — see the wire-shape note
+// in board_id.go.
+func BoardPostSubject(board string) string { return boardSubject(board, "post") }
 
-// BoardRegisterSubject carries persona announcements.
-func BoardRegisterSubject() string { return T("board", "register") }
+// BoardRegisterSubject carries persona announcements for one board.
+func BoardRegisterSubject(board string) string { return boardSubject(board, "register") }
+
+// BoardPostPattern / BoardRegisterPattern are the wildcard subjects a
+// subscriber uses to hear EVERY named board at once.
+//
+// They deliberately do NOT match the default board: its subject has one token
+// fewer, so a subscriber that wants everything takes the pattern AND the
+// legacy subject. That is board.Subscribe's job, and it is why these are
+// exported next to the builders rather than assembled at the call site.
+func BoardPostPattern() string     { return T("board", "*", "post") }
+func BoardRegisterPattern() string { return T("board", "*", "register") }
 
 // SendBoardPost publishes one board message.
 //
@@ -69,12 +85,14 @@ func BoardRegisterSubject() string { return T("board", "register") }
 //
 // The caller stamps V and TS via NewBoardPost rather than having them filled in
 // here, so that a post relayed from elsewhere keeps its original clock.
-func SendBoardPost(p *NATSPublisher, post *MsgBoardPost) error {
-	return p.Send(BoardPostSubject(), post)
+// The board is named by the CALLER and is not carried in the post: passing ""
+// posts to the session board, which is what every non-fleet claude does.
+func SendBoardPost(p *NATSPublisher, board string, post *MsgBoardPost) error {
+	return p.Send(BoardPostSubject(board), post)
 }
 
 // SendBoardRegister publishes a persona announcement. Advisory: the board
 // renders posts from unregistered panes too.
-func SendBoardRegister(p *NATSPublisher, reg *MsgBoardRegister) error {
-	return p.Send(BoardRegisterSubject(), reg)
+func SendBoardRegister(p *NATSPublisher, board string, reg *MsgBoardRegister) error {
+	return p.Send(BoardRegisterSubject(board), reg)
 }

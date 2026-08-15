@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Command rysh-script is a shebang shim: it runs `rysh script` with whatever
 // arguments it was given.
 //

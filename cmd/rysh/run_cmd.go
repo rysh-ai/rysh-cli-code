@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // `rysh run` — CI mode / headless one-shot execution (design 009, roadmap B2).
@@ -823,6 +825,8 @@ func runHeadlessPrompt(rec session.Record, opts runOptions, collector *runCollec
 
 	if err := pub.Send(msg.T("ws", "inbox"), &msg.MsgSubmitInput{
 		Text: opts.Prompt, Mode: "prompt", PaneID: paneID,
+		// `rysh run` is CI, not a person at the keyboard.
+		Programmatic: true,
 	}); err != nil {
 		return runOutcome{Status: "error", ExitCode: runExitError, Detail: fmt.Sprintf("submit prompt: %v", err)}
 	}

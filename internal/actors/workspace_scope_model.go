@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // workspace_scope_model.go — one `model` subcommand shared by every level of

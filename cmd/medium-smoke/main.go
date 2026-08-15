@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // medium-smoke is a self-verifying trusted-input smoke test against Medium's
 // story editor. It proves the CDP input path delivers isTrusted:true events
 // that the controlled contenteditable accepts (no revert), WITHOUT publishing.

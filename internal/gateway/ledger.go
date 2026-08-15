@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package gateway is the daemon half of the LLM gateway's server-side control
 // plane (design 023): it reports governed spend to rysh-server, leases a slice
 // of an org-wide allowance and enforces locally against that slice, and pulls

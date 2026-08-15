@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // `rysh ansa send` — the agent's door onto the session router.

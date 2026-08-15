@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // Tests for session-scoped trust grants (design 008 RA5). They reuse the

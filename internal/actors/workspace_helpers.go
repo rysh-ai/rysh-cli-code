@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -318,10 +320,47 @@ func (w *WorkspaceActor) queryTabSnapshot(tabID string) *domain.TabSnapshot {
 }
 
 func (w *WorkspaceActor) currentTab() *tabInfo {
+	// A command dispatched AT a tab scopes "current" to that tab for its own
+	// duration, without the human's focus moving there (see scopeToTab).
+	if w.scopedTab != nil {
+		return w.scopedTab
+	}
 	if len(w.tabs) == 0 || w.activeTabIdx >= len(w.tabs) {
 		return nil
 	}
 	return w.tabs[w.activeTabIdx]
+}
+
+// captureHumanFocus records the pane the human is on for the duration of one ##
+// command, and returns the restore. Nested commands (a user command that runs
+// another) keep the outermost capture — the human has not moved in between.
+func (w *WorkspaceActor) captureHumanFocus() func() {
+	prev := w.focusBeforeCommand
+	if prev == "" {
+		w.focusBeforeCommand = w.activePaneID
+	}
+	return func() { w.focusBeforeCommand = prev }
+}
+
+// scopeToTab makes tab the answer to w.currentTab() until the returned function
+// runs. It is what a command ADDRESSED to a pane or tab uses instead of moving
+// focus there.
+//
+// The distinction it draws is the whole point: "which tab is this command about"
+// and "where is the human looking" are different questions, and the CLI path
+// used to answer the first by changing the answer to the second — calling
+// focusPaneByID, which switches the active tab and moves the cursor. With
+// several agents running, every dispatch (ryshctl, ansa, any fleet tool) yanked
+// the human to whichever agent was addressed last. Focus is the human's: a
+// click or a navigation key moves it, and nothing else.
+//
+// Nil tab is a no-op, so a caller that cannot resolve a target still runs.
+func (w *WorkspaceActor) scopeToTab(tab *tabInfo) func() {
+	prev := w.scopedTab
+	if tab != nil {
+		w.scopedTab = tab
+	}
+	return func() { w.scopedTab = prev }
 }
 
 // resolveOriginTab returns the tab a command issued from a specific pane should

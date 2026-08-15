@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package session
 
 // Tests for the governance-proxy port field (design 001) on the session record.

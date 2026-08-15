@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -114,8 +116,18 @@ func paneShellEnv() []string {
 // commands use (`##new stack`, `##cmd stack`), and a pane group is exactly a
 // stack of panes.
 //
-// All five are fixed for the pane's lifetime — a pane keeps its id and is
-// created inside one tab, lane and stack rather than migrating between them.
+// RYSH_SESSION and RYSH_PANE are fixed for the pane's lifetime. The other three
+// are NOT, and this is the one place that has to say so: `##move` (pane_move.go)
+// relocates a live pane between stacks, lanes and tabs, and no process's
+// environment can be rewritten from outside once it is exec'd. So a moved pane's
+// shell keeps the RYSH_TAB / RYSH_LANE / RYSH_STACK it started with, which go
+// stale the moment it lands somewhere else.
+//
+// That is survivable because of what each is FOR. A program addressing ITSELF
+// uses RYSH_PANE, which never changes. A program addressing something else
+// should resolve the path fresh (`##pane info`, `##lane list`) rather than trust
+// three values from its own startup — and had to already, since a sibling pane
+// can move too.
 func paneIdentityEnv(session, tabID, laneID, stackID, paneID string) []string {
 	return []string{
 		"RYSH_SESSION=" + session,
@@ -1040,22 +1052,17 @@ func (p *PaneActor) releasePaneSize(clientID string) {
 	p.applyEffectivePaneSize()
 }
 
-// applyEffectivePaneSize sizes the PTY to the smallest live claim.
+// effectivePaneSize returns the smallest live claim on each axis, after pruning
+// claims whose owner is gone. ok is false when no live viewport is left.
 //
 // Smallest wins because the constraint is asymmetric: a viewport LARGER than
 // the PTY simply has unused space around the grid, while a viewport SMALLER
 // than the PTY has to truncate or wrap it — which turns a full-screen app's
 // display into garbage. Sizing to the minimum is the only choice where every
 // attached viewport can render what the PTY produces.
-//
-// With no live claims the PTY is left exactly as it is. That matters on the
-// path where every viewport has gone: a detached daemon keeps its shells
-// running at their last size, and re-sizing them to some invented default
-// would reflow long-running interactive apps for nobody's benefit.
-func (p *PaneActor) applyEffectivePaneSize() {
+func (p *PaneActor) effectivePaneSize() (rows, cols int, ok bool) {
 	p.pruneDeadSizeClaims()
 
-	rows, cols := 0, 0
 	for _, c := range p.sizeClaims {
 		if rows == 0 || c.rows < rows {
 			rows = c.rows
@@ -1065,7 +1072,116 @@ func (p *PaneActor) applyEffectivePaneSize() {
 		}
 	}
 	if rows <= 0 || cols <= 0 {
+		return 0, 0, false
+	}
+	return rows, cols, true
+}
+
+// paneSizeSettleWindow is how long a NARROWING is held before it reaches the
+// PTY, so a burst of claims collapses into one resize.
+//
+// 250ms is picked off the two producers. The web front-end already debounces
+// its ResizeObserver by 80ms (usePaneResize.ts), so a mount that measures a
+// half-laid-out node and corrects itself lands its second claim ~80–160ms
+// later; the TUI re-claims for every pane on each tea.WindowSizeMsg, which
+// arrives in bursts. 250ms covers both with margin and is short enough that a
+// genuine narrowing is not perceptibly late.
+const paneSizeSettleWindow = 250 * time.Millisecond
+
+// paneSizeSettleMsg is delivered to the PaneActor mailbox when a deferred
+// shrink's window has elapsed. In-process only, like panePersistTickMsg — it is
+// never published to NATS and needs no codec registration.
+type paneSizeSettleMsg struct{}
+
+// applyEffectivePaneSize sizes the PTY to the smallest live claim — immediately
+// when that GROWS the grid, after a settle window when it shrinks it.
+//
+// The asymmetry exists because narrowing is destructive and growing is not.
+// vt10x's resize() copies each row into a freshly allocated, narrower row, so
+// every glyph past the new width is discarded from memory, and it cannot be
+// reconstructed by widening again: `line` carries no soft-wrap flag, so a
+// wrapped continuation row is indistinguishable from a real newline and reflow
+// is not expressible (backlog `F-52`). A shell makes this permanent — readline
+// repaints only the line being edited on SIGWINCH, so every command already
+// committed keeps the hole. That is what produced the reported paste, where
+// `…/marketing/assets/videos/…` came back as `…/marketing/a` + `deos/…`.
+//
+// The settle window does not make narrowing safe; it makes SPURIOUS narrowing
+// stop happening. A pane narrows with no user gesture whenever the claim set
+// churns — a viewport mounting and measuring a node mid-layout, a stacked pane
+// expanding, a fullscreen transition, a socket reconnecting and re-claiming, a
+// window that opens and closes again. Each of those clipped the grid before it
+// had settled. Holding the shrink briefly lets the claim set finish moving, and
+// a claim that was only ever transient is gone before it can cost anything.
+//
+// A genuine narrowing — a second front-end that really is smaller, a window the
+// user really did drag in — still lands, 250ms later. Nothing here can save the
+// content it clips; only reflow can, and that is `F-52`.
+//
+// With no live claims the PTY is left exactly as it is. That matters on the
+// path where every viewport has gone: a detached daemon keeps its shells
+// running at their last size, and re-sizing them to some invented default
+// would reflow long-running interactive apps for nobody's benefit.
+func (p *PaneActor) applyEffectivePaneSize() {
+	rows, cols, ok := p.effectivePaneSize()
+	if !ok {
 		return // no live viewport — keep the PTY as it stands
+	}
+	if rows >= int(p.ptyRows) && cols >= int(p.ptyCols) {
+		// Growing or unchanged on both axes: nothing on screen can be lost, so
+		// take it now. This is also the path that CANCELS a pending shrink —
+		// the transient claim that armed it has been released or corrected, and
+		// the narrowing it asked for must not happen at all.
+		p.cancelSizeSettle()
+		p.handleResize(rows, cols)
+		return
+	}
+	p.armSizeSettle()
+}
+
+// armSizeSettle schedules applySettledPaneSize to run on the mailbox goroutine
+// once paneSizeSettleWindow has passed.
+//
+// It COALESCES rather than debounces: an already-armed timer is left alone
+// instead of being pushed out by each new claim. Claims keep updating the map
+// either way, so the settled resize still sees the latest set — but the delay a
+// shrink can add stays bounded at one window, where restarting the timer would
+// let a front-end that re-claims faster than the window defer it indefinitely
+// while rendering a grid it cannot fit.
+//
+// With no mailbox to defer into (sizeSettleSend unset — the arbitration unit
+// tests, which run no actor system) the resize is applied inline, so the
+// decision under test is the arbitration and not the scheduling.
+func (p *PaneActor) armSizeSettle() {
+	if p.sizeSettleSend == nil {
+		p.applySettledPaneSize()
+		return
+	}
+	if p.sizeSettleTimer != nil {
+		return
+	}
+	p.sizeSettleTimer = time.AfterFunc(paneSizeSettleWindow, p.sizeSettleSend)
+}
+
+// cancelSizeSettle drops a pending shrink. Safe to call when none is armed.
+func (p *PaneActor) cancelSizeSettle() {
+	if p.sizeSettleTimer != nil {
+		p.sizeSettleTimer.Stop()
+		p.sizeSettleTimer = nil
+	}
+}
+
+// applySettledPaneSize resizes to whatever the claim set says NOW. It runs on
+// the mailbox goroutine, one settle window after a shrink was first asked for.
+//
+// It re-reads the claims rather than using the size that armed the timer: the
+// point of waiting is that the arbitration answer may have changed, including
+// back to a size that no longer shrinks anything (handleResize then no-ops).
+func (p *PaneActor) applySettledPaneSize() {
+	p.sizeSettleTimer = nil
+	rows, cols, ok := p.effectivePaneSize()
+	if !ok {
+		return
 	}
 	p.handleResize(rows, cols)
 }

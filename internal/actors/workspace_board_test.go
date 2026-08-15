@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -213,7 +215,7 @@ func TestBoardPostWritesToNoPaneBuffer(t *testing.T) {
 	w, nc := newBoardTestWorkspace(t)
 
 	paneTraffic := recordSubject(t, nc, msg.T("pane", ">"))
-	boardTraffic := recordSubject(t, nc, msg.BoardPostSubject())
+	boardTraffic := recordSubject(t, nc, msg.BoardPostSubject(""))
 
 	resp := w.handleCLIBoardPost(&msg.MsgCLIBoardPost{
 		AsPaneID: "pB",
@@ -260,7 +262,7 @@ func TestBoardPostWritesToNoPaneBuffer(t *testing.T) {
 // published: a post credited to the wrong agent is worse than no post.
 func TestBoardPostRequiresAnExplicitPoster(t *testing.T) {
 	w, nc := newBoardTestWorkspace(t)
-	boardTraffic := recordSubject(t, nc, msg.BoardPostSubject())
+	boardTraffic := recordSubject(t, nc, msg.BoardPostSubject(""))
 
 	resp := w.handleCLIBoardPost(&msg.MsgCLIBoardPost{Text: "who am I?"})
 	if resp == nil || resp.OK {
@@ -280,7 +282,7 @@ func TestBoardPostRequiresAnExplicitPoster(t *testing.T) {
 // satisfied by any old string.
 func TestBoardPostRefusesAnUnknownPane(t *testing.T) {
 	w, nc := newBoardTestWorkspace(t)
-	boardTraffic := recordSubject(t, nc, msg.BoardPostSubject())
+	boardTraffic := recordSubject(t, nc, msg.BoardPostSubject(""))
 
 	resp := w.handleCLIBoardPost(&msg.MsgCLIBoardPost{AsPaneID: "no-such-pane", Text: "hello"})
 	if resp == nil || resp.OK {
@@ -352,7 +354,7 @@ func TestBoardPostPersonaGoesThroughBoardPersona(t *testing.T) {
 				pub:  msg.NewNATSPublisher(nc, codecs),
 				tabs: []*tabInfo{{id: "tab-A", title: "A"}},
 			}
-			boardTraffic := recordSubject(t, nc, msg.BoardPostSubject())
+			boardTraffic := recordSubject(t, nc, msg.BoardPostSubject(""))
 
 			resp := w.handleCLIBoardPost(&msg.MsgCLIBoardPost{AsPaneID: tc.pane.id, Text: "hi"})
 			if !resp.OK {
@@ -411,7 +413,7 @@ func TestBoardPostCarriesNoFleetFields(t *testing.T) {
 		pub:  msg.NewNATSPublisher(nc, codecs),
 		tabs: []*tabInfo{{id: "tab-A", title: "A"}},
 	}
-	boardTraffic := recordSubject(t, nc, msg.BoardPostSubject())
+	boardTraffic := recordSubject(t, nc, msg.BoardPostSubject(""))
 
 	resp := w.handleCLIBoardPost(&msg.MsgCLIBoardPost{AsPaneID: "pF", Text: "done"})
 	if !resp.OK {
@@ -452,7 +454,7 @@ func TestBoardPostCarriesNoFleetFields(t *testing.T) {
 // only sometimes gets is worse than one it never needs.
 func TestBoardPostCarriesTheThreadItWasGiven(t *testing.T) {
 	w, nc := newBoardTestWorkspace(t)
-	boardTraffic := recordSubject(t, nc, msg.BoardPostSubject())
+	boardTraffic := recordSubject(t, nc, msg.BoardPostSubject(""))
 
 	thread := msg.MintThreadID("pB", 3)
 	resp := w.handleCLIBoardPost(&msg.MsgCLIBoardPost{
@@ -489,7 +491,7 @@ func TestBoardPostCarriesTheThreadItWasGiven(t *testing.T) {
 // already is), but an omitted one still needs a value the view can group by.
 func TestBoardPostDefaultsKindToMilestone(t *testing.T) {
 	w, nc := newBoardTestWorkspace(t)
-	boardTraffic := recordSubject(t, nc, msg.BoardPostSubject())
+	boardTraffic := recordSubject(t, nc, msg.BoardPostSubject(""))
 
 	if resp := w.handleCLIBoardPost(&msg.MsgCLIBoardPost{AsPaneID: "pB", Text: "no kind given"}); !resp.OK {
 		t.Fatalf("post refused: %+v", resp)
@@ -568,7 +570,7 @@ func TestBoardVerbReportsBadUsage(t *testing.T) {
 // and it is correct because the human is looking at that pane.
 func TestBoardVerbPostsAsTheTypingPane(t *testing.T) {
 	w, nc := newBoardTestWorkspace(t)
-	boardTraffic := recordSubject(t, nc, msg.BoardPostSubject())
+	boardTraffic := recordSubject(t, nc, msg.BoardPostSubject(""))
 
 	var out strings.Builder
 	if err := w.handleBoardCommand(&out, "pA", []string{"post", "shipping", "the", "board"}); err != nil {
@@ -590,8 +592,10 @@ func TestBoardVerbPostsAsTheTypingPane(t *testing.T) {
 	if got.Text != "shipping the board" {
 		t.Errorf("text = %q, want the joined words", got.Text)
 	}
-	if !strings.Contains(out.String(), "posted to the board") {
-		t.Errorf("the human got no confirmation: %q", out.String())
+	// The confirmation NAMES the board since design 028 — "posted to the
+	// board" stopped being unambiguous when a session could hold several.
+	if !strings.Contains(out.String(), "posted to board session") {
+		t.Errorf("the human got no confirmation naming the board: %q", out.String())
 	}
 }
 
@@ -599,7 +603,7 @@ func TestBoardVerbPostsAsTheTypingPane(t *testing.T) {
 // post as a reply and keeps the thread key the human named.
 func TestBoardVerbReplyCarriesTheThread(t *testing.T) {
 	w, nc := newBoardTestWorkspace(t)
-	boardTraffic := recordSubject(t, nc, msg.BoardPostSubject())
+	boardTraffic := recordSubject(t, nc, msg.BoardPostSubject(""))
 
 	var out strings.Builder
 	if err := w.handleBoardCommand(&out, "pA", []string{"reply", "pB/2", "looks", "good"}); err != nil {

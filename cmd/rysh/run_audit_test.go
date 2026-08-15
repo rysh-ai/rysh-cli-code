@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 // Hermetic tests for the --json-audit artifact (design 009 §3.1): the full

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package limits provides subscription resource limit checking for the rysh daemon.
 // When upstream is enabled and an API key is configured, the daemon fetches
 // the user's subscription limits from the server and caches them. Before creating

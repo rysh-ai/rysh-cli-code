@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package tssdk is a Forge generator that emits a TypeScript client SDK
 // (client.ts + package.json + README.md) for an API described by the IR. The
 // generated client uses the global fetch and has zero runtime dependencies.

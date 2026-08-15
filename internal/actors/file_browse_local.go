@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // Local (embedded web UI) entry point into the file-browse implementation.

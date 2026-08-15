@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package web
 
 // Tests for the electronAPI-parity surface (web_electron_roadmap Phase 3):

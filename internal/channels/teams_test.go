@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package channels
 
 // Microsoft Teams adapter tests. Inbound activities are signed with a real

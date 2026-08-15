@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package board
 
 import (
@@ -90,39 +92,91 @@ type KV interface {
 // The zero value is not usable; the nil *Persistence is, and does nothing —
 // that is what a board running without JetStream gets, and it degrades to a
 // live-only board rather than refusing to start.
+// ONE PERSISTENCE PER BOARD, AND THE ORDINAL IS PER BOARD TOO (design 028).
+//
+// Two Persistence values over one board that read the KV at the same moment
+// agree on the next free ordinal and both write that key: the second Put
+// OVERWRITES the first, so a second writer does not duplicate history, it
+// destroys it (TestTwoWritersThatBothPrimedFirstStillDestroyHistory).
+//
+// prime() narrows the hazard to that concurrent case — a writer created LATER
+// continues where the previous one stopped instead of restarting at 1 — but it
+// cannot close it, and nothing here should be read as making a second writer
+// safe. Board ids do not weaken the rule either, they SCOPE it: the invariant
+// is one writer per BOARD, which is why the key prefix and the ordinal move
+// together.
 type Persistence struct {
-	kv KV
+	kv    KV
+	board string // "" for the default board — see keyPrefix
 
-	mu  sync.Mutex
-	seq uint64 // arrival ordinal, continued across restarts by Restore
+	mu     sync.Mutex
+	seq    uint64 // arrival ordinal, continued across restarts by Restore/prime
+	primed bool   // has the ordinal been read back from the KV yet?
 }
 
-// NewPersistence returns a Persistence over kv. A nil kv yields a nil
-// Persistence, whose methods are no-ops.
-func NewPersistence(kv KV) *Persistence {
+// NewPersistence returns a Persistence over kv for one board. A nil kv yields a
+// nil Persistence, whose methods are no-ops.
+//
+// board is a board id (msg.DefaultBoardID / "" for the session board). An
+// INVALID id is treated as the default board rather than being allowed to
+// become a key prefix, on the same defence-in-depth argument as the subject
+// builders: the edges validate, and this bounds what happens if one did not.
+func NewPersistence(kv KV, board string) *Persistence {
 	if kv == nil {
 		return nil
 	}
-	return &Persistence{kv: kv}
+	if msg.ValidateBoardID(board) != nil {
+		board = msg.DefaultBoardID
+	}
+	return &Persistence{kv: kv, board: msg.NormalizeBoardID(board)}
 }
 
 const (
 	postKeyPrefix = "post-"
 	regKeyPrefix  = "reg-"
+	// boardKeyPrefix namespaces a NAMED board's keys inside the session's
+	// bucket: "b.<id>.post-…". The default board keeps the flat "post-…" keys
+	// it has always had, so a bucket written before board ids existed restores
+	// exactly as it did — a prefix on every key would have made every existing
+	// board's history invisible on upgrade while looking like an empty board.
+	boardKeyPrefix = "b."
 	// keyDigits zero-pads the ordinal so lexical key order IS arrival order.
 	// 18 digits is more ordinals than a session can produce.
 	keyDigits = 18
 )
 
-func postKey(seq uint64) string {
-	return fmt.Sprintf("%s%0*d", postKeyPrefix, keyDigits, seq)
+// keyPrefix is what this board's keys start with: "" for the default board,
+// "b.<id>." for a named one.
+func (p *Persistence) keyPrefix() string {
+	if p == nil || p.board == "" || p.board == msg.DefaultBoardID {
+		return ""
+	}
+	return boardKeyPrefix + p.board + "."
+}
+
+func (p *Persistence) postKey(seq uint64) string {
+	return fmt.Sprintf("%s%s%0*d", p.keyPrefix(), postKeyPrefix, keyDigits, seq)
 }
 
 // regKey is derived from the pane uuid so re-registration overwrites rather
 // than accumulating. KV keys may not contain every byte a persona might, but a
 // pane uuid is already KV-safe.
-func regKey(paneID string) string {
-	return regKeyPrefix + paneID
+func (p *Persistence) regKey(paneID string) string {
+	return p.keyPrefix() + regKeyPrefix + paneID
+}
+
+// owns reports whether a key belongs to this board.
+//
+// The default board's test is not just "has no b. prefix": it must also reject
+// every NAMED board's keys, which is what the boardKeyPrefix check does. Get
+// this wrong in the lenient direction and the session board silently replays 25
+// fleets' history as its own.
+func (p *Persistence) owns(key string) bool {
+	pre := p.keyPrefix()
+	if pre == "" {
+		return !strings.HasPrefix(key, boardKeyPrefix)
+	}
+	return strings.HasPrefix(key, pre)
 }
 
 // SavePost persists one post. Called unconditionally from the subscriber's NATS
@@ -136,13 +190,64 @@ func (p *Persistence) SavePost(post *msg.MsgBoardPost) error {
 	if err != nil {
 		return err
 	}
+	// Prime BEFORE taking the next ordinal. A Persistence created for a board
+	// that already has history starts at seq 0, and its first write would land
+	// on post-…0001 — a key that is already there. Restore primes it when the
+	// caller restores first; this covers the caller that does not, which is the
+	// live path for a board whose first message arrives before anything has
+	// read its history back.
+	p.prime()
+
 	p.mu.Lock()
 	p.seq++
-	key := postKey(p.seq)
+	key := p.postKey(p.seq)
 	p.mu.Unlock()
 
 	_, err = p.kv.Put(key, data)
 	return err
+}
+
+// prime reads this board's highest ordinal back from the KV, once.
+//
+// It is the cheap half of Restore: keys only, no Get, no decode, nothing
+// applied to a store. That matters because it runs on the NATS callback
+// goroutine (SavePost) the first time a board is written to, and the expensive
+// half — replaying history into a store — belongs to whoever owns the store.
+func (p *Persistence) prime() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	if p.primed {
+		p.mu.Unlock()
+		return
+	}
+	p.primed = true
+	p.mu.Unlock()
+
+	keys, err := p.kv.Keys()
+	if err != nil {
+		// ErrNoKeysFound is the normal first-run case; any other error leaves
+		// the ordinal at 0, which is the same position a fresh board starts
+		// from. A write that then collides is visible as a lost post rather
+		// than as a corrupted one, and the alternative — refusing to record
+		// because the bucket could not be listed — loses strictly more.
+		return
+	}
+	var maxSeq uint64
+	for _, k := range keys {
+		if !p.owns(k) {
+			continue
+		}
+		if n, perr := p.parsePostKey(k); perr == nil && n > maxSeq {
+			maxSeq = n
+		}
+	}
+	p.mu.Lock()
+	if maxSeq > p.seq {
+		p.seq = maxSeq
+	}
+	p.mu.Unlock()
 }
 
 // SaveRegister persists a persona announcement, keyed by pane so the roster
@@ -155,7 +260,7 @@ func (p *Persistence) SaveRegister(r *msg.MsgBoardRegister) error {
 	if err != nil {
 		return err
 	}
-	_, err = p.kv.Put(regKey(r.PaneID), data)
+	_, err = p.kv.Put(p.regKey(r.PaneID), data)
 	return err
 }
 
@@ -184,12 +289,21 @@ func (p *Persistence) Restore(s *Store) (posts int, registrations int, err error
 		return 0, 0, err
 	}
 
+	// THIS BOARD'S KEYS ONLY. One bucket holds every board in the session, so a
+	// restore that did not filter would replay every fleet's history onto
+	// whichever board restored first — and it would look like a busy board
+	// rather than like a bug.
+	pre := p.keyPrefix()
 	var postKeys, regKeys []string
 	for _, k := range keys {
+		if !p.owns(k) {
+			continue
+		}
+		rest := strings.TrimPrefix(k, pre)
 		switch {
-		case strings.HasPrefix(k, postKeyPrefix):
+		case strings.HasPrefix(rest, postKeyPrefix):
 			postKeys = append(postKeys, k)
-		case strings.HasPrefix(k, regKeyPrefix):
+		case strings.HasPrefix(rest, regKeyPrefix):
 			regKeys = append(regKeys, k)
 		}
 	}
@@ -226,20 +340,26 @@ func (p *Persistence) Restore(s *Store) (posts int, registrations int, err error
 		if s.Apply(&post) {
 			posts++
 		}
-		if n, perr := parsePostKey(k); perr == nil && n > maxSeq {
+		if n, perr := p.parsePostKey(k); perr == nil && n > maxSeq {
 			maxSeq = n
 		}
 	}
 
 	// Continue the ordinal where the previous process left off, so a restart
 	// cannot rewrite entries that are still live in the bucket. Derived from the
-	// keys we actually saw, including any beyond the replay window.
+	// keys we actually saw, including any beyond the replay window — and from
+	// this board's keys only, because another board's higher ordinal says
+	// nothing about where this one may safely write.
 	for _, k := range keys {
-		if n, perr := parsePostKey(k); perr == nil && n > maxSeq {
+		if !p.owns(k) {
+			continue
+		}
+		if n, perr := p.parsePostKey(k); perr == nil && n > maxSeq {
 			maxSeq = n
 		}
 	}
 	p.mu.Lock()
+	p.primed = true
 	if maxSeq > p.seq {
 		p.seq = maxSeq
 	}
@@ -248,12 +368,17 @@ func (p *Persistence) Restore(s *Store) (posts int, registrations int, err error
 	return posts, registrations, nil
 }
 
-func parsePostKey(k string) (uint64, error) {
-	if !strings.HasPrefix(k, postKeyPrefix) {
-		return 0, fmt.Errorf("not a post key: %q", k)
+// parsePostKey reads the arrival ordinal out of one of THIS board's post keys.
+// A key belonging to another board is not a parse failure to be logged, it is
+// simply not ours — owns() is the caller's guard and this repeats it so a new
+// call site cannot skip it.
+func (p *Persistence) parsePostKey(k string) (uint64, error) {
+	want := p.keyPrefix() + postKeyPrefix
+	if !p.owns(k) || !strings.HasPrefix(k, want) {
+		return 0, fmt.Errorf("not a post key for board %q: %q", p.board, k)
 	}
 	var n uint64
-	if _, err := fmt.Sscanf(k[len(postKeyPrefix):], "%d", &n); err != nil {
+	if _, err := fmt.Sscanf(k[len(want):], "%d", &n); err != nil {
 		return 0, err
 	}
 	return n, nil

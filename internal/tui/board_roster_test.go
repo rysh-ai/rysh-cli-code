@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 import (
@@ -25,7 +27,7 @@ func TestSeedExcludesNonAgentPanes(t *testing.T) {
 		}}}},
 	}}}
 	m.seedRosterFromSnapshot()
-	got := m.board.Roster()
+	got := m.boardStore("").Roster()
 	if len(got) != 2 {
 		for _, r := range got {
 			t.Logf("roster entry: pane=%s persona=%s", r.PaneID, r.Persona)
@@ -59,7 +61,7 @@ func TestSeedEvictsGhostPanes(t *testing.T) {
 	}}}
 	m.seedRosterFromSnapshot()
 
-	got := m.board.Roster()
+	got := m.boardStore("").Roster()
 	if len(got) != 2 {
 		for _, r := range got {
 			t.Logf("roster entry: pane=%s persona=%s", r.PaneID, r.Persona)
@@ -83,7 +85,7 @@ func TestEmptySnapshotDoesNotWipeTheRoster(t *testing.T) {
 	m := buildBoardModel(st)
 	m.snapshot = domain.WorkspaceSnapshot{}
 	m.seedRosterFromSnapshot()
-	if n := len(m.board.Roster()); n != 1 {
+	if n := len(m.boardStore("").Roster()); n != 1 {
 		t.Fatalf("roster = %d, want 1 — an empty snapshot must not clear the roster", n)
 	}
 }

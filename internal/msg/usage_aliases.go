@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package msg usage_aliases.go — re-exports rysh-shared/msg usage-ledger types
 // (design 003) so rysh-cli actors reference them as msg.MsgUsageRecord etc.
 // The codecs are registered in rysh-shared's DefaultCodecRegistry, which the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 import (
@@ -121,11 +123,25 @@ func (w *WorkspaceActor) writeClaudePrompt(sessionID, prompt string) (string, er
 // alias to a pane id reads workspace state, which belongs to the mailbox
 // goroutine. Sending is the only thing safe to do from a timer.
 func (w *WorkspaceActor) scheduleClaudeLaunch(alias, sessionID, promptFile string, retries int) {
+	w.scheduleClaudeLaunchAs(alias, sessionID, promptFile, "", false, retries)
+}
+
+// scheduleClaudeLaunchAs is scheduleClaudeLaunch plus the identity the pane
+// should come up with. See MsgLaunchClaudeInPane for why they share one loop.
+func (w *WorkspaceActor) scheduleClaudeLaunchAs(alias, sessionID, promptFile, givenName string, hidden bool, retries int) {
+	w.scheduleClaudeLaunchWith(alias, sessionID, promptFile, givenName, "", hidden, retries)
+}
+
+// scheduleClaudeLaunchWith is scheduleClaudeLaunchAs plus extra claude flags.
+func (w *WorkspaceActor) scheduleClaudeLaunchWith(alias, sessionID, promptFile, givenName, extraArgs string, hidden bool, retries int) {
 	time.AfterFunc(claudeLaunchRetryEvery, func() {
 		_ = w.pub.Send(msg.T("ws", "inbox"), &msg.MsgLaunchClaudeInPane{
 			Alias:      alias,
 			SessionID:  sessionID,
 			PromptFile: promptFile,
+			GivenName:  givenName,
+			Hidden:     hidden,
+			ExtraArgs:  extraArgs,
 			Retries:    retries,
 		})
 	})
@@ -137,7 +153,7 @@ func (w *WorkspaceActor) handleLaunchClaudeInPane(m *msg.MsgLaunchClaudeInPane) 
 	paneID := w.resolvePaneID(m.Alias)
 	if paneID == "" {
 		if m.Retries > 0 {
-			w.scheduleClaudeLaunch(m.Alias, m.SessionID, m.PromptFile, m.Retries-1)
+			w.scheduleClaudeLaunchWith(m.Alias, m.SessionID, m.PromptFile, m.GivenName, m.ExtraArgs, m.Hidden, m.Retries-1)
 		}
 		// Out of retries: the pane never appeared, and there is nothing to
 		// launch into. Silent by design — the pane's absence is already visible
@@ -156,8 +172,20 @@ func (w *WorkspaceActor) handleLaunchClaudeInPane(m *msg.MsgLaunchClaudeInPane) 
 			Key: "claude.prompt_file", Value: m.PromptFile,
 		})
 	}
+	// Name it before hiding it. A pane that is hidden and nameless cannot be
+	// resolved by `##board agent visible`, which finds the board claude by
+	// given-name — so the order here is what keeps it recoverable.
+	if m.GivenName != "" {
+		_ = w.pub.Send(msg.T("pane", paneID, "inbox"), &msg.MsgPaneSetGivenName{Name: m.GivenName})
+	}
+	if m.Hidden {
+		if tabID := w.tabOfPane(paneID); tabID != "" {
+			_ = w.pub.Send(msg.T("tab", tabID, "inbox"),
+				&msg.MsgTabSetPaneHidden{PaneID: paneID, Hidden: true})
+		}
+	}
 	_ = w.pub.Send(msg.T("pane", paneID, "inbox"), &msg.MsgPaneExecShell{
-		Command: claudeLaunchCommand(m.SessionID, m.PromptFile),
+		Command: claudeLaunchCommand(m.SessionID, m.PromptFile, m.ExtraArgs),
 	})
 }
 
@@ -171,7 +199,7 @@ var claudeCleanEnv = []string{
 }
 
 // claudeLaunchCommand builds the shell line the pane runs.
-func claudeLaunchCommand(sessionID, promptFile string) string {
+func claudeLaunchCommand(sessionID, promptFile, extraArgs string) string {
 	var b strings.Builder
 	b.WriteString("env")
 	for _, v := range claudeCleanEnv {
@@ -180,6 +208,10 @@ func claudeLaunchCommand(sessionID, promptFile string) string {
 	}
 	b.WriteString(" claude --session-id ")
 	b.WriteString(sessionID)
+	if extraArgs != "" {
+		b.WriteString(" ")
+		b.WriteString(extraArgs)
+	}
 	if promptFile != "" {
 		// $(cat …) rather than the text inline: the command has already been
 		// through the ## tokeniser by the time it gets here, and the file is

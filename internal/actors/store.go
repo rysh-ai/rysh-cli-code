@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // Named-value stores — the shared machinery behind ##secret and ##variable.

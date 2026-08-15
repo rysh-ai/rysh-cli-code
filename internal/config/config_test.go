@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package config
 
 import (
@@ -9,11 +11,27 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/webauto"
 )
 
+// tempDir is t.TempDir() with symlinks resolved, and it is what every fixture
+// here must use to build an EXPECTED path. On macOS t.TempDir() returns a path
+// under /var, which is itself a symlink to /private/var; getwd() resolves the
+// cwd on purpose (one directory, one identity — see its doc comment), so a
+// fixture holding the raw /var spelling fails against a correct result. The
+// mismatch is in the fixture, not the resolution.
+func tempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return dir
+	}
+	return resolved
+}
+
 // writeConfig writes content to rysh.config.yaml in a fresh temp dir and chdirs
 // into it so that findConfigFile() picks it up.
 func writeConfig(t *testing.T, content string) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := tempDir(t)
 	path := filepath.Join(dir, "rysh.config.yaml")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -27,9 +45,9 @@ func writeConfig(t *testing.T, content string) string {
 // rysh.config.yaml and lives in a directory we never chdir into).
 func TestLoadFromExplicitPath(t *testing.T) {
 	// Chdir into an empty dir so findConfigFile() would find nothing.
-	t.Chdir(t.TempDir())
+	t.Chdir(tempDir(t))
 
-	dir := t.TempDir()
+	dir := tempDir(t)
 	path := filepath.Join(dir, "custom.config")
 	content := "ui:\n  initial_tabs: 7\nrysh:\n  session_name: \"explicit-cfg\"\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
@@ -66,7 +84,7 @@ func TestLoadFromEmptyPathFallsBackToSearch(t *testing.T) {
 // being silently swallowed — and that on failure the defaults are preserved
 // rather than partially applied.
 func TestLoadFromFileMalformedYAMLReturnsError(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	path := filepath.Join(dir, "rysh.config.yaml")
 	content := "ui:\n  initial_tabs: not-a-number\nsession:\n  name: \"pera-dev\"\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
@@ -116,7 +134,7 @@ func TestLoadWorkingDirectoryExpandsTilde(t *testing.T) {
 	// test only exercises tilde expansion if the expanded path really exists.
 	// Without this it passed solely on machines that happened to have
 	// ~/root/github/rysh-ai — green locally for the author, red everywhere else.
-	home := t.TempDir()
+	home := tempDir(t)
 	t.Setenv("HOME", home)
 	want := filepath.Join(home, "root", "github", "rysh-ai")
 	if err := os.MkdirAll(want, 0o755); err != nil {
@@ -263,7 +281,7 @@ func TestResolveWorkingDirectory(t *testing.T) {
 		t.Fatalf("UserHomeDir: %v", err)
 	}
 
-	root := t.TempDir() // e.g. /tmp/xxx (acts as a project root)
+	root := tempDir(t) // e.g. /tmp/xxx (acts as a project root)
 	plainCfg := filepath.Join(root, "rysh.config.yaml")
 	dotRyshDir := filepath.Join(root, ".rysh")
 	dotRyshCfg := filepath.Join(dotRyshDir, "rysh.config.yaml")
@@ -346,8 +364,8 @@ func TestResolveWorkingDirectoryExplicitWithoutConfigFile(t *testing.T) {
 // symlink the temp root) and the home dir.
 func isolateConfigEnv(t *testing.T) (cwd, home string) {
 	t.Helper()
-	cwdTmp := t.TempDir()
-	homeTmp := t.TempDir()
+	cwdTmp := tempDir(t)
+	homeTmp := tempDir(t)
 	t.Setenv("HOME", homeTmp)
 	t.Setenv("RYSH_DIR", "")
 	t.Setenv("RYSH_SESSION_DIR", "")
@@ -437,9 +455,48 @@ func TestResolveConfig(t *testing.T) {
 	})
 }
 
+// TestResolveConfigCanonicalizesSymlinkedCwd pins the aliasing fix: a project
+// entered THROUGH a symlink must resolve to the same rysh dir as the target,
+// never a second one named after the link.
+//
+// The setup is not contrived — it is what a shell hands a process after "cd"
+// through a symlink. The shell exports PWD as the route taken, and os.Getwd
+// returns PWD verbatim whenever it stats to the same directory as ".", so the
+// link's spelling reaches every cwd-derived path: the rysh dir, the session
+// registry inside it, and the config file. That is how one directory reached
+// as ~/root/github/rysh-ai (a symlink) and as ~/root/github/agentic-zellij
+// (its target) registered two sessions over ONE physical .rysh, each claiming
+// the same pinned nats.port and neither visible to the other's name check —
+// leaving "rysh create" refusing a name it could not account for.
+func TestResolveConfigCanonicalizesSymlinkedCwd(t *testing.T) {
+	target, _ := isolateConfigEnv(t)
+	touchConfig(t, filepath.Join(target, "rysh.config.yaml"))
+
+	link := filepath.Join(tempDir(t), "alias")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+	t.Chdir(link)
+	// Set PWD after the chdir: t.Chdir already points it at the link, but
+	// stating it here is the whole premise of the test rather than a detail
+	// inherited from the helper.
+	t.Setenv("PWD", link)
+
+	file, ryshDir := resolveConfig()
+	if want := filepath.Join(target, "rysh.config.yaml"); file != want {
+		t.Errorf("resolveConfig() file = %q, want %q (the route in must not become the identity)", file, want)
+	}
+	if want := localRoot(target); ryshDir != want {
+		t.Errorf("resolveConfig() ryshDir = %q, want %q", ryshDir, want)
+	}
+	if want := localRoot(target); defaultRyshDir() != want {
+		t.Errorf("defaultRyshDir() = %q, want %q", defaultRyshDir(), want)
+	}
+}
+
 // TestRyshDirForConfig covers the explicit "--config <path>" mapping.
 func TestRyshDirForConfig(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := tempDir(t)
 
 	plain := filepath.Join(tmp, "rysh.config.yaml")
 	if got, want := ryshDirForConfig(plain), filepath.Join(tmp, ".rysh"); got != want {
@@ -494,8 +551,8 @@ func TestLoadRyshDirDefaultWhenNoConfig(t *testing.T) {
 // resolves a rysh dir (a sibling .rysh of the config file).
 func TestLoadFromExplicitPathSetsRyshDir(t *testing.T) {
 	t.Setenv("RYSH_DIR", "")
-	t.Chdir(t.TempDir())
-	dir := t.TempDir()
+	t.Chdir(tempDir(t))
+	dir := tempDir(t)
 	path := filepath.Join(dir, "custom.config")
 	if err := os.WriteFile(path, []byte("session:\n  name: \"x\"\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -517,7 +574,7 @@ func TestLoadFromExplicitPathSetsRyshDir(t *testing.T) {
 func TestRyshDirEnvOverride(t *testing.T) {
 	cwd, _ := isolateConfigEnv(t)
 	touchConfig(t, filepath.Join(cwd, "rysh.config.yaml"))
-	override := t.TempDir()
+	override := tempDir(t)
 	t.Setenv("RYSH_DIR", override)
 
 	cfg, err := loadFrom("", new(strings.Builder))
@@ -575,7 +632,7 @@ func TestStorageDirsDeriveFromRyshDir(t *testing.T) {
 	t.Run("no config + XDG_STATE_HOME is ignored -> <cwd>/.rysh", func(t *testing.T) {
 		cwd, _ := isolateConfigEnv(t)
 		// XDG_STATE_HOME no longer relocates rysh state — there is no global root.
-		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		t.Setenv("XDG_STATE_HOME", tempDir(t))
 
 		cfg, err := loadFrom("", new(strings.Builder))
 		if err != nil {

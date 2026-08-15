@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Tab-level messages: what the workspace and the CLI send to a TabActor,
 // plus the tab's active-pane query and its layout operations.
 package msg
@@ -36,6 +38,16 @@ type MsgTabFocus struct {
 // MsgTabFocusPaneByID focuses a pane by UUID within the tab.
 type MsgTabFocusPaneByID struct {
 	ID string `json:"id"`
+}
+
+// MsgTabSetPaneHidden takes one pane in this tab off screen, or puts it back
+// (design 027 §5.1). Routed tab → lane → group by pane id, the same traversal
+// MsgTabFocusPaneByID uses, because the GROUP is what has to act: it owns the
+// stack's active index, and hiding the focused pane has to move focus off it
+// first or focus is stranded in a pane nothing draws.
+type MsgTabSetPaneHidden struct {
+	PaneID string `json:"pane_id"`
+	Hidden bool   `json:"hidden"`
 }
 
 // MsgTabResizePane adjusts the width of the active lane within the tab.
@@ -145,6 +157,13 @@ type MsgTabCreatePaneGroupInLane struct {
 	WorkingDir string `json:"working_dir,omitempty"`
 	PaneID     string `json:"pane_id,omitempty"`
 	PaneType   string `json:"pane_type,omitempty"`
+
+	// Meta is metadata the pane is BORN with (design 028). It exists because
+	// the alternative — create the pane, then publish MsgPaneSetMeta at it —
+	// races the pane actor's own subscription: the id is known, but the inbox
+	// may not be listening yet, and a lost fire-and-forget meta write shows up
+	// much later as a board pane that has forgotten which board it renders.
+	Meta map[string]string `json:"meta,omitempty"`
 }
 
 // MsgTabCreateGrid seeds a grid of lanes into an existing tab. Each entry in

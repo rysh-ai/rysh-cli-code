@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package registry
 
 // The human-browsable half of the published registry (design 005, B9): a

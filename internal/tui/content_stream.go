@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 // Direct pane→TUI content plane.
@@ -1002,6 +1004,15 @@ func (m *Model) syncPaneContentSet() (visible, needBackfill []string) {
 	for id := range m.dirtyRawPanes {
 		if !present[id] {
 			delete(m.dirtyRawPanes, id)
+		}
+	}
+	// Same for per-pane email state (email_view.go): emailViewFor creates an
+	// entry the first time a pane renders an email view and never removes it,
+	// so without this the inbox/reader/answer state of every pane that ever
+	// opened email accumulates for the whole session.
+	for id := range m.emailViews {
+		if !present[id] {
+			delete(m.emailViews, id)
 		}
 	}
 	return visible, needBackfill

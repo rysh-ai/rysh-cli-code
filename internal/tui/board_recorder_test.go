@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 import (
@@ -49,7 +51,7 @@ func TestEmptyBoardWithALiveRecorderSaysNothingWasPosted(t *testing.T) {
 	m := buildBoardModel(board.New(0))
 	m.boardRecorder = RecorderLive
 
-	rows := strings.Join(m.boardRows(100), "\n")
+	rows := strings.Join(m.boardRows("", 100), "\n")
 	if !strings.Contains(rows, "Nothing posted yet") {
 		t.Errorf("a live recorder with no posts must say so plainly:\n%s", rows)
 	}
@@ -64,7 +66,7 @@ func TestEmptyBoardWithADeadRecorderRefusesToClaimSilence(t *testing.T) {
 	m := buildBoardModel(board.New(0))
 	m.boardRecorder = RecorderStale
 
-	rows := strings.Join(m.boardRows(100), "\n")
+	rows := strings.Join(m.boardRows("", 100), "\n")
 	if strings.Contains(rows, "Nothing posted yet") {
 		t.Errorf("a dead recorder must NOT claim nothing was posted — that is the lie:\n%s", rows)
 	}
@@ -80,7 +82,7 @@ func TestEmptyBoardWithADeadRecorderRefusesToClaimSilence(t *testing.T) {
 func TestEmptyBoardWithNoBusSaysItCannotTell(t *testing.T) {
 	m := buildBoardModel(board.New(0)) // boardRecorder unset == RecorderUnknown
 
-	rows := strings.Join(m.boardRows(100), "\n")
+	rows := strings.Join(m.boardRows("", 100), "\n")
 	if strings.Contains(rows, "Nothing posted yet") {
 		t.Errorf("with no way to ask, the board must not claim silence:\n%s", rows)
 	}
@@ -130,9 +132,9 @@ func TestBoardViewReachesLiveThroughTheRealLoop(t *testing.T) {
 	// halves are proven in their own packages —
 	// actors.TestABLAAnswersLivenessWhileRecording proves ABLA answers and goes
 	// quiet when stopped; this proves the view transitions when something
-	// answers. Both use real NATS on msg.BoardAliveSubject(); neither fakes the
+	// answers. Both use real NATS on msg.BoardAliveSubject(""); neither fakes the
 	// transport, which is the part that could lie.
-	sub, err := nc.Subscribe(msgpkg.BoardAliveSubject(), func(m *nats.Msg) {
+	sub, err := nc.Subscribe(msgpkg.BoardAliveSubject(""), func(m *nats.Msg) {
 		_ = m.Respond([]byte(msgpkg.BoardAliveReply))
 	})
 	if err != nil {
@@ -178,7 +180,7 @@ func TestBoardViewReachesLiveThroughTheRealLoop(t *testing.T) {
 	}
 
 	// The optimistic answer is not only reachable, it is RENDERED.
-	rows := strings.Join(after.boardRows(100), "\n")
+	rows := strings.Join(after.boardRows("", 100), "\n")
 	if !strings.Contains(rows, "Nothing posted yet") {
 		t.Errorf("a live recorder must let the board say nothing was posted:\n%s", rows)
 	}

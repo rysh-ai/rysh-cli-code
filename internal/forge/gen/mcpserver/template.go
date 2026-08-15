@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package mcpserver
 
 // serverTemplate is the source of the generated MCP server. Placeholders

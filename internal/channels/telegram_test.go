@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package channels
 
 // Tests for the Telegram adapter (C2, openclaw_roadmap design 001 §4.2 / §6).

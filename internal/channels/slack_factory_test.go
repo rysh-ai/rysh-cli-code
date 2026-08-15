@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package channels
 
 // R5: slack.go (729 lines) had no adapter-level tests — only its markdown

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // osc7.go — OSC 7 working-directory tracking (Phase 4 of bash-shell-mode).

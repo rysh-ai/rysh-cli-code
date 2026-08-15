@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // registry-index — builds a publishable rysh package registry from a directory
 // of packages (design 005).
 //

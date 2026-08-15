@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 import (
@@ -338,6 +340,13 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 		// the generated `rysh --ansa` alias, which goes through the ## path and
 		// does both. See ansa_cmd.go.
 		return runAnsaCmd(cfg, args)
+
+	case "fleet":
+		// rysh fleet ls|show|register|state|member|forget — the session's fleet
+		// registry (design 028 §6.5). The surface fleetctl reads and writes;
+		// the manifest under .rysh/fleet/ is a cache, not the truth. See
+		// fleet_cmd.go.
+		return runFleetCmd(cfg, args)
 
 	case "board":
 		// rysh board post [--as <pane-id>] -- <text> — post to the agents
@@ -716,6 +725,22 @@ func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error 
 	if _, aerr := b.ActorSystem().Root.SpawnNamed(ablaProps, "agent-board-listener"); aerr != nil {
 		slog.Warn(progname.Rewrite("rysh: agents-board listener not started; the board will not record"),
 			"err", aerr)
+	}
+
+	// AFA — the agent-fleet registry (design 028 §6.5). Root-spawned beside
+	// ABLA and BEFORE the workspace farm, for the same reason: `fleetctl` may
+	// register a fleet before any workspace has finished starting, and a
+	// registration that arrives before the registry is listening is a fleet
+	// nothing knows about.
+	//
+	// SpawnNamed makes it a singleton. Two registries would each answer queries
+	// from their own half of the truth, which is worse than none — a caller
+	// would see a fleet appear and disappear depending on which one replied.
+	fleetActor := actors.NewAgentFleetActor(b.Conn(), b.Codecs(), b.FleetKV())
+	fleetProps := actor.PropsFromProducer(func() actor.Actor { return fleetActor })
+	if _, ferr := b.ActorSystem().Root.SpawnNamed(fleetProps, "agent-fleet"); ferr != nil {
+		slog.Warn(progname.Rewrite("rysh: fleet registry not started; fleets will not be tracked"),
+			"err", ferr)
 	}
 
 	// The WorkspaceFarmActor is the session root. It spawns one WorkspaceActor
@@ -1510,6 +1535,23 @@ func printUsage() {
 	usageLine("                    into one. --as defaults to $RYSH_PANE, so an agent inside a")
 	usageLine("                    pane can just: rysh board post 'finished the codec wiring'.")
 	usageLine("                    `rysh board reply <thread-id> -- '<text>'` replies in-thread.")
+	usageLine("       rysh board tail [--since <unix-millis>] [--limit <threads>] [--json]")
+	usageLine("                    READ the board: ask the session's recorder what the fleet has")
+	usageLine("                    been saying. A recorder that does not answer is an error, not")
+	usageLine("                    an empty board — the two are never conflated.")
+	usageLine("       rysh board tail --board <id>   read ONE board; --fleet <name> is the same flag")
+	usageLine("                    under the name a fleet operator reaches for. A board is scoped")
+	usageLine("                    by its subject, so a fleet's stream is its own (design 028).")
+	usageLine("       rysh fleet ls|show <name> [--json]")
+	usageLine("                    the session's fleet registry: which fleets exist, who is in")
+	usageLine("                    them, which board each one talks on. An unanswered query is an")
+	usageLine("                    error, never an empty session.")
+	usageLine("       rysh fleet register <name> [--board <id>] [--source <path>] [--roadmap <dir>]")
+	usageLine("                    track a fleet. Registering opens NO panes — it is the cheap")
+	usageLine("                    half; `rysh fleet state <name> up` is what costs, and the")
+	usageLine("                    registry refuses more than 3 fleets up at once (D-14).")
+	usageLine("       rysh fleet member add|rm <fleet> --pane <id> [--role <r>] [--label <l>]")
+	usageLine("                    membership, reconciled against the panes that actually exist.")
 	usageLine("       rysh prompt [--session <n>] [--pane-id <p>] [--timeout <d>] [--json] -- '<text>'")
 	usageLine("                    send a prompt to a RUNNING session's pane and block until the")
 	usageLine("                    agentic turn ends. Same exit codes as `rysh run` (0 done,")
@@ -1922,10 +1964,21 @@ func runPipelineCommand(store *session.Store, args []string) error {
 	}
 }
 
+// mustGetwd is the absolute, symlink-resolved working directory. It is what
+// the session record's Path is stamped from (and the daemon's own cwd), so it
+// must name the directory itself rather than the route taken to it: os.Getwd
+// hands back $PWD verbatim when $PWD stats to the same place as ".", which
+// makes a project entered through a symlink register under the symlink's name.
+// The registry is keyed by session name but READ as "which project is this",
+// so two spellings of one directory produce two sessions over one .rysh — see
+// config.getwd, which resolves the same aliasing for the rysh dir itself.
 func mustGetwd() string {
 	wd, err := os.Getwd()
 	if err != nil {
 		return "."
+	}
+	if resolved, err := filepath.EvalSymlinks(wd); err == nil {
+		wd = resolved
 	}
 	if abs, err := filepath.Abs(wd); err == nil {
 		return abs

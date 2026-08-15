@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package tui
 
 // Terminal mouse-reporting mode strings, used by the PTY relay when it takes

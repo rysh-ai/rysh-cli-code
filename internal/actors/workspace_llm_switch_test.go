@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package actors
 
 // `##llm use <other-family>/<model>` must switch the PROVIDER, not just the
