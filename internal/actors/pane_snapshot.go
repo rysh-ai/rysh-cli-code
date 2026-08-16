@@ -4,6 +4,7 @@ package actors
 
 import (
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -428,6 +429,7 @@ func (p *PaneActor) DeleteKV() {
 	_ = p.kvStore.Delete(p.id + ".private")
 	_ = p.kvStore.Delete(p.id + ".public")
 	_ = p.kvStore.Delete(p.id + ".llm_conversation")
+	_ = p.kvStore.Delete(p.id + paneMetaKVSuffix)
 }
 
 // RestoreState loads previously persisted state including output, mode, status,
@@ -542,4 +544,75 @@ func (p *PaneActor) metaCopy() map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// Durable meta sidecar (F-54)
+// ---------------------------------------------------------------------------
+//
+// `##pane meta` and the given-name are the session's ADDRESSING layer: fleet
+// selectors match on `fleet.name`/`fleet.role`, boards resolve `board.id`,
+// resume reads `rysh.auto_approve` — and all of it used to ride only in the
+// big pane snapshot, whose Put is debounced and can fail silently (a busy
+// agent pane's conversations + buffers can exceed the JetStream message limit,
+// and persistNow discards the error). A daemon restart then restored panes
+// whose layout survived but whose meta was whatever the last SUCCESSFUL big
+// write happened to carry — observed live as 44 of 52 fleet panes losing their
+// four fleet keys, an unkillable fleet, and a board pane rendering the wrong
+// board (F-54, all three failure modes silent).
+//
+// The sidecar gives these few small strings the same durability layout has:
+// their own KV key (`<paneID>.meta`), written SYNCHRONOUSLY on every change
+// (no debounce — meta changes are rare and tiny), restored on spawn even when
+// the big snapshot is missing or unreadable. Once the sidecar exists it is
+// authoritative — it is at least as fresh as any snapshot, and applying it
+// unconditionally is what lets a deleted key stay deleted.
+
+// paneMetaKVSuffix is the sidecar's KV key suffix (key = paneID + suffix).
+const paneMetaKVSuffix = ".meta"
+
+// paneMetaKV is the sidecar record: exactly the pane fields that form the
+// addressing layer, nothing that can grow.
+type paneMetaKV struct {
+	GivenName string            `json:"given_name,omitempty"`
+	Meta      map[string]string `json:"meta,omitempty"`
+}
+
+// persistDurableMeta writes the sidecar record immediately. Failures are
+// LOGGED, not swallowed — a silent persist failure is precisely how F-54
+// stayed invisible until a restart destroyed every fleet's addressing.
+func (p *PaneActor) persistDurableMeta() {
+	if p.kvStore == nil {
+		return
+	}
+	data, err := json.Marshal(paneMetaKV{GivenName: p.givenName, Meta: p.metaCopy()})
+	if err != nil {
+		return
+	}
+	if _, err := p.kvStore.Put(p.id+paneMetaKVSuffix, data); err != nil {
+		slog.Warn("pane durable-meta persist failed", "pane", p.id, "err", err)
+	}
+}
+
+// restoreDurableMeta overlays the sidecar record onto the pane, AFTER any big
+// snapshot restore. Called even when that snapshot was missing or unreadable —
+// that is the whole point. A missing sidecar (pre-sidecar pane, or meta never
+// set) restores nothing and keeps whatever the snapshot carried.
+func (p *PaneActor) restoreDurableMeta() {
+	if p.kvStore == nil {
+		return
+	}
+	entry, err := p.kvStore.Get(p.id + paneMetaKVSuffix)
+	if err != nil {
+		return
+	}
+	var mk paneMetaKV
+	if json.Unmarshal(entry.Value(), &mk) != nil {
+		return
+	}
+	// Unconditional: the sidecar is written whole on every change, so both
+	// fields are authoritative — including an empty meta map after the last
+	// key was deleted, which must not resurrect from a stale snapshot.
+	p.givenName = mk.GivenName
+	p.meta = mk.Meta
 }

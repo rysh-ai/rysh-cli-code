@@ -5,6 +5,7 @@ package domain
 import (
 	"iter"
 	"strconv"
+	"strings"
 )
 
 // ---------------------------------------------------------------------------
@@ -526,7 +527,41 @@ func ResolveLane(tab *TabSnapshot, arg string) *LaneSnapshot {
 			return &tab.Lanes[i]
 		}
 	}
+	if i := uniqueIDPrefix(len(tab.Lanes), func(i int) string { return tab.Lanes[i].ID }, arg); i >= 0 {
+		return &tab.Lanes[i]
+	}
 	return nil
+}
+
+// MinIDPrefix is the shortest id prefix a selector may abbreviate to. Four,
+// following git's short-sha floor, so that a one- or two-character selector
+// cannot resolve a lane or stack by accident.
+const MinIDPrefix = 4
+
+// uniqueIDPrefix returns the index of the single element whose id starts with
+// arg, or -1 when nothing matches, the match is ambiguous, or arg is shorter
+// than MinIDPrefix.
+//
+// F-55: this exists because `##lane list` and `##panegroup list` print ids
+// truncated to eight characters (`id=%.8s`), while the resolvers matched only
+// the full uuid — so the id a listing showed you was not an id you could paste
+// back. It is tried LAST, after exact id, index and name, so no selector that
+// resolves today changes meaning; it only fills in where resolution used to
+// fail outright.
+func uniqueIDPrefix(n int, idAt func(int) string, arg string) int {
+	if len(arg) < MinIDPrefix {
+		return -1
+	}
+	found := -1
+	for i := 0; i < n; i++ {
+		if strings.HasPrefix(idAt(i), arg) {
+			if found >= 0 {
+				return -1 // ambiguous: refuse rather than pick one
+			}
+			found = i
+		}
+	}
+	return found
 }
 
 // ResolveGroup resolves a pane-group selector within a lane. The empty selector
@@ -553,6 +588,9 @@ func ResolveGroup(lane *LaneSnapshot, arg string) *PaneGroupSnapshot {
 	}
 	if n, err := strconv.Atoi(arg); err == nil && n >= 1 && n <= len(lane.PaneGroups) {
 		return &lane.PaneGroups[n-1]
+	}
+	if i := uniqueIDPrefix(len(lane.PaneGroups), func(i int) string { return lane.PaneGroups[i].ID }, arg); i >= 0 {
+		return &lane.PaneGroups[i]
 	}
 	return nil
 }

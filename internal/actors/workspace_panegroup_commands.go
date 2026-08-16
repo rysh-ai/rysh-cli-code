@@ -25,7 +25,9 @@ func (w *WorkspaceActor) handlePaneGroupCommand(out *strings.Builder, paneID str
 	case "list":
 		w.cmdPaneGroupList(out, paneID)
 	case "info":
-		w.cmdPaneGroupInfo(out, paneID)
+		// ##panegroup info         -> the caller's stack
+		// ##panegroup info <ref>   -> THAT stack (F-55; see workspace_info_ref.go)
+		w.cmdPaneGroupInfo(out, paneID, args)
 	case "layout":
 		w.cmdPaneGroupLayout(out, paneID)
 	case "model", "llm":
@@ -48,7 +50,7 @@ func (w *WorkspaceActor) handlePaneGroupCommand(out *strings.Builder, paneID str
 		}
 	default:
 		ryshWriter(out).Unknown("panegroup", sub,
-			"##panegroup info     show active pane group details",
+			"##panegroup info [<stack>]  the caller's stack, or the one named (id or index)",
 			"##panegroup list     list pane groups in the active tab",
 			"##panegroup layout   show lane layout overview",
 			"##panegroup model [<p>/<name>]  bind the stack's LLM model (aliases: ##stack, ##pg)",

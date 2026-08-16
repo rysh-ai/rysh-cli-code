@@ -263,11 +263,18 @@ func (r *ansaRouter) Route(req *msg.MsgAnsaRoute) *msg.MsgAnsaRouteResult {
 	// only at launch.
 	//
 	// The run budget is disarmed on EVERY terminal outcome, a clean finish
-	// included, and auto-approval rides on that budget. So a fleet agent
-	// launched approval-free is approval-free for exactly ONE TURN: its second
-	// work order stops at the first `bash` on `[y]es [Y]es always [n]o` and
-	// waits for a human who is not coming. The fleet reads as alive and delivers
-	// nothing, which is the shape this whole track exists to kill.
+	// included, and auto-approval used to ride only on that budget. So a fleet
+	// agent launched approval-free was approval-free for exactly ONE TURN: its
+	// second work order stopped at the first `bash` on `[y]es [Y]es always
+	// [n]o` and waited for a human who is not coming. The fleet reads as alive
+	// and delivers nothing, which is the shape this whole track exists to kill.
+	//
+	// The arm is now PERSISTENT (MsgSetRunBudget.AutoApprovePersist, F-56):
+	// it sets the actor-level flag disarm never touches, so once any arm has
+	// landed the agent stays approval-free across turns. This per-prompt
+	// re-arm is kept as the belt: it is what covers an agent whose actor was
+	// respawned by a daemon restart, and panes armed by an older binary whose
+	// arm was still per-run.
 	//
 	// Armed here rather than at the executor's terminal branch because THIS is
 	// where the agent's permission mode is known: the pane carries the stamp
@@ -518,9 +525,18 @@ func (t *natsAnsaTransport) ArmAutoApprove(paneID string) error {
 // flag. AutoContinue stays FALSE deliberately: an armed auto-continue budget
 // re-wakes a paused run on its own, which is the one thing a stop verb must
 // never leave behind.
+//
+// AutoApprovePersist makes the grant ACTOR-level rather than run-level, so it
+// survives the disarm that fires on every terminal outcome (clean finishes
+// included). Without it a fleet agent was approval-free for exactly one turn
+// and its second work order stalled at the first `bash` on an approval prompt
+// nobody was watching — the per-prompt re-arm in ansaRoute still exists as a
+// belt for panes armed by an older binary, but the stamp it reads is pane meta,
+// which a daemon restart can wipe (F-54); the persistent grant does not depend
+// on it.
 func ansaArmAutoApprove(pub *msg.NATSPublisher, paneID string) error {
 	return pub.Send(ansaTurnSubject(paneID),
-		&msg.MsgSetRunBudget{AutoContinue: false, AutoApprove: true})
+		&msg.MsgSetRunBudget{AutoContinue: false, AutoApprove: true, AutoApprovePersist: true})
 }
 
 // ansaTurnStatusTimeout bounds the one question the stop verb asks every

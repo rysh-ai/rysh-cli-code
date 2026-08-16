@@ -165,7 +165,10 @@ func Start(ctx context.Context, opts Options) (*Tunnel, error) {
 
 	// 3. Spawn — no agent is running.
 	if err := t.spawn(ctx, opts); err != nil {
-		t.releaseProcess()
+		// Best-effort cleanup on a failed spawn. Any error from the release is
+		// secondary to the spawn error we are about to return, and swallowing
+		// the latter to report the former would hide the actual cause.
+		_ = t.releaseProcess()
 		return nil, err
 	}
 	return t, nil

@@ -285,7 +285,7 @@ func TestRestoreOnEmptyBucketIsNotAnError(t *testing.T) {
 // TestNilPersistenceIsLiveOnly: no JetStream means a live-only board, not a
 // crash and not a refusal to start.
 func TestNilPersistenceIsLiveOnly(t *testing.T) {
-	var p *Persistence = NewPersistence(nil, "")
+	p := NewPersistence(nil, "")
 	if p != nil {
 		t.Fatal("NewPersistence(nil, ...) should yield a nil Persistence")
 	}

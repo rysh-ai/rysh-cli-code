@@ -683,6 +683,9 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 		// which made `##pane name <name>` (and the `r`-key rename) appear to do
 		// nothing in the app until an unrelated action forced a refresh.
 		p.notifyLayoutDirty()
+		// Durable sidecar write (F-54): the name must not ride only in the
+		// debounced big snapshot, whose Put can fail silently.
+		p.persistDurableMeta()
 
 	case *msg.MsgPaneSetHidden:
 		p.hidden = m.Hidden
@@ -705,6 +708,10 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 				p.meta[m.Key] = m.Value
 			}
 			p.kvDirty = true
+			// Synchronous sidecar write (F-54): meta is the addressing layer
+			// fleet selectors and boards resolve against; it gets its own tiny
+			// KV record so a restart cannot wipe it with the big snapshot.
+			p.persistDurableMeta()
 		}
 
 	case *msg.MsgPaneStop:
