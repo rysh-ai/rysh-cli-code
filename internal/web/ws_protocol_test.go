@@ -243,16 +243,32 @@ func reportWSDiff(t *testing.T, kind, section string, want, got map[string]strin
 func extractWSProtocol(t *testing.T, dir string) wsProtocol {
 	t.Helper()
 
+	// parser.ParseDir is deprecated (Go 1.25): it ignores build tags when
+	// grouping files into packages. Reading the directory and parsing each file
+	// does exactly what this test needs — the non-test files of package web —
+	// without pulling in go/packages for a syntax-only walk.
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatalf("parse %s: %v", dir, err)
+		t.Fatalf("read %s: %v", dir, err)
 	}
-	pkg, ok := pkgs["web"]
-	if !ok {
-		t.Fatalf("package web not found in %s (found %d packages)", dir, len(pkgs))
+	files := map[string]*ast.File{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, perr := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", name, perr)
+		}
+		if f.Name.Name != "web" {
+			continue
+		}
+		files[name] = f
+	}
+	if len(files) == 0 {
+		t.Fatalf("no non-test files of package web found in %s", dir)
 	}
 
 	// Named in-package struct types, by name, so `var in webPaneInputCmd`
@@ -264,7 +280,7 @@ func extractWSProtocol(t *testing.T, dir string) wsProtocol {
 	// hold their whole payload that way.
 	funcCommonFields := map[string][]string{}
 
-	for _, file := range pkg.Files {
+	for _, file := range files {
 		ast.Inspect(file, func(n ast.Node) bool {
 			ts, ok := n.(*ast.TypeSpec)
 			if !ok {
@@ -285,7 +301,7 @@ func extractWSProtocol(t *testing.T, dir string) wsProtocol {
 	}
 	// A second pass would be needed if a named struct is declared after first
 	// use; resolve those now that every name is known.
-	for _, file := range pkg.Files {
+	for _, file := range files {
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok || fn.Body == nil {
@@ -298,7 +314,7 @@ func extractWSProtocol(t *testing.T, dir string) wsProtocol {
 	outbound := map[string]*outboundAcc{}
 	inbound := map[string]map[string]bool{}
 
-	for _, file := range pkg.Files {
+	for _, file := range files {
 		ast.Inspect(file, func(n ast.Node) bool {
 			switch node := n.(type) {
 			case *ast.CompositeLit:

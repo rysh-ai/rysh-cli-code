@@ -168,7 +168,15 @@ func TestMoveTabByIDKeepsTheHumansTabActive(t *testing.T) {
 	if got := w.tabs[w.activeTabIdx].id; got != "a" {
 		t.Fatalf("active tab = %q after moving it, want %q", got, "a")
 	}
-	if w.moveTabByID("a", msg.DirLeft) && w.moveTabByID("a", msg.DirLeft) {
+	// Two separate assertions, deliberately. As `if a() && a()` this fired only
+	// when BOTH moves succeeded, so a wrongly REFUSED first move passed silently
+	// — it asserted half of what it claimed. (staticcheck reports SA4000
+	// "identical expressions", which is imprecise: the calls are effectful. The
+	// defect is the missing assertion, not the duplication.)
+	if !w.moveTabByID("a", msg.DirLeft) {
+		t.Fatalf("moveTabByID refused to move the tab back to the start")
+	}
+	if w.moveTabByID("a", msg.DirLeft) {
 		t.Fatalf("moveTabByID walked the first tab past the start of the bar")
 	}
 	if w.moveTabByID("missing", msg.DirLeft) {

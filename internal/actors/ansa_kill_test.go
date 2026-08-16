@@ -3,6 +3,8 @@
 package actors
 
 import (
+	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -242,8 +244,24 @@ func TestAgentAndArgsAreReadFromPaneMeta(t *testing.T) {
 // A single quote in the nudge must not break the shell line.
 func TestShellQuoteEscapesSingleQuotes(t *testing.T) {
 	got := shellQuote("it's a test")
-	if strings.Count(got, "'")%2 != 0 {
-		// crude: escaped correctly means balanced quoting the shell accepts
+	// This branch used to hold a comment and no assertion: "crude: escaped
+	// correctly means balanced quoting the shell accepts". The heuristic is
+	// wrong, which is probably why it was never wired up — correct POSIX
+	// escaping is '\'' + the body with ' -> '\\'' + '\'', and for "it's a test"
+	// that is 'it'\\''s a test', which contains FIVE single quotes. An odd
+	// count is what correctness looks like here, so asserting balance would
+	// have failed against working code.
+	//
+	// Assert the property that actually matters instead: a real shell parses
+	// the quoted form back into the original string.
+	if runtime.GOOS != "windows" {
+		out, err := exec.Command("sh", "-c", "printf %s "+got).Output()
+		if err != nil {
+			t.Fatalf("sh could not parse %q: %v", got, err)
+		}
+		if string(out) != "it's a test" {
+			t.Errorf("shell round-trip = %q, want %q (from %q)", string(out), "it's a test", got)
+		}
 	}
 	if !strings.HasPrefix(got, "'") || !strings.HasSuffix(got, "'") {
 		t.Errorf("not single-quoted: %q", got)

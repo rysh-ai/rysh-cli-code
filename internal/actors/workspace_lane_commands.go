@@ -24,7 +24,9 @@ func (w *WorkspaceActor) handleLaneCommand(out *strings.Builder, paneID string, 
 	case "list":
 		w.cmdLaneList(out)
 	case "info":
-		w.cmdLaneInfo(out, paneID)
+		// ##lane info          -> the caller's lane
+		// ##lane info <ref>    -> THAT lane (F-55; see workspace_info_ref.go)
+		w.cmdLaneInfo(out, paneID, args)
 	case "model", "llm":
 		// ##lane model — binds every stack/pane in the active lane that
 		// has not chosen a narrower model of its own.
@@ -60,7 +62,7 @@ func (w *WorkspaceActor) handleLaneCommand(out *strings.Builder, paneID string, 
 	default:
 		ryshWriter(out).Unknown("lane", sub,
 			"##lane list",
-			"##lane info",
+			"##lane info [<lane>]   the caller's lane, or the one named (id, index or name)",
 			"##lane name <lane-name>",
 			"##lane model [<provider>/<name>]  bind the lane's LLM model",
 			"##lane delete <lane-id>",

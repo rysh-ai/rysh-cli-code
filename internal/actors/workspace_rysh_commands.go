@@ -44,50 +44,30 @@ func (w *WorkspaceActor) cmdLaneList(out *strings.Builder) {
 	ryshWriter(out).Rule()
 }
 
-func (w *WorkspaceActor) cmdLaneInfo(out *strings.Builder, paneID string) {
-	tab := w.currentTab()
-	if tab == nil {
-		fmt.Fprintf(out, "\n[rysh] no active tab\n")
-		w.failRysh("no active tab")
-		return
-	}
-	if paneID == "" {
-		fmt.Fprintf(out, "\n[rysh] no active pane\n")
-		w.failRysh("no active pane")
-		return
-	}
-	tabSnap := w.queryTabSnapshot(tab.id)
-	if tabSnap == nil {
-		fmt.Fprintf(out, "\n[rysh] could not fetch tab snapshot\n")
-		w.failRysh("could not fetch tab snapshot")
+// cmdLaneInfo implements `##lane info [<ref>]`. args is the subcommand slice,
+// so args[0] is "info"; see workspace_info_ref.go for why a ref resolves the
+// way it does (F-55).
+func (w *WorkspaceActor) cmdLaneInfo(out *strings.Builder, paneID string, args []string) {
+	target, err := w.resolveLaneInfoTarget(paneID, infoRef(args))
+	if err != nil {
+		fmt.Fprintf(out, "\n[rysh] %s\n", err)
+		w.failRysh("%s", err)
 		return
 	}
 
-	// Find the lane containing the active pane.
-	var activeLane *domain.LaneSnapshot
-	laneIdx := -1
-	if site, ok := domain.LocatePaneInTab(tabSnap, paneID); ok {
-		activeLane = site.Lane
-		laneIdx = site.LaneIndex
-	}
-	if activeLane == nil {
-		fmt.Fprintf(out, "\n[rysh] pane %s not found in any lane\n", paneID)
-		w.failRysh("pane %s not found in any lane", paneID)
-		return
-	}
-
-	totalPanes := domain.CountPanesInLane(activeLane)
+	lane := target.lane
+	totalPanes := domain.CountPanesInLane(lane)
 
 	fmt.Fprintf(out, "\n[rysh] lane info\n")
 	ryshWriter(out).Rule()
-	fmt.Fprintf(out, "  name        : %s\n", activeLane.Name)
-	fmt.Fprintf(out, "  id          : %s\n", activeLane.ID)
-	fmt.Fprintf(out, "  tab         : %s\n", tab.title)
-	fmt.Fprintf(out, "  position    : %d of %d\n", laneIdx+1, len(tabSnap.Lanes))
-	fmt.Fprintf(out, "  flex        : %d\n", activeLane.Flex)
-	fmt.Fprintf(out, "  groups      : %d\n", len(activeLane.PaneGroups))
+	fmt.Fprintf(out, "  name        : %s\n", lane.Name)
+	fmt.Fprintf(out, "  id          : %s\n", lane.ID)
+	fmt.Fprintf(out, "  tab         : %s\n", target.tab.title)
+	fmt.Fprintf(out, "  position    : %d of %d\n", target.laneIdx+1, len(target.tabSnap.Lanes))
+	fmt.Fprintf(out, "  flex        : %d\n", lane.Flex)
+	fmt.Fprintf(out, "  groups      : %d\n", len(lane.PaneGroups))
 	fmt.Fprintf(out, "  panes       : %d\n", totalPanes)
-	fmt.Fprintf(out, "  active pane : %s\n", activeLane.ActivePaneID)
+	fmt.Fprintf(out, "  active pane : %s\n", lane.ActivePaneID)
 	ryshWriter(out).Rule()
 }
 
@@ -268,53 +248,32 @@ func (w *WorkspaceActor) cmdPaneGroupList(out *strings.Builder, paneID string) {
 	ryshWriter(out).Rule()
 }
 
-func (w *WorkspaceActor) cmdPaneGroupInfo(out *strings.Builder, paneID string) {
-	tab := w.currentTab()
-	if tab == nil {
-		fmt.Fprintf(out, "\n[rysh] no active tab\n")
-		w.failRysh("no active tab")
-		return
-	}
-	if paneID == "" {
-		fmt.Fprintf(out, "\n[rysh] no active pane\n")
-		w.failRysh("no active pane")
-		return
-	}
-	tabSnap := w.queryTabSnapshot(tab.id)
-	if tabSnap == nil {
-		fmt.Fprintf(out, "\n[rysh] could not fetch tab snapshot\n")
-		w.failRysh("could not fetch tab snapshot")
+// cmdPaneGroupInfo implements `##panegroup info [<ref>]`. args is the
+// subcommand slice, so args[0] is "info"; see workspace_info_ref.go (F-55).
+func (w *WorkspaceActor) cmdPaneGroupInfo(out *strings.Builder, paneID string, args []string) {
+	target, err := w.resolveGroupInfoTarget(paneID, infoRef(args))
+	if err != nil {
+		fmt.Fprintf(out, "\n[rysh] %s\n", err)
+		w.failRysh("%s", err)
 		return
 	}
 
-	var activeGroup *domain.PaneGroupSnapshot
-	var activeLane *domain.LaneSnapshot
-	laneIdx := -1
-	groupIdx := -1
-	if site, ok := domain.LocatePaneInTab(tabSnap, paneID); ok {
-		activeGroup = site.Group
-		activeLane = site.Lane
-		laneIdx = site.LaneIndex
-		groupIdx = site.GroupIndex
-	}
-	if activeGroup == nil {
-		fmt.Fprintf(out, "\n[rysh] pane %s not found in any group\n", paneID)
-		w.failRysh("pane %s not found in any group", paneID)
-		return
-	}
+	group, lane := target.group, target.lane
 
 	fmt.Fprintf(out, "\n[rysh] pane group info\n")
 	ryshWriter(out).Rule()
-	fmt.Fprintf(out, "  id          : %s\n", activeGroup.ID)
-	fmt.Fprintf(out, "  tab         : %s\n", tab.title)
-	fmt.Fprintf(out, "  lane        : %d (flex=%d, id=%.8s)\n", laneIdx+1, activeLane.Flex, activeLane.ID)
-	fmt.Fprintf(out, "  group       : %d of %d\n", groupIdx+1, len(activeLane.PaneGroups))
-	fmt.Fprintf(out, "  panes       : %d\n", len(activeGroup.Panes))
-	fmt.Fprintf(out, "  active pane : %s\n", activeGroup.ActivePaneID)
+	fmt.Fprintf(out, "  id          : %s\n", group.ID)
+	fmt.Fprintf(out, "  tab         : %s\n", target.tab.title)
+	fmt.Fprintf(out, "  lane        : %d (flex=%d, id=%.8s)\n", target.laneIdx+1, lane.Flex, lane.ID)
+	fmt.Fprintf(out, "  group       : %d of %d\n", target.groupIdx+1, len(lane.PaneGroups))
+	fmt.Fprintf(out, "  panes       : %d\n", len(group.Panes))
+	fmt.Fprintf(out, "  active pane : %s\n", group.ActivePaneID)
 	ryshWriter(out).Rule()
-	if len(activeGroup.Panes) > 0 {
+	if len(group.Panes) > 0 {
 		fmt.Fprintf(out, "  panes in this group:\n")
-		for pi, p := range activeGroup.Panes {
+		for pi, p := range group.Panes {
+			// The caller marker only means anything when the caller is in the
+			// stack being described — which, with a ref, it usually is not.
 			pMarker := "    "
 			if p.ID == paneID {
 				pMarker = "  > "

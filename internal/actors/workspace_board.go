@@ -163,11 +163,6 @@ func boardPostConfirmation(boardID string, post *msg.MsgBoardPost) string {
 // pollute and no focus to steal — the pane is already focused, because someone
 // just typed into it.
 func (w *WorkspaceActor) handleBoardCommand(out *strings.Builder, paneID string, args []string) error {
-	sub := ""
-	if len(args) > 0 {
-		sub = args[0]
-	}
-
 	// `--board <id>` / `--fleet <name>` may appear anywhere in any subcommand,
 	// and an unparseable one stops the command rather than falling back to the
 	// session board (F-19's rule: a flag that silently does nothing is worse
@@ -177,10 +172,11 @@ func (w *WorkspaceActor) handleBoardCommand(out *strings.Builder, paneID string,
 		return w.boardUsage(out, fmt.Sprintf("##board: %v", berr))
 	}
 	args = rest
+	// Read the subcommand only after the flags are stripped: an earlier read
+	// would be overwritten here, which is what ineffassign was pointing at.
+	sub := ""
 	if len(args) > 0 {
 		sub = args[0]
-	} else {
-		sub = ""
 	}
 
 	// The board this command is about: the one named on the line, else the

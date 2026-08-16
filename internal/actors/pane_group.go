@@ -307,6 +307,11 @@ func (g *PaneGroupActor) spawnRestoredPane(ctx actor.Context, paneID, paneTitle,
 	if snap != nil {
 		pa.RestoreState(*snap)
 	}
+	// The durable-meta sidecar overlays LAST, and runs even when the big
+	// snapshot was missing or unreadable — that unreadable-snapshot case is
+	// exactly the one F-54 documented: layout survived the restart while every
+	// fleet key and given-name silently vanished with the snapshot.
+	pa.restoreDurableMeta()
 	paneProps := actor.PropsFromProducer(func() actor.Actor { return pa })
 	pid := spawnDetached(ctx, paneProps)
 

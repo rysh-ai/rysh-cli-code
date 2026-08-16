@@ -728,3 +728,102 @@ func TestResolveChainMatchesBroadcast(t *testing.T) {
 		t.Fatalf("explicit chain resolved to %v, want p5", pane)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// F-55 — id-prefix selectors
+//
+// `##lane list` and `##panegroup list` print ids truncated to eight characters
+// (`id=%.8s`), but the resolvers matched only the full uuid, so the id a
+// listing showed you was not an id you could paste back. These pin the
+// fallback: unambiguous prefixes resolve, ambiguous ones refuse, and every
+// selector that resolved before still resolves the same way.
+// ---------------------------------------------------------------------------
+
+func TestResolveLaneByIDPrefix(t *testing.T) {
+	snap := navTree()
+	tab := &snap.Tabs[0]
+
+	// "lane-a" and "lane-b" share the prefix "lane-", so only a prefix long
+	// enough to single one out may resolve.
+	if got := ResolveLane(tab, "lane-a"); got == nil || got.ID != "lane-a" {
+		t.Errorf("full id = %v, want lane-a", got)
+	}
+	if got := ResolveLane(tab, "lane-"); got != nil {
+		t.Errorf("ambiguous prefix %q resolved to %q — it must refuse, not pick one", "lane-", got.ID)
+	}
+
+	// A prefix shorter than MinIDPrefix never resolves, even when it is
+	// unambiguous, so a stray one- or two-character argument cannot silently
+	// name a lane.
+	short := &TabSnapshot{Lanes: []LaneSnapshot{{ID: "abcdefgh"}}}
+	for _, arg := range []string{"a", "ab", "abc"} {
+		if got := ResolveLane(short, arg); got != nil {
+			t.Errorf("ResolveLane(%q) = %q, want nil (shorter than MinIDPrefix=%d)", arg, got.ID, MinIDPrefix)
+		}
+	}
+	if got := ResolveLane(short, "abcd"); got == nil || got.ID != "abcdefgh" {
+		t.Errorf("ResolveLane(%q) = %v, want abcdefgh (exactly MinIDPrefix)", "abcd", got)
+	}
+
+	// The eight-character form a listing prints is the case that matters.
+	real := &TabSnapshot{Lanes: []LaneSnapshot{
+		{ID: "9db6c758-1111-4444-8888-000000000001"},
+		{ID: "d0b8163a-2222-4444-8888-000000000002"},
+	}}
+	if got := ResolveLane(real, "9db6c758"); got == nil || got.ID != "9db6c758-1111-4444-8888-000000000001" {
+		t.Errorf("8-char prefix from ##lane list = %v, want the first lane", got)
+	}
+}
+
+// TestResolveLanePrefixIsLast pins the ordering: the prefix fallback runs after
+// exact id, index and name, so no selector that resolved before this change
+// resolves to something different now.
+func TestResolveLanePrefixIsLast(t *testing.T) {
+	// A lane whose id starts with "2" sits second. "2" must stay the INDEX,
+	// which is lane "two-index" at position 2 — not the id-prefix match.
+	tab := &TabSnapshot{Lanes: []LaneSnapshot{
+		{ID: "2abcdefg", Name: "first"},
+		{ID: "zzzzzzzz", Name: "two-index"},
+	}}
+	if got := ResolveLane(tab, "2"); got == nil || got.ID != "zzzzzzzz" {
+		t.Errorf("ResolveLane(%q) = %v, want the index match zzzzzzzz — index must beat id prefix", "2", got)
+	}
+
+	// A lane NAME that also prefixes another lane's id resolves as the name.
+	named := &TabSnapshot{Lanes: []LaneSnapshot{
+		{ID: "buildxyz", Name: "other"},
+		{ID: "zzzzzzzz", Name: "build"},
+	}}
+	if got := ResolveLane(named, "build"); got == nil || got.ID != "zzzzzzzz" {
+		t.Errorf("ResolveLane(%q) = %v, want the name match zzzzzzzz — name must beat id prefix", "build", got)
+	}
+}
+
+func TestResolveGroupByIDPrefix(t *testing.T) {
+	snap := navTree()
+	lane := &snap.Tabs[0].Lanes[0] // grp-a1, grp-a2
+
+	if got := ResolveGroup(lane, "grp-a1"); got == nil || got.ID != "grp-a1" {
+		t.Errorf("full id = %v, want grp-a1", got)
+	}
+	if got := ResolveGroup(lane, "grp-a"); got != nil {
+		t.Errorf("ambiguous prefix %q resolved to %q — it must refuse", "grp-a", got.ID)
+	}
+
+	// Index still beats prefix here too.
+	tab := &LaneSnapshot{PaneGroups: []PaneGroupSnapshot{
+		{ID: "2abcdefg"},
+		{ID: "zzzzzzzz"},
+	}}
+	if got := ResolveGroup(tab, "2"); got == nil || got.ID != "zzzzzzzz" {
+		t.Errorf("ResolveGroup(%q) = %v, want index match zzzzzzzz", "2", got)
+	}
+
+	real := &LaneSnapshot{PaneGroups: []PaneGroupSnapshot{
+		{ID: "7ea65a6f-1111-4444-8888-000000000001"},
+		{ID: "ff41a9ae-2222-4444-8888-000000000002"},
+	}}
+	if got := ResolveGroup(real, "7ea65a6f"); got == nil || got.ID != "7ea65a6f-1111-4444-8888-000000000001" {
+		t.Errorf("8-char prefix from ##panegroup list = %v, want the first stack", got)
+	}
+}
