@@ -17,6 +17,10 @@ func TestRequirePTY_AllowsPtylessCommands(t *testing.T) {
 		// `rysh exec` and `rysh script` drive an existing session over NATS;
 		// like `send`, they never open a pane of their own.
 		"exec", "script",
+		// `board` is the same shape: post/reply/tail over NATS, no pane. It was
+		// missing from the allow-list until the first Windows runtime smoke run
+		// refused `rysh board`. Registry ops likewise.
+		"board", "search", "update",
 	} {
 		if err := requirePTY([]string{cmd}); err != nil {
 			t.Errorf("requirePTY(%q) = %v, want nil — this command needs no pane", cmd, err)
