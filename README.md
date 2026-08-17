@@ -16,14 +16,14 @@ the shared one.
 ## Video tutorials
 
 Five narrated, subtitled walkthroughs of what rysh actually does, in order —
-**each one assumes the previous**. Click a title to play it right here; click its picture to open it on YouTube,
-where the chapters and captions are. The first four are
-recorded against the build the [install](#install) line gives you, so every
-command in them is one you can type.
+**each one assumes the previous**. Click a title to open that video and play it
+here on this page — nothing leaves GitHub. The first four are recorded against
+the build the [install](#install) line gives you, so every command in them is one
+you can type.
 
 <details>
 <summary><b>1 — Install, and your first tabs, lanes and stacked panes</b> · 1:29<br>
-<a href="https://www.youtube.com/watch?v=1k0nEMBtY04"><img alt="tutorial 1 of 5" width="640" src="video-thumbs/01-first-panes.png"></a></summary>
+<img alt="tutorial 1 of 5" width="640" src="https://github.com/user-attachments/assets/4e9f8dad-188e-4acd-97e6-ddf1c15f64cf"></summary>
 
 <video src="https://github.com/user-attachments/assets/bbb99804-2516-46c5-aede-4d5bb0668aa1" controls muted></video>
 
@@ -31,13 +31,11 @@ command in them is one you can type.
 `##claude` in each pane of that stack, so one window holds three independent Claude
 sessions.
 
-[Watch on YouTube](https://www.youtube.com/watch?v=1k0nEMBtY04) — chapters and captions are there.
-
 </details>
 
 <details>
 <summary><b>2 — Stop the session, start it again — the agents are still there</b> · 2:44<br>
-<a href="https://www.youtube.com/watch?v=PjpiuyXCgpA"><img alt="tutorial 2 of 5" width="640" src="video-thumbs/02-stop-start.png"></a></summary>
+<img alt="tutorial 2 of 5" width="640" src="https://github.com/user-attachments/assets/625dc27f-efe3-41e8-bb6e-86162f2c35fd"></summary>
 
 <video src="https://github.com/user-attachments/assets/41dc48e5-5c63-4185-ba6a-19cb6a96783e" controls muted></video>
 
@@ -45,26 +43,22 @@ Why a session is a daemon and not a terminal. Claude and Codex are each told a
 codeword, the session is stopped *outright*, and after the restart both resume
 unprompted and answer with the codeword they were told before it.
 
-[Watch on YouTube](https://www.youtube.com/watch?v=PjpiuyXCgpA) — chapters and captions are there.
-
 </details>
 
 <details>
 <summary><b>3 — Claude and Codex in three stacked panes at once</b> · 2:07<br>
-<a href="https://www.youtube.com/watch?v=JWl5l-YswzI"><img alt="tutorial 3 of 5" width="640" src="video-thumbs/03-claude-codex-parallel.png"></a></summary>
+<img alt="tutorial 3 of 5" width="640" src="https://github.com/user-attachments/assets/3a1edb6e-01ca-432d-95f1-e48de3c6a013"></summary>
 
 <video src="https://github.com/user-attachments/assets/2939ab4f-35c6-4a92-af4a-8564fdab4f23" controls muted></video>
 
 More than one agent, and more than one vendor, side by side: `Ctrl+S` and a digit
 to move around a stack, a task each, three files written in parallel.
 
-[Watch on YouTube](https://www.youtube.com/watch?v=JWl5l-YswzI) — chapters and captions are there.
-
 </details>
 
 <details>
 <summary><b>4 — A fleet that talks to itself, on a shared board</b> · 2:29<br>
-<a href="https://www.youtube.com/watch?v=GwZZeZ1LEcw"><img alt="tutorial 4 of 5" width="640" src="video-thumbs/04-fleet-board.png"></a></summary>
+<img alt="tutorial 4 of 5" width="640" src="https://github.com/user-attachments/assets/6d7fc0e9-a55e-4dd8-b834-0e583e75e573"></summary>
 
 <video src="https://github.com/user-attachments/assets/6523e041-90e1-422e-9992-422d46180020" controls muted></video>
 
@@ -74,21 +68,17 @@ workers build in parallel, and the manager sends a correction back to a worker
 before signing off. They ship a browser todo manager — HTML, CSS and JavaScript,
 no backend, no build step.
 
-[Watch on YouTube](https://www.youtube.com/watch?v=GwZZeZ1LEcw) — chapters and captions are there.
-
 </details>
 
 <details>
 <summary><b>5 — Graph engineering — designing the shape of a fleet</b> · 4:00<br>
-<a href="https://www.youtube.com/watch?v=70cb15gaWtI"><img alt="tutorial 5 of 5" width="640" src="video-thumbs/05-graph-engineering.png"></a></summary>
+<img alt="tutorial 5 of 5" width="640" src="https://github.com/user-attachments/assets/c812b991-b4e3-41cd-9766-e5bce1190cac"></summary>
 
 <video src="https://github.com/user-attachments/assets/5d42927b-f6c6-4149-9a88-77742163da3c" controls muted></video>
 
 The deep end: why an agent org chart is a graph, what the edges mean, and what
 changes when you remove one. Orders travel *down* as messages, results come *up*
 on the board, and two workers with no edge between them give independent verdicts.
-
-[Watch on YouTube](https://www.youtube.com/watch?v=70cb15gaWtI) — chapters and captions are there.
 
 </details>
 
