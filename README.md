@@ -16,14 +16,14 @@ the shared one.
 ## Video tutorials
 
 Five narrated, subtitled walkthroughs of what rysh actually does, in order —
-**each one assumes the previous**. Press play on any of them without leaving
-the page, or open them on YouTube for chapters and captions. Collapse the ones
-you have already watched with the triangle beside each title. The first four are
+**each one assumes the previous**. Click a title to play it right here; click its picture to open it on YouTube,
+where the chapters and captions are. The first four are
 recorded against the build the [install](#install) line gives you, so every
 command in them is one you can type.
 
-<details open>
-<summary><b>1 — Install, and your first tabs, lanes and stacked panes</b> · 1:29</summary>
+<details>
+<summary><b>1 — Install, and your first tabs, lanes and stacked panes</b> · 1:29<br>
+<a href="https://www.youtube.com/watch?v=1k0nEMBtY04"><img alt="tutorial 1 of 5" width="640" src="https://img.youtube.com/vi/1k0nEMBtY04/maxresdefault.jpg"></a></summary>
 
 <video src="https://github.com/user-attachments/assets/bbb99804-2516-46c5-aede-4d5bb0668aa1" controls muted></video>
 
@@ -35,8 +35,9 @@ sessions.
 
 </details>
 
-<details open>
-<summary><b>2 — Stop the session, start it again — the agents are still there</b> · 2:44</summary>
+<details>
+<summary><b>2 — Stop the session, start it again — the agents are still there</b> · 2:44<br>
+<a href="https://www.youtube.com/watch?v=PjpiuyXCgpA"><img alt="tutorial 2 of 5" width="640" src="https://img.youtube.com/vi/70cb15gaWtI/maxresdefault.jpg"></a></summary>
 
 <video src="https://github.com/user-attachments/assets/41dc48e5-5c63-4185-ba6a-19cb6a96783e" controls muted></video>
 
@@ -48,8 +49,9 @@ unprompted and answer with the codeword they were told before it.
 
 </details>
 
-<details open>
-<summary><b>3 — Claude and Codex in three stacked panes at once</b> · 2:07</summary>
+<details>
+<summary><b>3 — Claude and Codex in three stacked panes at once</b> · 2:07<br>
+<a href="https://www.youtube.com/watch?v=JWl5l-YswzI"><img alt="tutorial 3 of 5" width="640" src="https://img.youtube.com/vi/GwZZeZ1LEcw/maxresdefault.jpg"></a></summary>
 
 <video src="https://github.com/user-attachments/assets/2939ab4f-35c6-4a92-af4a-8564fdab4f23" controls muted></video>
 
@@ -60,8 +62,9 @@ to move around a stack, a task each, three files written in parallel.
 
 </details>
 
-<details open>
-<summary><b>4 — A fleet that talks to itself, on a shared board</b> · 2:29</summary>
+<details>
+<summary><b>4 — A fleet that talks to itself, on a shared board</b> · 2:29<br>
+<a href="https://www.youtube.com/watch?v=GwZZeZ1LEcw"><img alt="tutorial 4 of 5" width="640" src="https://img.youtube.com/vi/JWl5l-YswzI/maxresdefault.jpg"></a></summary>
 
 <video src="https://github.com/user-attachments/assets/6523e041-90e1-422e-9992-422d46180020" controls muted></video>
 
@@ -75,8 +78,9 @@ no backend, no build step.
 
 </details>
 
-<details open>
-<summary><b>5 — Graph engineering — designing the shape of a fleet</b> · 4:00</summary>
+<details>
+<summary><b>5 — Graph engineering — designing the shape of a fleet</b> · 4:00<br>
+<a href="https://www.youtube.com/watch?v=70cb15gaWtI"><img alt="tutorial 5 of 5" width="640" src="https://img.youtube.com/vi/PjpiuyXCgpA/maxresdefault.jpg"></a></summary>
 
 <video src="https://github.com/user-attachments/assets/5d42927b-f6c6-4149-9a88-77742163da3c" controls muted></video>
 
