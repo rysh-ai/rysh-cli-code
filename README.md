@@ -22,24 +22,23 @@ can type.
 
 | # | Video | What it teaches |
 | --- | --- | --- |
-| 1 | **[Install, and your first tabs, lanes and stacked panes](https://www.youtube.com/watch?v=REPLACE-WITH-VIDEO-ID-1)** | `go install`, a first session, a tab, a second lane, a stack of three panes — then `##claude` in each pane of that stack, so one window holds three independent Claude sessions |
-| 2 | **[Stop the session, start it again — the agents are still there](https://www.youtube.com/watch?v=REPLACE-WITH-VIDEO-ID-2)** | Why a session is a daemon and not a terminal. Claude and Codex are each told a codeword, the session is stopped *outright*, and after the restart both resume unprompted and answer with the codeword they were told before it |
-| 3 | **[Claude and Codex in three stacked panes at once](https://www.youtube.com/watch?v=REPLACE-WITH-VIDEO-ID-3)** | Running more than one agent, and more than one vendor, side by side: `Ctrl+S` and a digit to move around a stack, a task each, three files written in parallel |
-| 4 | **[A fleet that talks to itself, on a shared board](https://www.youtube.com/watch?v=REPLACE-WITH-VIDEO-ID-4)** | `##board open`, `rysh ansa prompt`, and agents driving *each other*: `roadmap` (Claude) sets the goal, `fleet-manager` (Codex) splits it into work orders, two workers build in parallel, and the manager sends a correction back to a worker before signing off. They ship a browser todo manager — HTML, CSS and JavaScript, no backend, no build step |
-| 5 | **[Graph engineering — designing the shape of a fleet](https://www.youtube.com/watch?v=REPLACE-WITH-VIDEO-ID-5)** | The deep end: why an agent org chart is a graph, what the edges mean, and what changes when you remove one. Orders travel *down* as messages, results come *up* on the board, and two workers with no edge between them give independent verdicts |
+| 1 | **[Install, and your first tabs, lanes and stacked panes](https://www.youtube.com/watch?v=1k0nEMBtY04)** | `go install`, a first session, a tab, a second lane, a stack of three panes — then `##claude` in each pane of that stack, so one window holds three independent Claude sessions |
+| 2 | **[Stop the session, start it again — the agents are still there](https://www.youtube.com/watch?v=PjpiuyXCgpA)** | Why a session is a daemon and not a terminal. Claude and Codex are each told a codeword, the session is stopped *outright*, and after the restart both resume unprompted and answer with the codeword they were told before it |
+| 3 | **[Claude and Codex in three stacked panes at once](https://www.youtube.com/watch?v=JWl5l-YswzI)** | Running more than one agent, and more than one vendor, side by side: `Ctrl+S` and a digit to move around a stack, a task each, three files written in parallel |
+| 4 | **[A fleet that talks to itself, on a shared board](https://www.youtube.com/watch?v=GwZZeZ1LEcw)** | `##board open`, `rysh ansa prompt`, and agents driving *each other*: `roadmap` (Claude) sets the goal, `fleet-manager` (Codex) splits it into work orders, two workers build in parallel, and the manager sends a correction back to a worker before signing off. They ship a browser todo manager — HTML, CSS and JavaScript, no backend, no build step |
+| 5 | **[Graph engineering — designing the shape of a fleet](https://www.youtube.com/watch?v=70cb15gaWtI)** | The deep end: why an agent org chart is a graph, what the edges mean, and what changes when you remove one. Orders travel *down* as messages, results come *up* on the board, and two workers with no edge between them give independent verdicts |
 
 Start at 1 even if you have used tmux or Zellij for years — the panes look
 familiar and the session model underneath them does not, which is video 2.
 
-<!-- THE FIVE URLS ABOVE ARE PLACEHOLDERS and ship as dead links if left alone.
-     scripts/export-oss.sh injects this file into the public rysh-ai/rysh-cli-code repo
-     verbatim, so each REPLACE-WITH-VIDEO-ID-n must be swapped for a real YouTube id
-     before an export runs. That is the same failure the two blocks further down are
-     still empty to avoid.
+<!-- The five links above are live and public (verified via YouTube's oembed endpoint,
+     2026-08-17: all five returned 200 with matching titles). They are watch URLs, not
+     studio.youtube.com URLs — a Studio link is the upload console and opens for nobody
+     but the channel owner.
 
      Sources. Videos 1-4: video-tutorials/demos/readme-quickstart/ in the private
      monorepo — a tape and a narration script per demo, make-demo.sh to rebuild, and
-     out/ holding each master plus a .srt to attach as the YouTube caption track.
+     out/ holding each master plus a .srt attached to the upload as the caption track.
      Video 5 is a different pipeline, marketing/assets/videos/graph-engineering/, and
      is bound by new_roadmap/designs/024-investor-claims.md: read that before editing
      its row above. Two constraints from it that bear on this page — the ceo/manager/
@@ -262,9 +261,9 @@ Look at what you built, and move things around:
 ```
 
 A stack with an agent in every pane:
-**[Claude and Codex in three stacked panes at once](https://www.youtube.com/watch?v=REPLACE-WITH-VIDEO-ID-3)**.
+**[Claude and Codex in three stacked panes at once](https://www.youtube.com/watch?v=JWl5l-YswzI)**.
 
-<!-- Same placeholder as the "Video tutorials" table at the top — REPLACE-WITH-VIDEO-ID-3
+<!-- Same placeholder as the "Video tutorials" table at the top — JWl5l-YswzI
      is the
      same video and must be swapped in both places. A plain markdown link is the form to
      use: github.com does not play inline video in a README, and this file is injected
