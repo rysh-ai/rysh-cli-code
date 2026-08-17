@@ -16,8 +16,9 @@ the shared one.
 ## Video tutorials
 
 Five narrated, subtitled walkthroughs of what rysh actually does, in order —
-**each one assumes the previous**. Press play below without leaving the page, or
-open any of them on YouTube for chapters and captions. The first four are
+**each one assumes the previous**. Press play on any of them without leaving
+the page, or open them on YouTube for chapters and captions. Collapse the ones
+you have already watched with the triangle beside each title. The first four are
 recorded against the build the [install](#install) line gives you, so every
 command in them is one you can type.
 
@@ -34,7 +35,7 @@ sessions.
 
 </details>
 
-<details>
+<details open>
 <summary><b>2 — Stop the session, start it again — the agents are still there</b> · 2:44</summary>
 
 <video src="https://github.com/user-attachments/assets/41dc48e5-5c63-4185-ba6a-19cb6a96783e" controls muted></video>
@@ -47,7 +48,7 @@ unprompted and answer with the codeword they were told before it.
 
 </details>
 
-<details>
+<details open>
 <summary><b>3 — Claude and Codex in three stacked panes at once</b> · 2:07</summary>
 
 <video src="https://github.com/user-attachments/assets/2939ab4f-35c6-4a92-af4a-8564fdab4f23" controls muted></video>
@@ -59,7 +60,7 @@ to move around a stack, a task each, three files written in parallel.
 
 </details>
 
-<details>
+<details open>
 <summary><b>4 — A fleet that talks to itself, on a shared board</b> · 2:29</summary>
 
 <video src="https://github.com/user-attachments/assets/6523e041-90e1-422e-9992-422d46180020" controls muted></video>
@@ -74,7 +75,7 @@ no backend, no build step.
 
 </details>
 
-<details>
+<details open>
 <summary><b>5 — Graph engineering — designing the shape of a fleet</b> · 4:00</summary>
 
 <video src="https://github.com/user-attachments/assets/5d42927b-f6c6-4149-9a88-77742163da3c" controls muted></video>
