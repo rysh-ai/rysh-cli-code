@@ -16,39 +16,79 @@ the shared one.
 ## Video tutorials
 
 Five narrated, subtitled walkthroughs of what rysh actually does, in order —
-**each one assumes the previous**. The first four are recorded against the build
-the [install](#install) line below gives you, so every command in them is one you
-can type.
+**each one assumes the previous**. Press play below without leaving the page, or
+open any of them on YouTube for chapters and captions. The first four are
+recorded against the build the [install](#install) line gives you, so every
+command in them is one you can type.
 
-| # | Video | What it teaches |
-| --- | --- | --- |
-| 1 | **[Install, and your first tabs, lanes and stacked panes](https://www.youtube.com/watch?v=1k0nEMBtY04)** | `go install`, a first session, a tab, a second lane, a stack of three panes — then `##claude` in each pane of that stack, so one window holds three independent Claude sessions |
-| 2 | **[Stop the session, start it again — the agents are still there](https://www.youtube.com/watch?v=PjpiuyXCgpA)** | Why a session is a daemon and not a terminal. Claude and Codex are each told a codeword, the session is stopped *outright*, and after the restart both resume unprompted and answer with the codeword they were told before it |
-| 3 | **[Claude and Codex in three stacked panes at once](https://www.youtube.com/watch?v=JWl5l-YswzI)** | Running more than one agent, and more than one vendor, side by side: `Ctrl+S` and a digit to move around a stack, a task each, three files written in parallel |
-| 4 | **[A fleet that talks to itself, on a shared board](https://www.youtube.com/watch?v=GwZZeZ1LEcw)** | `##board open`, `rysh ansa prompt`, and agents driving *each other*: `roadmap` (Claude) sets the goal, `fleet-manager` (Codex) splits it into work orders, two workers build in parallel, and the manager sends a correction back to a worker before signing off. They ship a browser todo manager — HTML, CSS and JavaScript, no backend, no build step |
-| 5 | **[Graph engineering — designing the shape of a fleet](https://www.youtube.com/watch?v=70cb15gaWtI)** | The deep end: why an agent org chart is a graph, what the edges mean, and what changes when you remove one. Orders travel *down* as messages, results come *up* on the board, and two workers with no edge between them give independent verdicts |
+<details open>
+<summary><b>1 — Install, and your first tabs, lanes and stacked panes</b> · 1:29</summary>
+
+<video src="https://github.com/user-attachments/assets/bbb99804-2516-46c5-aede-4d5bb0668aa1" controls muted></video>
+
+`go install`, a first session, a tab, a second lane, a stack of three panes — then
+`##claude` in each pane of that stack, so one window holds three independent Claude
+sessions.
+
+[Watch on YouTube](https://www.youtube.com/watch?v=1k0nEMBtY04) — chapters and captions are there.
+
+</details>
+
+<details>
+<summary><b>2 — Stop the session, start it again — the agents are still there</b> · 2:44</summary>
+
+<video src="https://github.com/user-attachments/assets/41dc48e5-5c63-4185-ba6a-19cb6a96783e" controls muted></video>
+
+Why a session is a daemon and not a terminal. Claude and Codex are each told a
+codeword, the session is stopped *outright*, and after the restart both resume
+unprompted and answer with the codeword they were told before it.
+
+[Watch on YouTube](https://www.youtube.com/watch?v=PjpiuyXCgpA) — chapters and captions are there.
+
+</details>
+
+<details>
+<summary><b>3 — Claude and Codex in three stacked panes at once</b> · 2:07</summary>
+
+<video src="https://github.com/user-attachments/assets/2939ab4f-35c6-4a92-af4a-8564fdab4f23" controls muted></video>
+
+More than one agent, and more than one vendor, side by side: `Ctrl+S` and a digit
+to move around a stack, a task each, three files written in parallel.
+
+[Watch on YouTube](https://www.youtube.com/watch?v=JWl5l-YswzI) — chapters and captions are there.
+
+</details>
+
+<details>
+<summary><b>4 — A fleet that talks to itself, on a shared board</b> · 2:29</summary>
+
+<video src="https://github.com/user-attachments/assets/6523e041-90e1-422e-9992-422d46180020" controls muted></video>
+
+`##board open`, `rysh ansa prompt`, and agents driving *each other*: `roadmap`
+(Claude) sets the goal, `fleet-manager` (Codex) splits it into work orders, two
+workers build in parallel, and the manager sends a correction back to a worker
+before signing off. They ship a browser todo manager — HTML, CSS and JavaScript,
+no backend, no build step.
+
+[Watch on YouTube](https://www.youtube.com/watch?v=GwZZeZ1LEcw) — chapters and captions are there.
+
+</details>
+
+<details>
+<summary><b>5 — Graph engineering — designing the shape of a fleet</b> · 4:00</summary>
+
+<video src="https://github.com/user-attachments/assets/5d42927b-f6c6-4149-9a88-77742163da3c" controls muted></video>
+
+The deep end: why an agent org chart is a graph, what the edges mean, and what
+changes when you remove one. Orders travel *down* as messages, results come *up*
+on the board, and two workers with no edge between them give independent verdicts.
+
+[Watch on YouTube](https://www.youtube.com/watch?v=70cb15gaWtI) — chapters and captions are there.
+
+</details>
 
 Start at 1 even if you have used tmux or Zellij for years — the panes look
 familiar and the session model underneath them does not, which is video 2.
-
-<!-- The five links above are live and public (verified via YouTube's oembed endpoint,
-     2026-08-17: all five returned 200 with matching titles). They are watch URLs, not
-     studio.youtube.com URLs — a Studio link is the upload console and opens for nobody
-     but the channel owner.
-
-     Sources. Videos 1-4: video-tutorials/demos/readme-quickstart/ in the private
-     monorepo — a tape and a narration script per demo, make-demo.sh to rebuild, and
-     out/ holding each master plus a .srt attached to the upload as the caption track.
-     Video 5 is a different pipeline, marketing/assets/videos/graph-engineering/, and
-     is bound by new_roadmap/designs/024-investor-claims.md: read that before editing
-     its row above. Two constraints from it that bear on this page — the ceo/manager/
-     worker driver is in-house tooling on shipped primitives and not a shipped
-     orchestrator, and no agent count is a capability claim. The row above is written
-     to state neither.
-
-     Video 5 was also filmed with a local build rather than the install line, so it is
-     the one row that must not be described as "recorded against the build you get" —
-     hence the wording of the paragraph above it. -->
 
 ## Secrets stay on your machine
 
