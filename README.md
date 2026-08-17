@@ -13,6 +13,44 @@ This repository holds the CLI itself. It depends on
 Makefile, the Go workspace, and CI, and wires this module to a local checkout of
 the shared one.
 
+## Video tutorials
+
+Five narrated, subtitled walkthroughs of what rysh actually does, in order —
+**each one assumes the previous**. The first four are recorded against the build
+the [install](#install) line below gives you, so every command in them is one you
+can type.
+
+| # | Video | What it teaches |
+| --- | --- | --- |
+| 1 | **[Install, and your first tabs, lanes and stacked panes](https://www.youtube.com/watch?v=REPLACE-WITH-VIDEO-ID-1)** | `go install`, a first session, a tab, a second lane, a stack of three panes — then `##claude` in each pane of that stack, so one window holds three independent Claude sessions |
+| 2 | **[Stop the session, start it again — the agents are still there](https://www.youtube.com/watch?v=REPLACE-WITH-VIDEO-ID-2)** | Why a session is a daemon and not a terminal. Claude and Codex are each told a codeword, the session is stopped *outright*, and after the restart both resume unprompted and answer with the codeword they were told before it |
+| 3 | **[Claude and Codex in three stacked panes at once](https://www.youtube.com/watch?v=REPLACE-WITH-VIDEO-ID-3)** | Running more than one agent, and more than one vendor, side by side: `Ctrl+S` and a digit to move around a stack, a task each, three files written in parallel |
+| 4 | **[A fleet that talks to itself, on a shared board](https://www.youtube.com/watch?v=REPLACE-WITH-VIDEO-ID-4)** | `##board open`, `rysh ansa prompt`, and agents driving *each other*: `roadmap` (Claude) sets the goal, `fleet-manager` (Codex) splits it into work orders, two workers build in parallel, and the manager sends a correction back to a worker before signing off. They ship a browser todo manager — HTML, CSS and JavaScript, no backend, no build step |
+| 5 | **[Graph engineering — designing the shape of a fleet](https://www.youtube.com/watch?v=REPLACE-WITH-VIDEO-ID-5)** | The deep end: why an agent org chart is a graph, what the edges mean, and what changes when you remove one. Orders travel *down* as messages, results come *up* on the board, and two workers with no edge between them give independent verdicts |
+
+Start at 1 even if you have used tmux or Zellij for years — the panes look
+familiar and the session model underneath them does not, which is video 2.
+
+<!-- THE FIVE URLS ABOVE ARE PLACEHOLDERS and ship as dead links if left alone.
+     scripts/export-oss.sh injects this file into the public rysh-ai/rysh-cli-code repo
+     verbatim, so each REPLACE-WITH-VIDEO-ID-n must be swapped for a real YouTube id
+     before an export runs. That is the same failure the two blocks further down are
+     still empty to avoid.
+
+     Sources. Videos 1-4: video-tutorials/demos/readme-quickstart/ in the private
+     monorepo — a tape and a narration script per demo, make-demo.sh to rebuild, and
+     out/ holding each master plus a .srt to attach as the YouTube caption track.
+     Video 5 is a different pipeline, marketing/assets/videos/graph-engineering/, and
+     is bound by new_roadmap/designs/024-investor-claims.md: read that before editing
+     its row above. Two constraints from it that bear on this page — the ceo/manager/
+     worker driver is in-house tooling on shipped primitives and not a shipped
+     orchestrator, and no agent count is a capability claim. The row above is written
+     to state neither.
+
+     Video 5 was also filmed with a local build rather than the install line, so it is
+     the one row that must not be described as "recorded against the build you get" —
+     hence the wording of the paragraph above it. -->
+
 ## Secrets stay on your machine
 
 <!-- HOSTING DECISION PENDING — DO NOT replace this block with an <img> until a URL is settled.
@@ -39,10 +77,10 @@ Two binaries exist and they are **not interchangeable**:
 | | this repository | the prebuilt distribution |
 | --- | --- | --- |
 | binary name | `rysh` | `ry` |
-| how you get it | `go install` | Homebrew, curl, APT, RPM |
+| how you get it | `go install`, or the installer below | its own channels, not documented here |
 
-The names differ so that one machine can carry both. **Every command below
-installs exactly one of them**, and a script, alias or doc written for one does
+The names differ so that one machine can carry both. **Every install command in
+this README installs `rysh`**, and a script, alias or doc written for one does
 not run against the other — which is the whole reason the names differ. Check
 what you have with `rysh version` or `ry version`.
 
@@ -60,28 +98,51 @@ go install github.com/rysh-ai/rysh-cli-code/cmd/rysh@latest
 The binary lands in `$(go env GOPATH)/bin` as `rysh`. Requires **Go 1.25.3 or
 newer** — the floor declared in this module's `go.mod`.
 
-<!-- WITHDRAWN 2026-08-16, pending an E3 ruling — do not restore without one.
-     A prebuilt-download block stood here: this repository's own GitHub Releases carry
-     tarballs and Linux packages built from this source, all named `rysh`. It was verified
-     end to end (downloaded via the releases/latest alias and RUN: `rysh 0.2.7`), and it is
-     the only prebuilt path that installs the OPEN-SOURCE binary rather than `ry`.
-     It is withdrawn anyway. designs/024-investor-claims.md, row "The open-source build is
-     current", carries guard (1): never point anyone at the GitHub Releases page, which it
-     records as frozen at v0.1.4. That premise is now false — real release objects v0.2.6
-     and v0.2.7 exist with full asset sets — but only E3 amends 024, and until it does the
-     guard stands even though its premise does not. A guard we route around because we
-     believe it is stale is not a guard. Restore this block when 024 says so. -->
+**The open-source build, prebuilt:**
 
-**The prebuilt distribution — installs `ry`, not `rysh`.** This is the packaged
-product, and it is the fastest way to get a working install. It is a separate
-distribution with its own channels; nothing in it is produced by this repository,
-so `ry --help` describing a command is not evidence about the source here. Use it
-if you want the packaged product; use `go install` above if you want the build
-whose source you are reading.
+```sh
+curl -fsSL https://packages.rysh.ai/install-rysh.sh | sh
+```
+
+Installs `rysh` from this repository's own releases — the Apache-2.0 binary, not
+`ry`. It resolves the newest release at run time; set `RYSH_VERSION` to pin one
+instead, or `RYSH_INSTALL_DIR` to choose where it lands.
+
+<!-- RESTORED 2026-08-16 by founder ruling, WITHOUT an amendment to 024 — read this
+     before citing either document, because they disagree on purpose.
+
+     This block was withdrawn earlier today against designs/024-investor-claims.md,
+     row "The open-source build is current", guard (1): "never point anyone at the
+     GitHub Releases page", recorded there as frozen at v0.1.4.
+
+     The premise is measurably false as of 2026-08-16: rysh-cli-code carries real
+     release objects v0.2.6, v0.2.7 and v0.2.9, ten assets each; /releases/latest
+     resolves to v0.2.9; the tags API serves v0.2.9. The cause of the flip is known —
+     the guard was written when the export published TAGS WITHOUT RELEASE OBJECTS,
+     and the OSS release workflow now publishes both.
+
+     The founder was shown that measurement, asked to amend guard (1), and ruled to
+     add this block WITHOUT amending it. So: 024 guard (1) STILL STANDS, UNAMENDED,
+     and this block is a knowing exception to it — not evidence that the guard was
+     satisfied, retired, or quietly overtaken. Only E3 amends 024.
+
+     Guards (2) and (3) of that row are untouched and still bind: the public tree is
+     an export run by hand, not a mirror (E-2 is open), and nothing here implies
+     development happens in the open.
+
+     One narrowing that is true but was NOT the basis of the ruling: this points at
+     packages.rysh.ai/install-rysh.sh, and the installer resolves the release at run
+     time, so no version can go stale in this file the way a Releases link or a
+     "latest release" badge can. -->
+
+**The prebuilt distribution — installs `ry`, not `rysh`.** It is the packaged
+product and a separate distribution; nothing in it is produced by this repository,
+so `ry --help` describing a command is not evidence about the source here. Use
+`go install` above if you want the build whose source you are reading.
 
 Its install commands are deliberately not reproduced here: this README documents
-the open-source build. The prebuilt distribution has its own channels — Homebrew,
-a curl installer, APT and RPM — and its own documentation.
+the open-source build. The prebuilt distribution has its own channels and its own
+documentation.
 
 ### Windows
 
@@ -200,12 +261,15 @@ Look at what you built, and move things around:
 ##tab name build          ##lane name left      ##pane name builder
 ```
 
-<!-- VIDEO PENDING — the grid. A public URL drops in here as a plain markdown link;
-     github.com does not play inline video in a README, so a link (or a GIF served from
-     a public URL) are the only two forms that work. DO NOT commit the file: this README
-     is injected into a PUBLIC repo by scripts/export-oss.sh, which ships prose only and
-     no binary assets, so a relative path cannot resolve. A guessed URL renders as a dead
-     link, which is worse than this block. The founder is providing the recording. -->
+A stack with an agent in every pane:
+**[Claude and Codex in three stacked panes at once](https://www.youtube.com/watch?v=REPLACE-WITH-VIDEO-ID-3)**.
+
+<!-- Same placeholder as the "Video tutorials" table at the top — REPLACE-WITH-VIDEO-ID-3
+     is the
+     same video and must be swapped in both places. A plain markdown link is the form to
+     use: github.com does not play inline video in a README, and this file is injected
+     into a PUBLIC repo by scripts/export-oss.sh, which ships prose only and no binary
+     assets, so a committed file or a relative path cannot resolve here. -->
 
 ### 3. The agents board, fleets, and a fleet's own board
 
