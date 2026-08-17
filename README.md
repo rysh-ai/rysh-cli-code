@@ -16,12 +16,12 @@ the shared one.
 ## Video tutorials
 
 Five narrated, subtitled walkthroughs of what rysh actually does, in order —
-**each one assumes the previous**. Click a title to open that video and play it
-here on this page — nothing leaves GitHub. The first four are recorded against
-the build the [install](#install) line gives you, so every command in them is one
-you can type.
+**each one assumes the previous**. Every player below is live on this page —
+press play, nothing leaves GitHub. Fold a video away with the triangle beside its
+title once you have watched it. The first four are recorded against the build the
+[install](#install) line gives you, so every command in them is one you can type.
 
-<details>
+<details open>
 <summary><b>1 — Install, and your first tabs, lanes and stacked panes</b> · 1:29<br>
 <img alt="tutorial 1 of 5" width="640" src="https://github.com/user-attachments/assets/4e9f8dad-188e-4acd-97e6-ddf1c15f64cf"></summary>
 
@@ -33,7 +33,7 @@ sessions.
 
 </details>
 
-<details>
+<details open>
 <summary><b>2 — Stop the session, start it again — the agents are still there</b> · 2:44<br>
 <img alt="tutorial 2 of 5" width="640" src="https://github.com/user-attachments/assets/625dc27f-efe3-41e8-bb6e-86162f2c35fd"></summary>
 
@@ -45,7 +45,7 @@ unprompted and answer with the codeword they were told before it.
 
 </details>
 
-<details>
+<details open>
 <summary><b>3 — Claude and Codex in three stacked panes at once</b> · 2:07<br>
 <img alt="tutorial 3 of 5" width="640" src="https://github.com/user-attachments/assets/3a1edb6e-01ca-432d-95f1-e48de3c6a013"></summary>
 
@@ -56,7 +56,7 @@ to move around a stack, a task each, three files written in parallel.
 
 </details>
 
-<details>
+<details open>
 <summary><b>4 — A fleet that talks to itself, on a shared board</b> · 2:29<br>
 <img alt="tutorial 4 of 5" width="640" src="https://github.com/user-attachments/assets/6d7fc0e9-a55e-4dd8-b834-0e583e75e573"></summary>
 
@@ -70,7 +70,7 @@ no backend, no build step.
 
 </details>
 
-<details>
+<details open>
 <summary><b>5 — Graph engineering — designing the shape of a fleet</b> · 4:00<br>
 <img alt="tutorial 5 of 5" width="640" src="https://github.com/user-attachments/assets/c812b991-b4e3-41cd-9766-e5bce1190cac"></summary>
 
