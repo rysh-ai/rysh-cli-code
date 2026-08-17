@@ -23,7 +23,7 @@ command in them is one you can type.
 
 <details>
 <summary><b>1 — Install, and your first tabs, lanes and stacked panes</b> · 1:29<br>
-<a href="https://www.youtube.com/watch?v=1k0nEMBtY04"><img alt="tutorial 1 of 5" width="640" src="https://img.youtube.com/vi/1k0nEMBtY04/maxresdefault.jpg"></a></summary>
+<a href="https://www.youtube.com/watch?v=1k0nEMBtY04"><img alt="tutorial 1 of 5" width="640" src="video-thumbs/01-first-panes.png"></a></summary>
 
 <video src="https://github.com/user-attachments/assets/bbb99804-2516-46c5-aede-4d5bb0668aa1" controls muted></video>
 
@@ -37,7 +37,7 @@ sessions.
 
 <details>
 <summary><b>2 — Stop the session, start it again — the agents are still there</b> · 2:44<br>
-<a href="https://www.youtube.com/watch?v=PjpiuyXCgpA"><img alt="tutorial 2 of 5" width="640" src="https://img.youtube.com/vi/70cb15gaWtI/maxresdefault.jpg"></a></summary>
+<a href="https://www.youtube.com/watch?v=PjpiuyXCgpA"><img alt="tutorial 2 of 5" width="640" src="video-thumbs/02-stop-start.png"></a></summary>
 
 <video src="https://github.com/user-attachments/assets/41dc48e5-5c63-4185-ba6a-19cb6a96783e" controls muted></video>
 
@@ -51,7 +51,7 @@ unprompted and answer with the codeword they were told before it.
 
 <details>
 <summary><b>3 — Claude and Codex in three stacked panes at once</b> · 2:07<br>
-<a href="https://www.youtube.com/watch?v=JWl5l-YswzI"><img alt="tutorial 3 of 5" width="640" src="https://img.youtube.com/vi/GwZZeZ1LEcw/maxresdefault.jpg"></a></summary>
+<a href="https://www.youtube.com/watch?v=JWl5l-YswzI"><img alt="tutorial 3 of 5" width="640" src="video-thumbs/03-claude-codex-parallel.png"></a></summary>
 
 <video src="https://github.com/user-attachments/assets/2939ab4f-35c6-4a92-af4a-8564fdab4f23" controls muted></video>
 
@@ -64,7 +64,7 @@ to move around a stack, a task each, three files written in parallel.
 
 <details>
 <summary><b>4 — A fleet that talks to itself, on a shared board</b> · 2:29<br>
-<a href="https://www.youtube.com/watch?v=GwZZeZ1LEcw"><img alt="tutorial 4 of 5" width="640" src="https://img.youtube.com/vi/JWl5l-YswzI/maxresdefault.jpg"></a></summary>
+<a href="https://www.youtube.com/watch?v=GwZZeZ1LEcw"><img alt="tutorial 4 of 5" width="640" src="video-thumbs/04-fleet-board.png"></a></summary>
 
 <video src="https://github.com/user-attachments/assets/6523e041-90e1-422e-9992-422d46180020" controls muted></video>
 
@@ -80,7 +80,7 @@ no backend, no build step.
 
 <details>
 <summary><b>5 — Graph engineering — designing the shape of a fleet</b> · 4:00<br>
-<a href="https://www.youtube.com/watch?v=70cb15gaWtI"><img alt="tutorial 5 of 5" width="640" src="https://img.youtube.com/vi/PjpiuyXCgpA/maxresdefault.jpg"></a></summary>
+<a href="https://www.youtube.com/watch?v=70cb15gaWtI"><img alt="tutorial 5 of 5" width="640" src="video-thumbs/05-graph-engineering.png"></a></summary>
 
 <video src="https://github.com/user-attachments/assets/5d42927b-f6c6-4149-9a88-77742163da3c" controls muted></video>
 
@@ -307,13 +307,6 @@ Look at what you built, and move things around:
 
 A stack with an agent in every pane:
 **[Claude and Codex in three stacked panes at once](https://www.youtube.com/watch?v=JWl5l-YswzI)**.
-
-<!-- Same placeholder as the "Video tutorials" table at the top — JWl5l-YswzI
-     is the
-     same video and must be swapped in both places. A plain markdown link is the form to
-     use: github.com does not play inline video in a README, and this file is injected
-     into a PUBLIC repo by scripts/export-oss.sh, which ships prose only and no binary
-     assets, so a committed file or a relative path cannot resolve here. -->
 
 ### 3. The agents board, fleets, and a fleet's own board
 
