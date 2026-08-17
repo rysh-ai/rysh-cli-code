@@ -295,8 +295,8 @@ Look at what you built, and move things around:
 ##tab name build          ##lane name left      ##pane name builder
 ```
 
-A stack with an agent in every pane:
-**[Claude and Codex in three stacked panes at once](https://www.youtube.com/watch?v=JWl5l-YswzI)**.
+A stack with an agent in every pane is video 3 of the
+[tutorials](#video-tutorials) at the top of this page.
 
 ### 3. The agents board, fleets, and a fleet's own board
 
