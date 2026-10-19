@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/agentenv"
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
 )
 
@@ -86,6 +87,8 @@ func (c *ClaudeCLI) completeWithSystem(ctx context.Context, systemPrompt, prompt
 	args = append(args, prompt)
 
 	cmd := exec.CommandContext(ctx, c.command, args...)
+	// A daemon-side agent exec: the same scrub as a typed launch (agentenv).
+	cmd.Env = agentenv.Filter(os.Environ(), agentenv.Claude)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -169,4 +172,17 @@ func (s *sanitizedProvider) Name() string { return s.inner.Name() }
 
 func (s *sanitizedProvider) Complete(ctx context.Context, prompt string) (string, error) {
 	return s.inner.Complete(ctx, s.sanitize(prompt))
+}
+
+// ClaudeOneShot runs one prompt through the claude CLI with an explicit
+// system prompt and model, and returns its text answer. For the daemon's own
+// small judgements — the fleet's status scout (design 056) — that should run
+// on a cheap model under whatever credentials the CLI carries, never on an
+// agent's.
+func ClaudeOneShot(ctx context.Context, command, model, systemPrompt, prompt string) (string, error) {
+	if strings.TrimSpace(command) == "" {
+		command = "claude"
+	}
+	c := &ClaudeCLI{command: command, model: model}
+	return c.completeWithSystem(ctx, systemPrompt, prompt)
 }

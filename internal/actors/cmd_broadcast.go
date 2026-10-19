@@ -4,8 +4,6 @@ package actors
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -30,9 +28,24 @@ type cmdSelectors struct {
 	// program, so being able to say "only the ones at a shell" — or "only the
 	// ones running claude" — is the difference between a broadcast and a mess.
 	running string
+	// runningImplied records that `running` was not asked for but supplied by
+	// --capture. It changes nothing about the filtering; it is what lets the
+	// summary explain a skip the caller did not ask for.
+	runningImplied bool
 	// capture redirects each pane's output to a file instead of leaving it on
 	// the pane's screen, and reports where. See captureCommand.
 	capture bool
+}
+
+// cmdSkips counts the panes a broadcast resolved but refused to touch. Every
+// one of these is a pane the caller asked for and did not get, so the summary
+// reports each reason: a fan-out that quietly lands on fewer panes than it was
+// given is indistinguishable from one that worked.
+type cmdSkips struct {
+	shared   int
+	pipeline int
+	// busy is the count dropped by --running, whether asked for or implied.
+	busy int
 }
 
 // parseCmdArgs parses the arguments of `##cmd`:
@@ -106,6 +119,19 @@ func parseCmdArgs(args []string) (scope string, sel cmdSelectors, command string
 		scope = "panegroup"
 	case "ws":
 		scope = "workspace"
+	}
+
+	// A CAPTURED COMMAND ONLY MAKES SENSE AT A SHELL. The redirection is shell
+	// syntax: sent to a pane running claude (or vim, or a pager) it is not a
+	// command at all, it is typed input, and no capture file is ever written.
+	// Defaulting the filter here rather than trusting every caller to add
+	// `--running shell` is what stops a --capture fan-out from becoming a
+	// message to every agent in the scope — the failure that put 64 stray
+	// prompts into three claude panes. An explicit --running still wins, so
+	// `--running claude --capture` remains expressible for anyone who means it.
+	if sel.capture && sel.running == "" {
+		sel.running = "shell"
+		sel.runningImplied = true
 	}
 	return scope, sel, command, nil
 }
@@ -275,7 +301,7 @@ func anchorSnapshotToPane(snap *domain.WorkspaceSnapshot, paneID string) {
 // the active-entity default, resolution is anchored to that pane's tab/lane/group
 // rather than the (possibly stale) active-tab index. Empty for cross-workspace
 // broadcasts.
-func (w *WorkspaceActor) broadcastCmd(scope string, sel cmdSelectors, command, anchorPaneID string) (targets []string, skippedShared, skippedPipeline int, label string, err error) {
+func (w *WorkspaceActor) broadcastCmd(scope string, sel cmdSelectors, command, anchorPaneID string) (targets []string, skips cmdSkips, label string, err error) {
 	// LAYOUT ONLY, NO HISTORIES (`F-11`). This asks a purely STRUCTURAL question
 	// — collectScopePaneIDs reads pane ids, Sharing and PipelineEnabled, and
 	// filterPanesByProgram reads Program — and the full content snapshot of
@@ -288,13 +314,14 @@ func (w *WorkspaceActor) broadcastCmd(scope string, sel cmdSelectors, command, a
 	// the cheap snapshot carries it. That was the precondition the F-11 report
 	// demanded be confirmed before this line changed, and it is checked by
 	// TestRunningFilterSurvivesTheCheapSnapshot.
-	snap := w.collectSnapshot(true, true)
+	snap := w.collectSnapshot(true, true, "")
 	anchorSnapshotToPane(&snap, anchorPaneID)
 	ids, skippedShared, skippedPipeline, label, err := collectScopePaneIDs(&snap, scope, sel)
 	if err != nil {
-		return nil, 0, 0, "", err
+		return nil, cmdSkips{}, "", err
 	}
-	ids = filterPanesByProgram(&snap, ids, sel.running)
+	skips = cmdSkips{shared: skippedShared, pipeline: skippedPipeline}
+	ids, skips.busy = filterPanesByProgram(&snap, ids, sel.running)
 	if sel.capture {
 		ensureCaptureDir(w.baseDir())
 	}
@@ -305,16 +332,20 @@ func (w *WorkspaceActor) broadcastCmd(scope string, sel cmdSelectors, command, a
 		}
 		_ = w.pub.Send(msg.T("pane", id, "inbox"), &msg.MsgPaneExecShell{Command: sent})
 	}
-	return ids, skippedShared, skippedPipeline, label, nil
+	return ids, skips, label, nil
 }
 
-// filterPanesByProgram narrows ids to panes whose foreground program matches.
-// The empty filter matches everything; "shell" is spelled as the empty program,
-// which is what a pane at its prompt reports, so `--running shell` means "the
-// panes not busy with anything".
-func filterPanesByProgram(snap *domain.WorkspaceSnapshot, ids []string, want string) []string {
+// filterPanesByProgram narrows ids to panes whose foreground program matches,
+// and returns how many it dropped. The empty filter matches everything; "shell"
+// is spelled as the empty program, which is what a pane at its prompt reports,
+// so `--running shell` means "the panes not busy with anything".
+//
+// The count is returned rather than discarded because this filter is now
+// applied without being asked for (--capture implies --running shell). A pane
+// silently missing from a fan-out is the one outcome the caller cannot detect.
+func filterPanesByProgram(snap *domain.WorkspaceSnapshot, ids []string, want string) (kept []string, dropped int) {
 	if want == "" {
-		return ids
+		return ids, 0
 	}
 	if want == "shell" {
 		want = ""
@@ -331,56 +362,7 @@ func filterPanesByProgram(snap *domain.WorkspaceSnapshot, ids []string, want str
 			out = append(out, id)
 		}
 	}
-	return out
-}
-
-// captureCommand rewrites a command so its output lands in a file instead of
-// only on the pane's screen, and appends a sentinel line carrying the exit
-// status so a reader can tell "still running" from "finished, no output".
-//
-// Why a file at all: a pane's output is a rendered terminal, not a stream. Once
-// a full-screen program has drawn over it there is nothing to read back, and
-// even at a shell prompt the text is wrapped to the pane's width. The file is
-// the only faithful copy.
-//
-// The wait happens in the CALLER, deliberately. A ## command runs on the
-// workspace's mailbox goroutine, which every other pane's commands queue behind
-// — blocking it until N shells finish would freeze the session, which is
-// exactly the defect an audit of `##proxy check` found in this codebase.
-func captureCommand(baseDir, paneID, command string) string {
-	path := capturePath(baseDir, paneID)
-	// { … ; } groups without a subshell, so `cd` and exports behave as they
-	// would unredirected. $? is read immediately after, before anything else
-	// can overwrite it.
-	return fmt.Sprintf("mkdir -p %s && { %s ; } > %s 2>&1; echo \"%s$?\" >> %s",
-		filepath.Dir(path), command, path, captureSentinel, path)
-}
-
-// captureSentinel ends a captured run. The exit status follows it on the same
-// line.
-const captureSentinel = "__rysh_capture_done:"
-
-func capturePath(baseDir, paneID string) string {
-	return filepath.Join(baseDir, ".rysh", "captures", paneID+".out")
-}
-
-// ensureCaptureDir creates the capture directory and makes it invisible to git.
-//
-// Captures are transient output that lands inside the user's project, because
-// that is where rysh keeps its state. Without this they show up as untracked
-// files and ride along in the next `git add -A` — someone's build log committed
-// as source. A directory that ignores itself is the smallest fix that survives
-// being copied, moved or recreated.
-func ensureCaptureDir(baseDir string) {
-	dir := filepath.Join(baseDir, ".rysh", "captures")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return
-	}
-	ignore := filepath.Join(dir, ".gitignore")
-	if _, err := os.Stat(ignore); err == nil {
-		return
-	}
-	_ = os.WriteFile(ignore, []byte("# rysh capture output — transient\n*\n"), 0o600)
+	return out, len(ids) - len(out)
 }
 
 // resolveCmdWorkspace interprets the --ws selector against the session's
@@ -415,6 +397,14 @@ func (w *WorkspaceActor) resolveCmdWorkspace(arg string) (string, bool, error) {
 
 // handleCmdBroadcast implements `##cmd <scope> [selectors] <bash command>`.
 func (w *WorkspaceActor) handleCmdBroadcast(ctx actor.Context, out *strings.Builder, originPaneID string, args []string) {
+	// `capture` is a read, not a scope: it serves back what an earlier
+	// --capture wrote, without touching a pane. Intercepted before
+	// parseCmdArgs, which would reject it as an unknown scope.
+	if len(args) > 0 && strings.ToLower(args[0]) == "capture" {
+		w.handleCmdCapture(out, args[1:])
+		return
+	}
+
 	scope, sel, command, err := parseCmdArgs(args)
 	if err != nil {
 		w.failRysh("%v", err)
@@ -445,7 +435,7 @@ func (w *WorkspaceActor) handleCmdBroadcast(ctx actor.Context, out *strings.Buil
 	// Local (active) workspace. Anchor active-entity defaults to the originating
 	// pane so the command targets the tab/lane/group the user is actually in,
 	// not the (possibly stale) active tab.
-	targets, skippedShared, skippedPipeline, label, err := w.broadcastCmd(scope, sel, command, originPaneID)
+	targets, skips, label, err := w.broadcastCmd(scope, sel, command, originPaneID)
 	count := len(targets)
 	if err != nil {
 		w.failRysh("%v", err)
@@ -456,10 +446,20 @@ func (w *WorkspaceActor) handleCmdBroadcast(ctx actor.Context, out *strings.Buil
 		// The selector resolved but matched nothing, so the command ran
 		// nowhere. A fan-out that silently hits zero panes is the worst
 		// possible answer for a script: it looks like success.
-		w.failRysh("##cmd matched no panes in %s", label)
+		if sel.runningImplied && skips.busy > 0 {
+			// Naming the implied filter matters most here: the scope DID
+			// resolve panes, and they were dropped by a rule the caller never
+			// typed. Without this the answer reads as "your selector is wrong".
+			w.failRysh("##cmd matched no panes at a shell in %s: --capture targets "+
+				"only panes at a prompt (%d busy); pass --running to override", label, skips.busy)
+		} else {
+			w.failRysh("##cmd matched no panes in %s", label)
+		}
+		fmt.Fprintf(out, "\n[rysh] %v\n", w.ryshFail)
+		return
 	}
 	fmt.Fprintf(out, "\n[rysh] ##cmd: ran %q in %d pane(s) of %s", command, count, label)
-	if skip := skipNote(skippedShared, skippedPipeline); skip != "" {
+	if skip := skipNote(skips, sel); skip != "" {
 		fmt.Fprintf(out, " %s", skip)
 	}
 	fmt.Fprintf(out, "\n")
@@ -477,19 +477,32 @@ func (w *WorkspaceActor) handleCmdBroadcast(ctx actor.Context, out *strings.Buil
 }
 
 // skipNote formats the "(skipped …)" suffix for the ##cmd summary, listing only
-// the nonzero exclusion reasons.
-func skipNote(shared, pipeline int) string {
+// the nonzero exclusion reasons. sel supplies the wording for the --running
+// skip, which reads differently depending on whether the caller asked for it.
+func skipNote(s cmdSkips, sel cmdSelectors) string {
 	var parts []string
-	if shared > 0 {
-		parts = append(parts, fmt.Sprintf("%d shared", shared))
+	if s.shared > 0 {
+		parts = append(parts, fmt.Sprintf("%d shared", s.shared))
 	}
-	if pipeline > 0 {
-		parts = append(parts, fmt.Sprintf("%d pipeline", pipeline))
+	if s.pipeline > 0 {
+		parts = append(parts, fmt.Sprintf("%d pipeline", s.pipeline))
+	}
+	if s.busy > 0 {
+		switch {
+		case sel.running == "shell":
+			parts = append(parts, fmt.Sprintf("%d not at a shell", s.busy))
+		default:
+			parts = append(parts, fmt.Sprintf("%d not running %s", s.busy, sel.running))
+		}
 	}
 	if len(parts) == 0 {
 		return ""
 	}
-	return "(skipped " + strings.Join(parts, ", ") + " pane(s))"
+	note := "(skipped " + strings.Join(parts, ", ") + " pane(s))"
+	if s.busy > 0 && sel.runningImplied {
+		note += " — --capture targets only panes at a shell"
+	}
+	return note
 }
 
 // cmdUsage prints the usage block for ##cmd.
@@ -499,5 +512,7 @@ func (w *WorkspaceActor) cmdUsage(out *strings.Builder) {
 	fmt.Fprintf(out, "    selectors: --ws --tab --lane --pg --pane <id|name|index>\n")
 	fmt.Fprintf(out, "    filters:   --running <program|shell>   only panes running that program\n")
 	fmt.Fprintf(out, "    capture:   --capture                   each pane's output to a file (prints where)\n")
+	fmt.Fprintf(out, "                                           implies --running shell unless --running is given\n")
+	fmt.Fprintf(out, "    read back: ##cmd capture [<pane>]      list captures, or print one (touches no pane)\n")
 	fmt.Fprintf(out, "    examples:  ##cmd stack pwd   |   ##cmd tab --tab 2 git status   |   ##cmd ws --ws build make\n\n")
 }

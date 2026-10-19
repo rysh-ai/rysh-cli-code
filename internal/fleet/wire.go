@@ -63,6 +63,15 @@ const (
 	OpState        = "state"
 	OpMemberUpsert = "member-upsert"
 	OpMemberRemove = "member-remove"
+	// OpStatus is a member declaring its work (design 054). PaneID is the
+	// member; Name may be empty, meaning the pane's own fleet.
+	OpStatus = "status"
+	// OpWatch sets a fleet's check-in policy.
+	OpWatch = "watch"
+	// OpGoal sets or closes the fleet's goal or a member's (design 055).
+	OpGoal = "goal"
+	// OpGoalExec configures the fleet's goal executor.
+	OpGoalExec = "goal-exec"
 )
 
 // Update is a write against the registry.
@@ -74,13 +83,29 @@ type Update struct {
 	State  string `json:"state,omitempty"`  // OpState
 	Member Member `json:"member,omitempty"` // OpMemberUpsert
 	PaneID string `json:"pane_id,omitempty"`
+
+	Status   StatusUpdate `json:"status,omitempty"`    // OpStatus
+	Watch    Watch        `json:"watch,omitempty"`     // OpWatch
+	Goal     GoalUpdate   `json:"goal,omitempty"`      // OpGoal
+	GoalExec GoalExec     `json:"goal_exec,omitempty"` // OpGoalExec
+
+	// now is OpStatus's and OpGoal's clock, stamped by ServeUpdates on arrival. Unexported
+	// so it never crosses the wire: a declaration is timed by the ledger, not
+	// by the agent's own clock.
+	now int64
 }
 
 // UpdateReply reports what the registry did.
 type UpdateReply struct {
 	OK    bool   `json:"ok"`
 	Fleet *Fleet `json:"fleet,omitempty"`
-	Err   string `json:"err,omitempty"`
+	// Member is the member as stored after an OpStatus.
+	Member *Member `json:"member,omitempty"`
+	// AnsweredCheckin is the check-in cmd an OpStatus answered, if any.
+	AnsweredCheckin string `json:"answered_checkin,omitempty"`
+	// AnsweredGoalAsk is the goal executor's ask an OpStatus answered.
+	AnsweredGoalAsk string `json:"answered_goal_ask,omitempty"`
+	Err             string `json:"err,omitempty"`
 }
 
 // LivePanesFunc reports the panes that exist in the session right now.
@@ -134,8 +159,9 @@ func ServeQueries(nc *nats.Conn, r *Registry, reconciledAt func() int64) (*nats.
 }
 
 // ServeUpdates accepts registry writes. onChange is called after every accepted
-// update, so the caller can persist without this file knowing what a KV is.
-func ServeUpdates(nc *nats.Conn, r *Registry, onChange func(op string, f *Fleet, name string)) (*nats.Subscription, error) {
+// update, so the caller can persist — and, for a status, tell the board —
+// without this file knowing what a KV or a board is.
+func ServeUpdates(nc *nats.Conn, r *Registry, onChange func(u Update, reply UpdateReply)) (*nats.Subscription, error) {
 	if nc == nil || r == nil {
 		return nil, errors.New("fleet: ServeUpdates needs a connection and a registry")
 	}
@@ -145,13 +171,13 @@ func ServeUpdates(nc *nats.Conn, r *Registry, onChange func(op string, f *Fleet,
 			respondUpdate(m, UpdateReply{Err: "unreadable update: " + err.Error()})
 			return
 		}
+		u.now = time.Now().UnixMilli()
 		reply := apply(r, u)
 		if reply.OK && onChange != nil {
-			name := u.Name
-			if name == "" && reply.Fleet != nil {
-				name = reply.Fleet.Name
+			if u.Name == "" && reply.Fleet != nil {
+				u.Name = reply.Fleet.Name
 			}
-			onChange(u.Op, reply.Fleet, name)
+			onChange(u, reply)
 		}
 		respondUpdate(m, reply)
 	})
@@ -194,6 +220,35 @@ func apply(r *Registry, u Update) UpdateReply {
 			return UpdateReply{Err: fmt.Sprintf("fleet %q has no member with pane id %q", u.Name, u.PaneID)}
 		}
 		return UpdateReply{OK: true, Fleet: r.Get(u.Name)}
+
+	case OpStatus:
+		res, err := r.Declare(u.Name, u.PaneID, u.Status, u.now)
+		if err != nil {
+			return UpdateReply{Err: err.Error()}
+		}
+		return UpdateReply{OK: true, Fleet: r.Get(res.Fleet), Member: res.Member,
+			AnsweredCheckin: res.AnsweredCheckin, AnsweredGoalAsk: res.AnsweredGoalAsk}
+
+	case OpGoal:
+		f, err := r.SetGoal(u.Name, u.Goal, u.now)
+		if err != nil {
+			return UpdateReply{Err: err.Error()}
+		}
+		return UpdateReply{OK: true, Fleet: f}
+
+	case OpGoalExec:
+		f, err := r.SetGoalExec(u.Name, u.GoalExec)
+		if err != nil {
+			return UpdateReply{Err: err.Error()}
+		}
+		return UpdateReply{OK: true, Fleet: f}
+
+	case OpWatch:
+		f, err := r.SetWatch(u.Name, u.Watch)
+		if err != nil {
+			return UpdateReply{Err: err.Error()}
+		}
+		return UpdateReply{OK: true, Fleet: f}
 
 	default:
 		return UpdateReply{Err: fmt.Sprintf("unknown fleet update op %q", u.Op)}

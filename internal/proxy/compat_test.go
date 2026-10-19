@@ -227,3 +227,100 @@ func TestNoteGoverned_FlowsFromServeHTTP(t *testing.T) {
 		t.Error("a governed pane must never come due for a warning")
 	}
 }
+
+// TestIdentifyCLI_NativeInstallerClaude is F-15 at the decision function: the
+// kernel calls the native-installer claude by its version, and what the OS
+// still reports as "claude" — argv[0], darwin's unresolved exec path, Linux's
+// resolved versions/<v> layout — must be enough to find the profile.
+func TestIdentifyCLI_NativeInstallerClaude(t *testing.T) {
+	cases := []struct {
+		name, comm, exe string
+		argv            []string
+		want            string
+	}{
+		// Measured 2026-10-03 on darwin, claude 2.1.288, via kern.procargs2.
+		{"darwin native installer", "2.1.288", "/Users/u/.local/bin/claude",
+			[]string{"claude", "--session-id", "x"}, "claude"},
+		// Linux: /proc/<pid>/exe is resolved; argv[0] still says claude.
+		{"linux native installer", "2.1.288", "/home/u/.local/share/claude/versions/2.1.288",
+			[]string{"claude", "--print", "hi"}, "claude"},
+		// argv rewritten or unreadable: the install layout alone is enough.
+		{"layout only", "2.1.288", "/home/u/.local/share/claude/versions/2.1.288",
+			nil, "claude"},
+		{"plain comm", "claude", "", nil, "claude"},
+		{"absolute argv0", "codex", "", []string{"/opt/homebrew/bin/codex"}, "codex"},
+		{"npm claude under node", "node", "/usr/local/bin/node",
+			[]string{"node", "/usr/local/bin/claude", "--print"}, "claude"},
+		{"aider under python", "python3.12", "/usr/bin/python3.12",
+			[]string{"/usr/bin/python3.12", "/home/u/.local/bin/aider"}, "aider"},
+	}
+	for _, c := range cases {
+		got, ok := IdentifyCLI(c.comm, c.exe, c.argv)
+		if !ok || got != c.want {
+			t.Errorf("%s: IdentifyCLI(%q, %q, %q) = %q, %v; want %q, true",
+				c.name, c.comm, c.exe, c.argv, got, ok, c.want)
+		}
+	}
+}
+
+// TestIdentifyCLI_RefusesUnknownPrograms is the F-13 half: a program with no
+// profile is not a CLI, and an interpreter running something else is not one
+// either.
+func TestIdentifyCLI_RefusesUnknownPrograms(t *testing.T) {
+	cases := []struct {
+		comm, exe string
+		argv      []string
+	}{
+		{"sleep", "/bin/sleep", []string{"sleep", "120"}},
+		{"make", "/usr/bin/make", []string{"make", "test"}},
+		{"node", "/usr/local/bin/node", []string{"node", "server.js"}},
+		// argv[1] is only consulted behind an interpreter: `vim claude` edits
+		// a file, it does not run the CLI.
+		{"vim", "/usr/bin/vim", []string{"vim", "claude"}},
+		// A versions/ directory that is not a known CLI's.
+		{"1.2.3", "/opt/tool/versions/1.2.3", []string{"/opt/tool/versions/1.2.3"}},
+		{"", "", nil},
+	}
+	for _, c := range cases {
+		if got, ok := IdentifyCLI(c.comm, c.exe, c.argv); ok {
+			t.Errorf("IdentifyCLI(%q, %q, %q) = %q, true; want not a known CLI",
+				c.comm, c.exe, c.argv, got)
+		}
+	}
+}
+
+// TestGovWatch_IgnoresAProgramThatIsNotAKnownCLI is F-13 at the watch: design
+// 022 §4.4 scopes the detector to a known agent CLI, so a long-running build or
+// `sleep` must never become "unproxied?", never be warned about, and so never
+// be stopped by strict.
+func TestGovWatch_IgnoresAProgramThatIsNotAKnownCLI(t *testing.T) {
+	g := newGovWatch()
+	t0 := time.Now()
+	g.noteForeground("p1", "sleep", t0)
+	if bin, ok := g.dueWarning("p1", t0.Add(time.Hour)); ok {
+		t.Fatalf("dueWarning = %q, true for a program with no CLI profile — "+
+			"under strict that is a SIGTERM to a build or an editor", bin)
+	}
+	if got := g.state("p1", t0.Add(time.Hour)); got != "idle" {
+		t.Errorf("state = %q, want idle", got)
+	}
+
+	// An unknown program replacing a watched CLI ends that CLI's watch.
+	g.noteForeground("p2", "claude", t0)
+	g.noteForeground("p2", "make", t0.Add(time.Second))
+	if bin, ok := g.dueWarning("p2", t0.Add(time.Hour)); ok {
+		t.Fatalf("dueWarning = %q, true after the CLI gave way to make", bin)
+	}
+}
+
+// TestGovWatch_NamesTheCLIByItsProfile: a CLI reported by path is warned about
+// by the name `##proxy check` takes.
+func TestGovWatch_NamesTheCLIByItsProfile(t *testing.T) {
+	g := newGovWatch()
+	t0 := time.Now()
+	g.noteForeground("p1", "/opt/homebrew/bin/codex", t0)
+	bin, ok := g.dueWarning("p1", t0.Add(GraceWindow+time.Second))
+	if !ok || bin != "codex" {
+		t.Fatalf("dueWarning = %q, %v; want codex, true", bin, ok)
+	}
+}

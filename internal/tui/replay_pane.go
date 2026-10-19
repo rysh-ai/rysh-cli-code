@@ -13,7 +13,8 @@ import (
 // is the recorded playback; while it is focused, the TUI claims a small set of
 // keys as playback controls and publishes MsgReplayControl to the workspace,
 // which drives the controlled player. The live position badge ("REPLAY
-// 01:23/04:56 ×2") arrives through the normal pane status path
+// ▕███░░░░░░░░░▏ 01:23/04:56 · 14:32:07 ×2" — scrub bar, offset, wall-clock
+// time of the current frame, speed) arrives through the normal pane status path
 // (MsgPaneStatusUpdate → PaneSnapshot.Status → paneMetaText), so rendering
 // needs no replay-specific code.
 

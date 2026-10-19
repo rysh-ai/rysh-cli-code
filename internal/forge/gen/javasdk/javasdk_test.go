@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rysh-ai/rysh-cli-shared/forge/ir"
 	"github.com/rysh-ai/rysh-cli-code/internal/forge/gen"
-	"github.com/rysh-ai/rysh-cli-code/internal/forge/ir"
 )
 
 func sampleAPI() *ir.API {
@@ -106,17 +106,27 @@ func TestJavaGenerateDeterministic(t *testing.T) {
 	}
 }
 
-// TestJavaEmittedCompiles compiles the emitted sources with javac when it is
-// available; otherwise it is skipped. This catches syntax errors in the
-// generated Client/Json/model code.
+// TestJavaEmittedCompiles compiles the emitted sources with javac when a javac
+// new enough to do so is available; otherwise it is skipped with the reason.
+// This catches syntax errors in the generated Client/Json/model code.
+//
+// "New enough" is not decoration. The emitted client needs Java javaRelease
+// (see javasdk.go); an older javac fails on missing java.net.http rather than
+// on anything the generator did. This test used to check only that javac
+// EXISTED, so on a Java 8 machine it went red for a toolchain reason and
+// stayed red — F-17. See javac_test.go for the discovery and version gate.
 func TestJavaEmittedCompiles(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping javac compile in -short mode")
 	}
-	javac, err := exec.LookPath("javac")
+	javac, version, err := findJavac(javaRelease)
 	if err != nil {
-		t.Skip("javac not found; skipping emitted-Java compile")
+		t.Skipf("no javac found; skipping emitted-Java compile (needs Java >= %d): %v", javaRelease, err)
 	}
+	if ok, reason := javacUsable(version, javaRelease); !ok {
+		t.Skipf("%s (using %s)", reason, javac)
+	}
+	t.Logf("compiling emitted Java with %s (Java %d)", javac, version)
 	fs, err := (&generator{}).Generate(sampleAPI(), gen.Options{})
 	if err != nil {
 		t.Fatalf("Generate: %v", err)

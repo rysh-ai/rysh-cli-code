@@ -113,7 +113,7 @@ func stripANSITest(s string) string {
 // TestScrollbackKeepsFullWidthAfterNarrowing pins the fix for the truncation
 // reported on 2026-08-14: a command echoed at a wide PTY came back from the
 // web UI with characters missing out of the middle —
-// `…/marketing/assets/videos/…` rendered as `…/marketing/a` + `deos/…`.
+// a long `…/assets/videos/…` path rendered as `…/a` + `deos/…`.
 //
 // A pane sizes its single PTY to the SMALLEST attached viewport, so the grid
 // narrows with no user gesture the moment a second front-end attaches (a TUI
@@ -125,7 +125,7 @@ func stripANSITest(s string) string {
 // looking intact.
 func TestScrollbackKeepsFullWidthAfterNarrowing(t *testing.T) {
 	const wide, narrow = 78, 70
-	const long = "bash-3.2$ scp_dev_peralabs_to /Users/halilagin/github/rysh/marketing/assets/videos/investor-demo.mp4 /tmp/"
+	const long = "bash-3.2$ scp_dev_staging_to /home/someuser/src/project/build/assets/videos/product-demo-final22.mp4 /tmp/"
 
 	vt := New(4, wide)
 	if _, err := vt.Write([]byte(long + "\r\n")); err != nil {

@@ -37,12 +37,12 @@ func TestRunningFilterSurvivesTheCheapSnapshot(t *testing.T) {
 		}},
 	}}}
 
-	got := filterPanesByProgram(&snap, []string{"p-claude", "p-shell"}, "claude")
+	got, _ := filterPanesByProgram(&snap, []string{"p-claude", "p-shell"}, "claude")
 	if len(got) != 1 || got[0] != "p-claude" {
 		t.Fatalf("--running claude selected %v; Program must survive the layout-only "+
 			"snapshot or the filter matches nothing", got)
 	}
-	if got := filterPanesByProgram(&snap, []string{"p-claude", "p-shell"}, "shell"); len(got) != 1 {
+	if got, _ := filterPanesByProgram(&snap, []string{"p-claude", "p-shell"}, "shell"); len(got) != 1 {
 		t.Fatalf("--running shell selected %v, want the bare shell", got)
 	}
 }

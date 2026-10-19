@@ -3,6 +3,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -75,6 +76,20 @@ type boardViewState struct {
 	// around (design 027 §5.4).
 	sendStatus string
 	sendOK     bool
+
+	// view is which messages the pane lists (design 051): status (the agents'
+	// own posts — the default), prompt (commands agents send each other, with
+	// their acks), or all. The zero value is the default, status. s / p / a
+	// switch it; f shows the board as a flow diagram instead (design 052).
+	view board.View
+}
+
+// boardView is st's view with the default applied.
+func (st *boardViewState) boardView() board.View {
+	if st == nil || st.view == "" {
+		return board.DefaultView
+	}
+	return st.view
 }
 
 // boardEventMsg carries one decoded board message from the subscription
@@ -376,6 +391,20 @@ func (m *Model) updateBoardPaneInput(msg tea.KeyMsg) (bool, tea.Cmd) {
 	}
 
 	switch msg.String() {
+	case "s", "p", "a", "f", "t":
+		// Which messages to list (design 051): status / prompt / all — or
+		// the flow diagram of the whole board (design 052), or the team table
+		// with the dependency tree (t). Only here, outside composing, where
+		// these are commands, not letters.
+		v, _ := board.ParseView(msg.String())
+		if st.boardView() != v {
+			st.view = v
+			st.scrollOffset = 0 // a different stream: start at its live tail
+			if v == board.ViewTeam {
+				st.scrollOffset = 1 << 30 // clamped on render to the table's top
+			}
+		}
+		return true, nil
 	case "i", "enter":
 		// Start composing a prompt for the board claude.
 		st.composing = true
@@ -398,9 +427,114 @@ func (m *Model) updateBoardPaneInput(msg tea.KeyMsg) (bool, tea.Cmd) {
 	case "end", "G":
 		st.scrollOffset = 0
 		return true, nil
+	case "y":
+		// `##board copy 1`: the newest message. Only here, outside composing:
+		// while typing to the board claude, y / Y / o are letters (the
+		// composing branch above returns first).
+		return true, m.copyBoardFromPane(snap.ID, false)
+	case "Y":
+		// Copy the messages in the visible window.
+		return true, m.copyBoardFromPane(snap.ID, true)
+	case "o":
+		// `##board output <visible window> html`, opened.
+		return true, m.outputBoardFromPane(snap.ID)
 	}
 	return false, nil
 }
+
+// boardPaneItems returns the pane's board as items, and — when visibleOnly —
+// only the messages with at least one row in the window the pane last drew.
+// It reads the TUI's copy of the board, the thing the user is looking at, and
+// goes through the shared item model (board.FlattenWhere) like every other
+// surface.
+func (m *Model) boardPaneItems(paneID string, visibleOnly bool) (items []board.Item, all int, boardID string) {
+	boardID = m.boardIDForPane(paneID)
+	full := board.Answer(m.boardStore(boardID), board.Query{})
+	// y copies the newest message OF THE VIEW the user is looking at.
+	reply := *board.FilterReply(&full, m.boardViewFor(paneID).boardView())
+	all = len(board.Flatten(&reply))
+	if !visibleOnly {
+		return board.Flatten(&reply), all, boardID
+	}
+	onScreen := map[*msgpkg.MsgBoardPost]bool{}
+	if pane := m.findPaneInSnapshot(paneID); pane != nil {
+		for _, r := range m.paneRects {
+			if r.paneID != paneID {
+				continue
+			}
+			lay := m.boardPanelLayout(*pane, r.w+2, r.h)
+			for _, ref := range lay.refs {
+				if ref.post != nil {
+					onScreen[ref.post] = true
+				}
+			}
+		}
+	}
+	return board.FlattenWhere(&reply, func(p *msgpkg.MsgBoardPost) bool { return onScreen[p] }), all, boardID
+}
+
+// copyBoardFromPane is y (the newest message) and Y (the visible window),
+// through the shared copy pipeline and the one clipboard path mouse copy uses.
+// Nothing to copy is a refusal in the status bar, never an empty clipboard.
+func (m *Model) copyBoardFromPane(paneID string, visible bool) tea.Cmd {
+	if m.boards == nil {
+		return m.flash("[board] copy refused: no board feed on this session")
+	}
+	items, all, _ := m.boardPaneItems(paneID, visible)
+	n := 1
+	if visible {
+		n = 0
+	}
+	res, err := board.BuildCopyItems(items, "", n)
+	if err != nil {
+		var none board.ErrNoMessages
+		if errors.As(err, &none) {
+			why := none.Error()
+			if notice := strings.TrimSpace(m.recorderNotice()); notice != "" {
+				why += " — " + notice
+			}
+			return m.flash(why)
+		}
+		return m.flash(err.Error())
+	}
+	if err := writeClipboard(res.Text); err != nil {
+		return m.flash(fmt.Sprintf("[board] clipboard error: %v", err))
+	}
+	res.Matched = all // "k of m" counts the whole board, as ##board copy does
+	return m.flash(res.Summary())
+}
+
+// boardOutputDoneMsg carries an `o` output's result into Update.
+type boardOutputDoneMsg struct{ text string }
+
+// outputBoardFromPane is `o`: the visible window as an HTML page, written by
+// the shared renderer and opened. The write runs off the event loop.
+func (m *Model) outputBoardFromPane(paneID string) tea.Cmd {
+	if m.boards == nil {
+		return m.flash("[board] output refused: no board feed on this session")
+	}
+	items, all, boardID := m.boardPaneItems(paneID, true)
+	if len(items) == 0 {
+		return m.flash(board.NoMessagesLine(""))
+	}
+	req := board.OutputRequest{
+		Page: board.HTMLPage{Board: msgpkg.NormalizeBoardID(boardID), Picked: items,
+			Matched: len(items), Total: all, Now: time.Now()},
+		Format: board.FormatHTML,
+		Open:   true,
+	}
+	m.flashMsg = "[board] writing HTML…"
+	return func() tea.Msg {
+		path, err := writeBoardOutput(req)
+		if err != nil {
+			return boardOutputDoneMsg{text: err.Error()}
+		}
+		return boardOutputDoneMsg{text: board.OutputSummary(len(items), all, "", path)}
+	}
+}
+
+// writeBoardOutput is a seam for tests.
+var writeBoardOutput = board.WriteOutput
 
 // isControlKey reports whether k is a chord rather than a character. Used to
 // let the multiplexer's own bindings through while the board is composing, so
@@ -493,6 +627,62 @@ func clampBoardScroll(want int, st *boardViewState) int {
 // buildBoardPanel renders the whole pane: a header line of honest counters and
 // the threaded stream beneath it, windowed to the pane's height.
 func (m Model) buildBoardPanel(pane domain.PaneSnapshot, paneWidth, height int) string {
+	lay := m.boardPanelLayout(pane, paneWidth, height)
+
+	// Mouse selection: highlight over the SAME plain rows the copy is taken
+	// from (extractBoardSelectedText), exactly as every other pane type does.
+	// Only while a selection is live; the normal render below is unchanged.
+	if m.selection.active && m.selection.paneID == pane.ID {
+		lines := lay.plainLines(max(1, paneWidth-2))
+		startRow, startCol, endRow, endCol := m.selection.normalized()
+		for i := range lines {
+			if i >= startRow && i <= endRow {
+				lines[i] = applyLineSelection(lines[i], i, startRow, startCol, endRow, endCol)
+			}
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	return fmt.Sprintf("%s\n%s\n%s\n%s",
+		metaStyle.Render(lay.header),
+		strings.Join(lay.rows, "\n"),
+		lay.input,
+		metaStyle.Render(lay.status))
+}
+
+// boardLayout is one frame of a board pane as plain rows, top to bottom:
+// header, rows (padded to the window height), input line, status line. refs
+// runs parallel to rows. all/allRefs/start are the whole stream and where the
+// window starts in it, so a selection can tell a post that is wholly on screen
+// from one that is scrolled half out of view.
+type boardLayout struct {
+	header, input, status string
+	rows                  []string
+	refs                  []boardRowRef
+	all                   []string
+	allRefs               []boardRowRef
+	start                 int
+}
+
+// plainLines is the frame as the pane's text area shows it, one entry per
+// screen row, ANSI-free and padded to textWidth so rune indices line up with
+// on-screen columns — the contract joinSelectedText expects.
+func (l boardLayout) plainLines(textWidth int) []string {
+	lines := make([]string, 0, len(l.rows)+3)
+	lines = append(lines, l.header)
+	lines = append(lines, l.rows...)
+	lines = append(lines, l.input, l.status)
+	for i, line := range lines {
+		if n := len([]rune(line)); n < textWidth {
+			lines[i] = line + strings.Repeat(" ", textWidth-n)
+		}
+	}
+	return lines
+}
+
+// boardPanelLayout computes a frame. It is the only place the board's layout
+// is decided, so the render and the mouse selection read one answer.
+func (m Model) boardPanelLayout(pane domain.PaneSnapshot, paneWidth, height int) boardLayout {
 	// Seed before rendering: the roster must reflect the panes that exist now,
 	// not only those that announced while this board happened to be attached.
 	boardID := m.boardIDForPane(pane.ID)
@@ -508,7 +698,13 @@ func (m Model) buildBoardPanel(pane domain.PaneSnapshot, paneWidth, height int) 
 	}
 
 	st := m.boardViewFor(pane.ID)
-	rows := m.boardRows(boardID, contentWidth)
+	if st.boardView() == board.ViewFlow {
+		return m.boardFlowLayout(pane, boardID, st, contentWidth, maxLines)
+	}
+	if st.boardView() == board.ViewTeam {
+		return m.boardTeamLayout(pane, boardID, st, contentWidth, maxLines)
+	}
+	rows, refs := m.boardRowsWithRefsView(boardID, contentWidth, st.boardView())
 
 	// Record what this frame measured so the key handler can clamp, and clamp
 	// the current offset against it: the board grows under the user, and an
@@ -517,19 +713,155 @@ func (m Model) buildBoardPanel(pane domain.PaneSnapshot, paneWidth, height int) 
 	st.lastVisible = maxLines
 	st.scrollOffset = clampBoardScroll(st.scrollOffset, st)
 
-	win := visibleRowWindow(rows, maxLines, st.scrollOffset)
-	out := make([]string, 0, maxLines)
-	for _, r := range win {
-		out = append(out, truncBoardLine(r, contentWidth))
+	start, end := visibleRowRange(len(rows), maxLines, st.scrollOffset)
+	lay := boardLayout{
+		rows:    make([]string, 0, maxLines),
+		refs:    make([]boardRowRef, 0, maxLines),
+		all:     rows,
+		allRefs: refs,
+		start:   start,
 	}
-	for len(out) < maxLines {
-		out = append(out, "")
+	for i := start; i < end; i++ {
+		lay.rows = append(lay.rows, truncBoardLine(rows[i], contentWidth))
+		lay.refs = append(lay.refs, refs[i])
 	}
-	return fmt.Sprintf("%s\n%s\n%s\n%s",
-		metaStyle.Render(truncBoardLine(m.boardHeaderText(boardID, st), contentWidth)),
-		strings.Join(out, "\n"),
-		truncBoardLine(m.boardInputLine(pane.ID), contentWidth),
-		metaStyle.Render(truncBoardLine(m.boardStatusLine(st), contentWidth)))
+	for len(lay.rows) < maxLines {
+		lay.rows = append(lay.rows, "")
+		lay.refs = append(lay.refs, boardRowRef{})
+	}
+	lay.header = truncBoardLine(m.boardHeaderText(boardID, st), contentWidth)
+	lay.input = truncBoardLine(m.boardInputLine(pane.ID), contentWidth)
+	lay.status = truncBoardLine(m.boardStatusLine(st), contentWidth)
+	return lay
+}
+
+// boardFlowLayout is boardPanelLayout for the flow view (design 052): the
+// chain tree and the lifeline header stay at the top, and only the event rows
+// beneath them scroll — pinned to the newest, like every other view. The rows
+// carry no post refs: a selection copies the diagram as drawn.
+func (m Model) boardFlowLayout(pane domain.PaneSnapshot, boardID string, st *boardViewState, contentWidth, maxLines int) boardLayout {
+	fixed, scroll := m.boardFlowFrame(boardID, contentWidth, maxLines)
+	if len(fixed) > maxLines {
+		fixed = fixed[:maxLines]
+	}
+	window := maxLines - len(fixed)
+	st.lastRows = len(scroll)
+	st.lastVisible = window
+	st.scrollOffset = clampBoardScroll(st.scrollOffset, st)
+	start, end := visibleRowRange(len(scroll), window, st.scrollOffset)
+	if window <= 0 {
+		start, end = 0, 0
+	}
+
+	lay := boardLayout{rows: make([]string, 0, maxLines)}
+	for _, r := range fixed {
+		lay.rows = append(lay.rows, truncBoardLine(r, contentWidth))
+	}
+	for i := start; i < end; i++ {
+		lay.rows = append(lay.rows, truncBoardLine(scroll[i], contentWidth))
+	}
+	for len(lay.rows) < maxLines {
+		lay.rows = append(lay.rows, "")
+	}
+	lay.refs = make([]boardRowRef, len(lay.rows))
+	lay.all = lay.rows
+	lay.allRefs = lay.refs
+	lay.start = 0
+	lay.header = truncBoardLine(m.boardHeaderText(boardID, st), contentWidth)
+	lay.input = truncBoardLine(m.boardInputLine(pane.ID), contentWidth)
+	lay.status = truncBoardLine(m.boardStatusLine(st), contentWidth)
+	return lay
+}
+
+// extractBoardSelectedText is extractSelectedText for an agents-board pane.
+//
+// It copies what is highlighted, from the rows buildBoardPanel drew — with one
+// improvement over a literal screen scrape: a post whose body is ENTIRELY
+// inside the selection (every wrapped row of it on screen and fully covered)
+// is copied as the post's original text, so a URL or sha broken at the pane
+// width comes out whole. A post only partly selected, or scrolled partly out
+// of view, is copied as it appears.
+func (m Model) extractBoardSelectedText(pane domain.PaneSnapshot, rect paneRect) string {
+	textWidth := max(1, rect.w)
+	lay := m.boardPanelLayout(pane, rect.w+2, rect.h)
+	lines := lay.plainLines(textWidth)
+
+	startRow, startCol, endRow, endCol := m.selection.normalized()
+	if startRow >= len(lines) {
+		return ""
+	}
+	if endRow >= len(lines) {
+		endRow = len(lines) - 1
+		endCol = textWidth - 1
+	}
+
+	// refAt maps a screen row to its post ref; row 0 is the header line.
+	refAt := func(row int) boardRowRef {
+		if i := row - 1; i >= 0 && i < len(lay.refs) {
+			return lay.refs[i]
+		}
+		return boardRowRef{}
+	}
+	// covered reports whether screen row `row` is selected edge to edge.
+	covered := func(row int) bool {
+		if row < startRow || row > endRow {
+			return false
+		}
+		text := strings.TrimRight(lines[row], " ")
+		lead := len([]rune(text)) - len([]rune(strings.TrimLeft(text, " ")))
+		if row == startRow && startCol > lead {
+			return false
+		}
+		if row == endRow && endCol+1 < len([]rune(text)) {
+			return false
+		}
+		return true
+	}
+	// whole reports whether every body row of p is on screen and covered.
+	whole := func(p *msgpkg.MsgBoardPost) bool {
+		for i, r := range lay.allRefs {
+			if r.post != p || !r.body {
+				continue
+			}
+			row := i - lay.start + 1
+			if row < 1 || row > len(lay.rows) || !covered(row) {
+				return false
+			}
+		}
+		return true
+	}
+
+	var parts []string
+	var emitted *msgpkg.MsgBoardPost
+	for row := startRow; row <= endRow; row++ {
+		ref := refAt(row)
+		if ref.body && ref.post != nil && whole(ref.post) {
+			if emitted != ref.post {
+				parts = append(parts, board.SanitiseBody(ref.post.Text))
+				emitted = ref.post
+			}
+			continue
+		}
+		parts = append(parts, joinSelectedText(lines, row, colFrom(row, startRow, startCol), row, colTo(row, endRow, endCol, textWidth)))
+	}
+	return strings.Join(parts, "\n")
+}
+
+// colFrom / colTo clip a single row of a multi-row selection: the first row
+// starts at the selection's column, the last row ends at its column, and every
+// row between is taken whole.
+func colFrom(row, startRow, startCol int) int {
+	if row == startRow {
+		return startCol
+	}
+	return 0
+}
+
+func colTo(row, endRow, endCol, width int) int {
+	if row == endRow {
+		return endCol
+	}
+	return width - 1
 }
 
 // boardInputLine renders the prompt field (design 027 §5.2).
@@ -585,6 +917,17 @@ func (m Model) boardHeaderText(boardID string, st *boardViewState) string {
 	s := store.Stats()
 	parts := []string{fmt.Sprintf("AGENTS-BOARD %s | %s · %s",
 		msgpkg.NormalizeBoardID(boardID), plural(s.Threads, "thread"), plural(s.Posts, "post"))}
+	// Which view, and how many threads each view holds, so a quiet status
+	// view never hides that prompts are flowing (or the reverse).
+	if st.boardView() == board.ViewFlow {
+		parts = append(parts, boardFlowHeader(m.boardFlow(boardID)))
+	} else if st.boardView() == board.ViewTeam {
+		parts = append(parts, boardTeamHeader(m.boardFlow(boardID)))
+	} else {
+		nStatus, nPrompt := board.CountViews(store.Threads())
+		parts = append(parts, fmt.Sprintf("showing %s · %d status · %d prompt · keys s p a f t",
+			st.boardView(), nStatus, nPrompt))
+	}
 	if n := len(store.Roster()); n > 0 {
 		parts = append(parts, plural(n, "agent"))
 	}
@@ -610,7 +953,8 @@ func (m Model) boardHeaderText(boardID string, st *boardViewState) string {
 // boardKeyHelp is the footer for a focused agents-board pane, in the shape
 // model_view.go:keyHelp uses per mode.
 func (m Model) boardKeyHelp() string {
-	return "pane: agents-board | i write to the board claude (enter sends, esc cancels)  j/k ↑/↓ scroll  pgup/pgdn page  g top  G/end live  " +
+	return "pane: agents-board | s status  p prompts  a all  f flow  i write to the board claude (enter sends, esc cancels)  j/k ↑/↓ scroll  pgup/pgdn page  g top  G/end live  " +
+		"y copy newest  Y copy visible  o open visible as HTML  " +
 		"[/] tabs  ctrl+space navigate  ctrl+p pane-mgmt  ctrl+o prefix"
 }
 
@@ -669,16 +1013,50 @@ func boardHintBinary() string {
 // of its own it becomes much harder to be sure an agent's escapes are not
 // getting through with them. See sanitiseBoardText.
 func (m Model) boardRows(boardID string, width int) []string {
+	rows, _ := m.boardRowsWithRefs(boardID, width)
+	return rows
+}
+
+// boardRowRef says which post a rendered board row belongs to, and whether it
+// is that post's BODY (as opposed to its header line). It is what lets a mouse
+// selection that covers a whole wrapped post copy the post's original text
+// instead of its pane-width fragments. Rows that belong to no post — spacers,
+// notices, a provisional placeholder — have a nil post.
+type boardRowRef struct {
+	post *msgpkg.MsgBoardPost
+	body bool
+}
+
+// boardRowsWithRefs is boardRows plus, for every row, the post it renders.
+// The rows are IDENTICAL to boardRows' — boardRows is this with the refs
+// dropped — so selection maths and the render cannot disagree.
+func (m Model) boardRowsWithRefs(boardID string, width int) ([]string, []boardRowRef) {
+	return m.boardRowsWithRefsView(boardID, width, board.ViewAll)
+}
+
+// boardRowsWithRefsView is boardRowsWithRefs listing only view's threads.
+func (m Model) boardRowsWithRefsView(boardID string, width int, view board.View) ([]string, []boardRowRef) {
 	if m.boards == nil {
-		return []string{"", "  No board feed on this session.", ""}
+		return []string{"", "  No board feed on this session.", ""}, make([]boardRowRef, 3)
 	}
-	threads := m.boardStore(boardID).Threads()
+	all := m.boardStore(boardID).Threads()
+	threads := board.FilterThreads(all, view)
+	if len(threads) == 0 && len(all) > 0 {
+		// The board has traffic, just none in this view. Say which, and how to
+		// see the rest — an empty view must never read as an empty board.
+		what := "status messages"
+		if view == board.ViewPrompt {
+			what = "prompt messages (commands agents send each other)"
+		}
+		return []string{"", fmt.Sprintf("  No %s on this board yet — %d other thread(s): press a for all, s/p to switch.",
+			what, len(all)), ""}, make([]boardRowRef, 3)
+	}
 	if len(threads) == 0 {
 		// "Nothing posted yet" is only sayable when the recorder is known live.
 		// Otherwise the honest answer is that we do not know, and saying so is
 		// the whole point of this branch.
 		if notice := m.recorderNotice(); notice != "" {
-			return []string{"", notice, "  An empty board here does NOT mean nobody posted.", ""}
+			return []string{"", notice, "  An empty board here does NOT mean nobody posted.", ""}, make([]boardRowRef, 4)
 		}
 		bin := boardHintBinary()
 		return []string{
@@ -687,16 +1065,20 @@ func (m Model) boardRows(boardID string, width int) []string {
 			fmt.Sprintf("  Agents post with `%s board post <text>` and reply with `%s board reply <thread> <text>`.",
 				bin, bin),
 			"",
-		}
+		}, make([]boardRowRef, 4)
 	}
 	rows := make([]string, 0, len(threads)*4)
+	refs := make([]boardRowRef, 0, len(threads)*4)
 	for i, t := range threads {
 		if i > 0 {
 			rows = append(rows, "")
+			refs = append(refs, boardRowRef{})
 		}
-		rows = append(rows, boardThreadRows(t, width)...)
+		r, rf := boardThreadRowsWithRefs(t, width)
+		rows = append(rows, r...)
+		refs = append(refs, rf...)
 	}
-	return rows
+	return rows, refs
 }
 
 // boardThreadRows renders one root and its replies, the replies UNDER the root.
@@ -709,21 +1091,35 @@ func (m Model) boardRows(boardID string, width int) []string {
 // the next frame renders one thread with a real root. The view holds no state
 // across frames, which is precisely why it cannot duplicate the root.
 func boardThreadRows(t board.Thread, width int) []string {
+	rows, _ := boardThreadRowsWithRefs(t, width)
+	return rows
+}
+
+// boardThreadRowsWithRefs is boardThreadRows plus the post behind each row.
+func boardThreadRowsWithRefs(t board.Thread, width int) ([]string, []boardRowRef) {
 	rows := make([]string, 0, 2+len(t.Replies)*2)
+	refs := make([]boardRowRef, 0, 2+len(t.Replies)*2)
+	add := func(p *msgpkg.MsgBoardPost, glyph string, indent, bodyIndent int) {
+		rows = append(rows, boardPostHeader(glyph, p, indent, width))
+		refs = append(refs, boardRowRef{post: p})
+		for _, r := range boardTextRows(p.Text, bodyIndent, width) {
+			rows = append(rows, r)
+			refs = append(refs, boardRowRef{post: p, body: true})
+		}
+	}
 
 	if t.Root != nil {
-		rows = append(rows, boardPostHeader(boardRootGlyph, t.Root, 0, width))
-		rows = append(rows, boardTextRows(t.Root.Text, boardRootIndent, width)...)
+		add(t.Root, boardRootGlyph, 0, boardRootIndent)
 	} else {
 		rows = append(rows, fmt.Sprintf("%s awaiting root  ·  thread %s",
 			boardProvisionalGlyph, shortThreadKey(t.Key)))
+		refs = append(refs, boardRowRef{})
 	}
 
 	for _, r := range t.Replies {
-		rows = append(rows, boardPostHeader(boardReplyGlyph, r, boardRootIndent, width))
-		rows = append(rows, boardTextRows(r.Text, boardReplyIndent, width)...)
+		add(r, boardReplyGlyph, boardRootIndent, boardReplyIndent)
 	}
-	return rows
+	return rows, refs
 }
 
 // boardPostHeader is the "who spoke" line: glyph, persona, kind, clock.
@@ -733,6 +1129,18 @@ func boardPostHeader(glyph string, p *msgpkg.MsgBoardPost, indent, width int) st
 	b.WriteString(glyph)
 	b.WriteString(" ")
 	b.WriteString(boardDisplayPersona(p))
+	// A prompt names who it is for and which command it is; an ack names the
+	// command it answers (design 050/051). Status posts render as before.
+	switch p.Kind {
+	case msgpkg.BoardKindCmd:
+		b.WriteString(" → ")
+		b.WriteString(sanitiseBoardInline(p.ToPersona))
+		b.WriteString(" · ")
+		b.WriteString(sanitiseBoardInline(p.CmdID))
+	case msgpkg.BoardKindAck:
+		b.WriteString(" · ")
+		b.WriteString(sanitiseBoardInline(p.CmdID))
+	}
 	if k := sanitiseBoardInline(p.Kind); k != "" {
 		b.WriteString("  [")
 		b.WriteString(k)

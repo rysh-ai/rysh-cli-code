@@ -24,6 +24,12 @@ func TestMain(m *testing.M) {
 	if mode := os.Getenv("RYSH_TEST_FAKE_DAEMON"); mode != "" && len(os.Args) > 2 && os.Args[1] == "daemon" {
 		os.Exit(runFakeDaemon(mode, os.Args[2]))
 	}
+	// The crash-log tests need this binary to stand in for a dying daemon, for
+	// the same reason as above: what a process leaves behind when it crashes is
+	// only observable from outside it. See crashlog_test.go.
+	if crashLogTestChild() {
+		return
+	}
 	os.Exit(m.Run())
 }
 

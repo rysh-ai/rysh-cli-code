@@ -19,6 +19,10 @@ type EmailSummary struct {
 	Snippet   string `json:"snippet"`
 	MessageID string `json:"message_id"`
 	InReplyTo string `json:"in_reply_to"`
+	Seen      bool   `json:"seen"` // the IMAP \Seen flag (read)
+	// References is the message's References chain, oldest ancestor first —
+	// lets a UI thread a reply whose direct parent is not in the listing.
+	References []string `json:"references,omitempty"`
 }
 
 // EmailDetail holds the full content of a single email.
@@ -35,6 +39,16 @@ type EmailDetail struct {
 	Attachments []AttachmentInfo `json:"attachments,omitempty"`
 }
 
+// EmailFolder is one selectable mailbox. Name is the server's own (already
+// encoded) mailbox name, passed back verbatim to select it; Label is a short
+// display name; Role is the RFC 6154 SPECIAL-USE role ("inbox", "sent",
+// "drafts", "trash", "junk", "archive", "all", "flagged") or "".
+type EmailFolder struct {
+	Name  string `json:"name"`
+	Label string `json:"label"`
+	Role  string `json:"role,omitempty"`
+}
+
 // AttachmentInfo describes an email attachment without the full data.
 type AttachmentInfo struct {
 	Filename    string `json:"filename"`
@@ -47,14 +61,48 @@ type AttachmentInfo struct {
 // MsgHumanoidEmailList asks a humanoid to fetch its inbox listing. The humanoid
 // serves it from its EmailAdapter and replies on humanoid.<name>.email.list.
 type MsgHumanoidEmailList struct {
-	Count  int    `json:"count"`  // 0 ⇒ default (10), capped at 50 by the adapter
-	Search string `json:"search"` // optional SUBJECT substring filter
+	Count  int    `json:"count"`            // 0 ⇒ default (10), capped at 50 by the adapter
+	Search string `json:"search"`           // optional SUBJECT substring filter
+	Folder string `json:"folder,omitempty"` // mailbox name ("" ⇒ INBOX)
 }
+
+// MsgHumanoidEmailFolders asks a humanoid for its account's selectable
+// folders; the reply is published on humanoid.<name>.email.folders.
+type MsgHumanoidEmailFolders struct{}
 
 // MsgHumanoidEmailRead asks a humanoid to fetch one email's full detail. The
 // reply is published on humanoid.<name>.email.detail.
 type MsgHumanoidEmailRead struct {
-	UID int `json:"uid"`
+	UID    int    `json:"uid"`
+	Folder string `json:"folder,omitempty"` // mailbox the UID belongs to ("" ⇒ INBOX)
+}
+
+// MsgHumanoidEmailSetSeen asks a humanoid to set (Seen=true) or clear the
+// \Seen flag on one email — the email client's read/unread toggle. The
+// humanoid answers with MsgHumanoidEmailChanged so every UI re-lists and shows
+// the server's real state.
+type MsgHumanoidEmailSetSeen struct {
+	UID    int    `json:"uid"`
+	Seen   bool   `json:"seen"`
+	Folder string `json:"folder,omitempty"` // mailbox the UID belongs to ("" ⇒ INBOX)
+}
+
+// MsgHumanoidEmailSaveAttachment asks a humanoid to save attachment Index
+// (position in EmailDetail.Attachments) of one email to disk on the daemon's
+// machine. The reply is published on humanoid.<name>.email.attachment.
+type MsgHumanoidEmailSaveAttachment struct {
+	Folder string `json:"folder,omitempty"` // mailbox the UID belongs to ("" ⇒ INBOX)
+	UID    int    `json:"uid"`
+	Index  int    `json:"index"`
+}
+
+// MsgHumanoidEmailMove asks a humanoid to delete (move to \Trash) or archive
+// (move to \Archive, else Gmail's \All) one email. Never an expunge: see
+// channels.moveToRole. The reply is published on humanoid.<name>.email.move.
+type MsgHumanoidEmailMove struct {
+	Folder string `json:"folder,omitempty"` // mailbox the UID belongs to ("" ⇒ INBOX)
+	UID    int    `json:"uid"`
+	Action string `json:"action"` // "delete" | "archive"
 }
 
 // ---- Results (humanoid → push subject → web server → app) -----------------
@@ -62,8 +110,35 @@ type MsgHumanoidEmailRead struct {
 // MsgHumanoidEmailListReply carries an inbox listing back toward the UI.
 type MsgHumanoidEmailListReply struct {
 	HumanoidName string         `json:"humanoid_name"`
+	Folder       string         `json:"folder,omitempty"` // echoes the request's folder
 	Emails       []EmailSummary `json:"emails"`
 	Err          string         `json:"err,omitempty"`
+}
+
+// MsgHumanoidEmailSaveAttachmentReply reports where an attachment was saved.
+type MsgHumanoidEmailSaveAttachmentReply struct {
+	HumanoidName string `json:"humanoid_name"`
+	UID          int    `json:"uid"`
+	Index        int    `json:"index"`
+	Path         string `json:"path,omitempty"`
+	Err          string `json:"err,omitempty"`
+}
+
+// MsgHumanoidEmailMoveReply reports where an email was moved, or why not.
+type MsgHumanoidEmailMoveReply struct {
+	HumanoidName string `json:"humanoid_name"`
+	Folder       string `json:"folder,omitempty"`
+	UID          int    `json:"uid"`
+	Action       string `json:"action"`
+	Target       string `json:"target,omitempty"`
+	Err          string `json:"err,omitempty"`
+}
+
+// MsgHumanoidEmailFoldersReply carries the folder listing back toward the UI.
+type MsgHumanoidEmailFoldersReply struct {
+	HumanoidName string        `json:"humanoid_name"`
+	Folders      []EmailFolder `json:"folders"`
+	Err          string        `json:"err,omitempty"`
 }
 
 // MsgHumanoidEmailReadReply carries a single email's detail back toward the UI.

@@ -24,9 +24,19 @@ func (w *WorkspaceActor) handleRyshSelfCommand(ctx actor.Context, out *strings.B
 		sub = "help"
 	}
 	switch sub {
+	case "status":
+		// ##rysh status [--json] -- whose NATS server this session's state lives
+		// in (design 028 §9 limit 7).
+		w.handleRyshStatus(out, len(args) > 1 && args[1] == "--json")
+	case "restart":
+		// ##rysh restart -- restart the session daemon on the binary on disk.
+		w.handleRyshRestart(out)
 	case "new":
 		// ##rysh new <tab|lane|pane> [args] -- alias of ##new.
 		w.handleNewInstance(ctx, out, paneID, args[1:])
+	case "meeting":
+		// ##rysh meeting … -- alias of ##meeting … (design 047).
+		w.handleMeetingCommand(out, paneID, args[1:])
 	case "web":
 		action := ""
 		if len(args) > 1 {
@@ -86,6 +96,7 @@ func (w *WorkspaceActor) handleRyshSelfCommand(ctx actor.Context, out *strings.B
 				break
 			}
 			w.webServer = web.NewServer(opts.Port, w.sessionName, w.pub, w.nc, w.pub.Codecs())
+			w.wireWebGuestOf()
 			// Follow the workspace's credentials file, not just the snapshot
 			// resolved above: a sibling daemon rooted at this project shares it
 			// and rotating the key there must not 401 everyone here (F-9).
@@ -333,6 +344,8 @@ func (w *WorkspaceActor) handleRyshSelfCommand(ctx actor.Context, out *strings.B
 			"##rysh new pane [tab] [lane] create a pane at the bottom of a lane",
 			"##rysh tab name <tab-name>   rename the active tab",
 			"##rysh lane name <lane-name> rename the active lane",
+			"##rysh restart               restart the session on the rebuilt binary (--upgrade --force)",
+			"##rysh status [--json]       this session's NATS server: its own, or guest_of another daemon's",
 			"##rysh web start [--bind <addr>] [--port <n>] [--username <u> --password <p>] [--control]  start the web UI server",
 			"##rysh web stop [--force] stop the web server",
 			"##rysh web status          show bind address, port + login",

@@ -260,7 +260,7 @@ func (m Model) updateLLMPickerSecret(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// "Set it later" — the binding already happened; only the key is
 		// deferred, and the daemon's own warning already said what is missing.
 		m.closeLLMPicker()
-		return m, tea.Batch(m.refreshCmd(), m.listenLLMPickerCmd())
+		return m, m.refreshCmd() // the listener was re-armed when the picker opened
 	case "enter":
 		// An empty key is not a key: secretCommand returns "" and this becomes
 		// "later" rather than storing a blank that would fail authentication
@@ -268,7 +268,7 @@ func (m Model) updateLLMPickerSecret(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.submitPickerCommand(m.llmPicker.secretCommand())
 		m.llmPicker.secretInput.SetValue("")
 		m.closeLLMPicker()
-		return m, tea.Batch(m.refreshCmd(), m.listenLLMPickerCmd())
+		return m, m.refreshCmd() // the listener was re-armed when the picker opened
 	}
 	var cmd tea.Cmd
 	m.llmPicker.secretInput, cmd = m.llmPicker.secretInput.Update(msg)
@@ -292,7 +292,7 @@ func (m Model) confirmLLMPickerStep() (tea.Model, tea.Cmd) {
 		// has no key in reach. Otherwise the picker is done.
 		if !p.chosenModel.KeyMissing {
 			m.closeLLMPicker()
-			return m, tea.Batch(m.refreshCmd(), m.listenLLMPickerCmd())
+			return m, m.refreshCmd() // the listener was re-armed when the picker opened
 		}
 		p.step = pickerStepSecret
 		p.secretInput.Focus()

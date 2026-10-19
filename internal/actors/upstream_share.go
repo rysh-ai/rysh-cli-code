@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
-	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -23,6 +22,7 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 	"github.com/rysh-ai/rysh-cli-code/internal/forge"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
+	"github.com/rysh-ai/rysh-cli-code/internal/upstream"
 )
 
 // forgeOpRunner runs a forge-registered operation by name. Implemented by
@@ -673,9 +673,6 @@ func (u *UpstreamShareActor) connectRemote() {
 	// since share connections are lightweight and should not count as sessions.
 	proxyPath := "/workspaces/" + workspace + "/nats"
 	proxyPath += "?connection_type=share"
-	if u.config.APIKey != "" {
-		proxyPath += "&api_key=" + url.QueryEscape(u.config.APIKey)
-	}
 
 	// Use unlimited reconnects for share connections to maintain resilience.
 	maxReconnects := u.config.MaxReconnectAttempts
@@ -686,6 +683,7 @@ func (u *UpstreamShareActor) connectRemote() {
 	opts := []nats.Option{
 		nats.Name(fmt.Sprintf("rysh-share-%s", u.shareID[:8])),
 		nats.ProxyPath(proxyPath),
+		upstream.NATSAPIKeyHeader(u.config.APIKey), // the key rides in a header, not the URL (F-86)
 		nats.MaxReconnects(maxReconnects),
 		nats.Token(u.config.APIKey),
 		// WebSocket per-message compression: claude/vim ANSI repaints compress
@@ -982,12 +980,20 @@ func (u *UpstreamShareActor) buildLayoutDoc() (doc *mirrorLayoutDoc, gone, ok bo
 	return u.buildLayoutDocViaWorkspace()
 }
 
-// buildLayoutDocViaWorkspace fetches the full workspace snapshot and extracts the
-// shared entity as a trimmed layout doc. Returns (doc,false,true) on success;
-// (nil,true,true) when the snapshot was reachable but the entity is gone (e.g. the
-// tab was closed); (nil,false,false) when the snapshot was unreachable.
+// buildLayoutDocViaWorkspace locates the shared entity in the STRUCTURAL
+// workspace snapshot, then fetches the full snapshot of the one tab holding it
+// and extracts the entity as a trimmed layout doc. Returns (doc,false,true) on
+// success; (nil,true,true) when the workspace answered and the entity is gone
+// (e.g. its tab was closed); (nil,false,false) when that cannot be told.
+//
+// It used to pull the FULL workspace snapshot — every pane's output buffers
+// and histories, 4.2 MB on a 22-pane session — every 150–600ms per lane/group
+// share, to read one entity out of it. And it read a tab that timed out
+// (Partial, no lanes) as "gone", which published Closed to every subscriber
+// and ended the loop for good on one slow cascade.
 func (u *UpstreamShareActor) buildLayoutDocViaWorkspace() (doc *mirrorLayoutDoc, gone, ok bool) {
-	reply, err := u.pub.Request(msg.T("ws", "snapshot"), &msg.MsgGetWorkspaceSnapshot{}, time.Second)
+	reply, err := u.pub.Request(msg.T("ws", "snapshot"),
+		&msg.MsgGetWorkspaceSnapshot{LayoutOnly: true, NoHistories: true}, time.Second)
 	if err != nil {
 		slog.Debug("upstream-share: layout snapshot request failed",
 			"shareID", u.shareID, "err", err)
@@ -997,9 +1003,26 @@ func (u *UpstreamShareActor) buildLayoutDocViaWorkspace() (doc *mirrorLayoutDoc,
 	if !isReply {
 		return nil, false, false
 	}
-	tab := findMirrorEntityTab(snapReply.Snapshot, u.entityType, u.entityID)
-	if tab == nil {
+	where := findMirrorEntityTab(snapReply.Snapshot, u.entityType, u.entityID)
+	if where == nil {
+		for _, t := range snapReply.Snapshot.Tabs {
+			if t.Partial {
+				return nil, false, false // a tab did not answer: inconclusive
+			}
+		}
 		return nil, true, true // reachable, but entity gone
+	}
+	tabReply, err := u.pub.Request(msg.T("tab", where.ID, "snapshot"), &msg.MsgGetTabSnapshot{}, time.Second)
+	if err != nil {
+		return nil, false, false
+	}
+	tr, isReply := tabReply.(*msg.MsgTabSnapshotReply)
+	if !isReply {
+		return nil, false, false
+	}
+	tab := findMirrorEntityTab(domain.WorkspaceSnapshot{Tabs: []domain.TabSnapshot{tr.Snapshot}}, u.entityType, u.entityID)
+	if tab == nil {
+		return nil, false, false // moved between the two requests: retry next tick
 	}
 	return &mirrorLayoutDoc{
 		Type:       "layout",
@@ -1021,7 +1044,9 @@ func (u *UpstreamShareActor) buildLayoutDocViaWorkspace() (doc *mirrorLayoutDoc,
 // control commands to the shared entity. Fetches a fresh snapshot so it always
 // reflects the live structure.
 func (u *UpstreamShareActor) paneBelongsToEntity(paneID string) bool {
-	reply, err := u.pub.Request(msg.T("ws", "snapshot"), &msg.MsgGetWorkspaceSnapshot{}, time.Second)
+	// Structural: only ids are read, so no pane content crosses the bus.
+	reply, err := u.pub.Request(msg.T("ws", "snapshot"),
+		&msg.MsgGetWorkspaceSnapshot{LayoutOnly: true, NoHistories: true}, time.Second)
 	if err != nil {
 		return false
 	}
@@ -2303,8 +2328,15 @@ func (u *UpstreamShareActor) startFlusher(nc *nats.Conn) {
 			case <-stop:
 				return
 			case <-t.C:
-				if b, err := nc.Buffered(); err == nil {
+				b, err := nc.Buffered()
+				if err == nil {
 					u.metrics.bufferedBytes.Store(int64(b))
+				}
+				// Nothing buffered means nothing to drain: skip the Flush, which
+				// is a PING/PONG round trip to the upstream server. Unconditional,
+				// it cost every share 125 round trips a second while idle.
+				if err == nil && b == 0 {
+					continue
 				}
 				start := time.Now()
 				if err := nc.Flush(); err != nil {

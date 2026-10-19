@@ -56,6 +56,12 @@ func (m *Model) syncPaneInputs() {
 					// Default mode is "shell" for any newly seen pane.
 					if _, ok := m.paneInputModes[pane.ID]; !ok {
 						m.paneInputModes[pane.ID] = "shell"
+						// A pane the daemon put in "company" mode (design 037) is
+						// shown that way the first time this front-end sees it —
+						// on attach and on restore, when no activate push is coming.
+						if paneModeEnabled(pane, "company") {
+							m.paneInputModes[pane.ID] = "company"
+						}
 					}
 					// Clamp: if the stored mode was disabled (##mode delete) since
 					// it was last selected, snap back to shell.
@@ -105,6 +111,13 @@ func (m *Model) syncPaneInputs() {
 	for id := range m.panePendingCmd {
 		if _, ok := live[id]; !ok {
 			delete(m.panePendingCmd, id)
+		}
+	}
+	// A stashed register-output activation is otherwise only deleted when it
+	// applies; a pane that closed before its mode was enabled would keep it.
+	for id := range m.pendingActivate {
+		if _, ok := live[id]; !ok {
+			delete(m.pendingActivate, id)
 		}
 	}
 
@@ -304,7 +317,7 @@ func paneModeOutput(pane domain.PaneSnapshot, inputMode string) string {
 		return pane.RyshOutput
 	case "chat":
 		return pane.ChatOutput
-	case "external", "email":
+	case "external", "email", "company":
 		// "email" renders via the dedicated buildEmailPanel branch — the
 		// terminal has a real three-column client, so nothing degrades here;
 		// this buffer (the humanoid's streamed drafts) backs scroll math and
@@ -459,10 +472,10 @@ func (m *Model) setActiveInputMode(mode string) {
 // by share restrictions (local or remote). If there are no restrictions,
 // it follows the standard cycle: shell → prompt → rysh → chat → shell.
 func (m Model) nextEnabledMode(current string) string {
-	cycle := []string{"shell", "prompt", "rysh", "chat", "external", "email", "web"}
+	cycle := []string{"shell", "prompt", "rysh", "chat", "external", "email", "company", "web"}
 	// Map display mode names to the restriction mode names used by ShareRestrictions.
 	modeToRestriction := map[string]string{
-		"shell": "sh", "prompt": "ai", "rysh": "rysh", "chat": "chat", "external": "external", "email": "email", "web": "web",
+		"shell": "sh", "prompt": "ai", "rysh": "rysh", "chat": "chat", "external": "external", "email": "email", "company": "company", "web": "web",
 	}
 
 	pane := m.activePaneSnapshot()

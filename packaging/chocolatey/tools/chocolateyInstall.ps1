@@ -14,10 +14,9 @@ $packageArgs = @{
   packageName   = $packageName
   unzipLocation = $toolsDir
   fileType      = 'zip'
-  # Artifacts are served from packages.rysh.ai, NOT GitHub Releases: the
-  # rysh-cli repository is private, so a github.com/... download URL 404s for
-  # every user. (The previous URL pointed at github.com/rysh-ai/rysh, which is
-  # not even a repository that exists.)
+  # Artifacts are served from packages.rysh.ai, NOT GitHub Releases: a GitHub
+  # download URL is not reachable for users. (The previous URL pointed at a
+  # GitHub repo that users cannot download from.)
   url          = "https://packages.rysh.ai/releases/v${version}/rysh_windows_amd64_cli-only.zip"
   checksum     = 'PLACEHOLDER_SHA256_WINDOWS_AMD64_CLI_ONLY'
   checksumType = 'sha256'

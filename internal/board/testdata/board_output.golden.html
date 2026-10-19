@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent board · etl-fix</title>
+<style>
+:root {
+  --bg:#f6f7f9; --card:#ffffff; --fg:#1d232b; --muted:#5d6875; --line:#e1e5ea; --link:#1f5fbf;
+  --good:#1f7a4d; --good-bg:#e3f4ea; --bad:#b3261e; --bad-bg:#fbe7e5; --warn:#8a5a00; --warn-bg:#fdf1d6;
+  --info:#1f5fbf; --info-bg:#e5eefb; --mut:#5d6875; --mut-bg:#eceff3;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg:#12161b; --card:#1a2027; --fg:#e4e8ed; --muted:#98a3b0; --line:#2a323c; --link:#8ab4f8;
+  --good:#7fd6a4; --good-bg:#16352a; --bad:#f2a49c; --bad-bg:#3d1c1a; --warn:#f0c674; --warn-bg:#3a2e14;
+  --info:#8ab4f8; --info-bg:#172a45; --mut:#98a3b0; --mut-bg:#232a33; } }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--fg);
+  font:14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+main { max-width:960px; margin:0 auto; padding:24px 16px 48px; }
+h1 { font-size:20px; margin:0 0 4px; }
+.meta { color:var(--muted); margin:0 0 20px; font-size:13px; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:14px 16px;
+  margin:0 0 12px; break-inside:avoid; page-break-inside:avoid; }
+.card header { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:8px; }
+.persona { font-weight:600; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; }
+.kind { color:var(--muted); font-size:12px; }
+time { margin-left:auto; color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums; }
+.badge { font-size:11px; font-weight:600; padding:2px 8px; border-radius:999px; text-transform:uppercase; letter-spacing:.02em; }
+.good { color:var(--good); background:var(--good-bg); } .bad { color:var(--bad); background:var(--bad-bg); }
+.warn { color:var(--warn); background:var(--warn-bg); } .info { color:var(--info); background:var(--info-bg); }
+.muted { color:var(--mut); background:var(--mut-bg); }
+dl { display:grid; grid-template-columns:max-content 1fr; gap:4px 14px; margin:0; }
+dt { font-weight:600; font-size:12px; color:var(--muted); padding-top:1px; white-space:nowrap; }
+dd { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; }
+.loose { margin:0 0 6px; white-space:pre-wrap; overflow-wrap:anywhere; }
+a { color:var(--link); text-decoration:none; } a:hover { text-decoration:underline; }
+@media (max-width:600px) { dl { grid-template-columns:1fr; } dt { margin-top:6px; } }
+@media print {
+  :root, :root:not([data-theme="light"]) {
+    --bg:#ffffff; --card:#ffffff; --fg:#1d232b; --muted:#5d6875; --line:#cccccc; --link:#1f5fbf;
+    --good:#1f7a4d; --good-bg:#e3f4ea; --bad:#b3261e; --bad-bg:#fbe7e5; --warn:#8a5a00; --warn-bg:#fdf1d6;
+    --info:#1f5fbf; --info-bg:#e5eefb; --mut:#5d6875; --mut-bg:#eceff3; }
+  body { background:#fff; } main { padding:0; max-width:none; } }
+</style></head>
+<body><main>
+<h1>Agent board · etl-fix</h1>
+<p class="meta">last 6 of 7 · board has 7 messages · generated 2026-09-30 12:00</p>
+
+<article class="card">
+  <header>
+    <span class="persona">issue-31</span>
+    <span class="kind">milestone</span>
+    <span class="badge bad">BLOCKED on CI</span>
+    <time datetime="1970-01-01T00:00:02">1970-01-01 00:00:02</time>
+  </header>
+  
+  <dl><dt>STATUS</dt><dd>BLOCKED on CI</dd><dt>BRIEF</dt><dd>&lt;script&gt;alert(1)&lt;/script&gt; &amp; more</dd></dl>
+</article>
+
+<article class="card">
+  <header>
+    <span class="persona">issue-31</span>
+    <span class="kind">milestone</span>
+    <span class="badge warn">waiting for review</span>
+    <time datetime="1970-01-01T00:00:03">1970-01-01 00:00:03</time>
+  </header>
+  
+  <dl><dt>STATUS</dt><dd>waiting for review</dd></dl>
+</article>
+
+<article class="card">
+  <header>
+    <span class="persona">issue-314</span>
+    <span class="kind">milestone</span>
+    <span class="badge good">done</span>
+    <time datetime="1970-01-01T00:00:04">1970-01-01 00:00:04</time>
+  </header>
+  
+  <dl><dt>STATUS</dt><dd>done</dd><dt>ISSUE RELATED TO</dt><dd>#314</dd></dl>
+</article>
+
+<article class="card">
+  <header>
+    <span class="persona">mgr</span>
+    <span class="kind">milestone</span>
+    <span class="badge muted">idle</span>
+    <time datetime="1970-01-01T00:00:05">1970-01-01 00:00:05</time>
+  </header>
+  
+  <dl><dt>STATUS</dt><dd>idle</dd></dl>
+</article>
+
+<article class="card">
+  <header>
+    <span class="persona">mgr</span>
+    <span class="kind">milestone</span>
+    <span class="badge good">milestone reached</span>
+    <time datetime="1970-01-01T00:00:06">1970-01-01 00:00:06</time>
+  </header>
+  
+  <dl><dt>STATUS</dt><dd>milestone reached</dd></dl>
+</article>
+
+<article class="card">
+  <header>
+    <span class="persona">issue-314</span>
+    <span class="kind">milestone</span>
+    <span class="badge info">in progress</span>
+    <time datetime="1970-01-01T00:00:07">1970-01-01 00:00:07</time>
+  </header>
+  <p class="loose">Picked up the codec work.</p>
+  <dl><dt>STATUS</dt><dd>in progress - wiring codec</dd><dt>BLOCKED</dt><dd>none</dd><dt>PRS</dt><dd><a href="https://github.com/o/r/pull/9">https://github.com/o/r/pull/9</a>
+  and <a href="https://github.com/o/r/pull/10">https://github.com/o/r/pull/10</a>.</dd><dt>DEPENDS ON</dt><dd>#312</dd></dl>
+</article>
+
+</main></body></html>
+

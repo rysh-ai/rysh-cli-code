@@ -10,8 +10,10 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/agentic"
+	"github.com/rysh-ai/rysh-cli-code/internal/bus"
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
+	coord "github.com/rysh-ai/rysh-cli-code/internal/peercoord"
 	"github.com/rysh-ai/rysh-cli-code/internal/upstream"
 )
 
@@ -103,6 +105,10 @@ type workspaceChild struct {
 // All fields are unguarded -- the proto.actor mailbox guarantees sequential
 // Receive().
 type WorkspaceFarmActor struct {
+	peerRuntime *coord.Runtime
+	// guestOf is the daemon Bus's GuestOf, handed to every workspace for
+	// `##rysh status` and /health (design 028 §9 limit 7). See SetGuestOf.
+	guestOf     func() (bus.GuestOf, bool)
 	cfg         config.Config
 	pub         *msg.NATSPublisher
 	agSetup     *agentic.Setup
@@ -162,6 +168,7 @@ func NewWorkspaceFarmActor(
 func (f *WorkspaceFarmActor) Receive(ctx actor.Context) {
 	switch m := ctx.Message().(type) {
 	case *actor.Started:
+		f.startPeerRuntime(ctx)
 		wss := f.cfg.ResolvedWorkspaces()
 		f.names = make([]string, len(wss))
 		for i, wc := range wss {
@@ -195,6 +202,18 @@ func (f *WorkspaceFarmActor) Receive(ctx actor.Context) {
 			}
 		}
 
+	case *peerHostRequest:
+		for _, child := range f.children {
+			if child.name == m.Request.Workspace {
+				ctx.Forward(child.pid)
+				return
+			}
+		}
+		ctx.Respond(coord.HostResponse{Err: fmt.Errorf("local workspace unavailable")})
+	case *actor.Stopping:
+		if f.peerRuntime != nil {
+			f.peerRuntime.Close()
+		}
 	case *msg.MsgShutdown:
 		// Stopping the Farm stops all workspace children (and their subtrees).
 		ctx.Stop(ctx.Self())
@@ -234,6 +253,8 @@ func (f *WorkspaceFarmActor) spawnWorkspace(ctx actor.Context, wc config.Workspa
 		f.sessionName,
 		wc.Name, idx, f.names, active, spawnRegistries,
 	)
+	wa.peerRuntime = f.peerRuntime
+	wa.guestOf = f.guestOf
 	props := actor.PropsFromProducer(func() actor.Actor { return wa })
 	// Use an index-based, always-unique, always-valid actor name.
 	pid, err := ctx.SpawnNamed(props, fmt.Sprintf("workspace-%d", idx))
@@ -337,3 +358,7 @@ func (f *WorkspaceFarmActor) switchTo(ctx actor.Context, index int, replyTo stri
 		replyTo: replyTo,
 	})
 }
+
+// SetGuestOf hands the daemon Bus's GuestOf to every workspace this farm
+// spawns. Call it before the farm is spawned.
+func (f *WorkspaceFarmActor) SetGuestOf(fn func() (bus.GuestOf, bool)) { f.guestOf = fn }

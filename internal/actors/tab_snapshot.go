@@ -16,7 +16,7 @@ import (
 // Snapshot
 // ---------------------------------------------------------------------------
 
-func (t *TabActor) collectSnapshot(layoutOnly, noHistories bool) domain.TabSnapshot {
+func (t *TabActor) collectSnapshot(layoutOnly, noHistories bool, historyPane string) domain.TabSnapshot {
 	snap := domain.TabSnapshot{
 		ID:              t.id,
 		Title:           t.title,
@@ -34,10 +34,10 @@ func (t *TabActor) collectSnapshot(layoutOnly, noHistories bool) domain.TabSnaps
 	// not mutate it during the fan-out, so the goroutines read the local copy.
 	pipelineName := t.pipelineName
 	results := make([]domain.LaneSnapshot, len(t.laneRefs))
-	fetch := func(i int, id string, flex int) {
+	fetch := func(i int, id string, flex int, collapsed bool) {
 		reply, err := t.pub.Request(
 			msg.T("lane", id, "snapshot"),
-			&msg.MsgGetLaneSnapshot{LayoutOnly: layoutOnly, NoHistories: noHistories},
+			&msg.MsgGetLaneSnapshot{LayoutOnly: layoutOnly, NoHistories: noHistories, HistoryPaneID: historyPane},
 			2*time.Second,
 		)
 		if err != nil {
@@ -50,7 +50,8 @@ func (t *TabActor) collectSnapshot(layoutOnly, noHistories bool) domain.TabSnaps
 			return
 		}
 		ls := lReply.Snapshot
-		ls.Flex = flex // authoritative override
+		ls.Flex = flex           // authoritative override
+		ls.Collapsed = collapsed // tab-owned, like flex
 		// Lane name defaults to the tab's pipeline name when the lane has no
 		// explicit name set, so every lane is labelled.
 		if ls.Name == "" {
@@ -64,12 +65,15 @@ func (t *TabActor) collectSnapshot(layoutOnly, noHistories bool) domain.TabSnaps
 		var wg sync.WaitGroup
 		for i, lr := range t.laneRefs {
 			wg.Add(1)
-			go func(i int, id string, flex int) { defer wg.Done(); fetch(i, id, flex) }(i, lr.id, lr.flex)
+			go func(i int, id string, flex int, collapsed bool) {
+				defer wg.Done()
+				fetch(i, id, flex, collapsed)
+			}(i, lr.id, lr.flex, lr.collapsed)
 		}
 		wg.Wait()
 	} else {
 		for i, lr := range t.laneRefs {
-			fetch(i, lr.id, lr.flex)
+			fetch(i, lr.id, lr.flex, lr.collapsed)
 		}
 	}
 	snap.Lanes = append(snap.Lanes, results...)
@@ -284,6 +288,7 @@ func (t *TabActor) toKVViaActors(ctx actor.Context) tabKV {
 			lkv = laneKV{ID: lr.id}
 		}
 		lkv.Flex = lr.flex // tab-owned and authoritative
+		lkv.Collapsed = lr.collapsed
 		kv.Lanes[i] = lkv
 	}
 	return kv
@@ -311,11 +316,13 @@ func (t *TabActor) ToKV() tabKV {
 		if la, ok := t.laneActors[lr.id]; ok {
 			lkv := la.ToKV()
 			lkv.Flex = lr.flex // authoritative
+			lkv.Collapsed = lr.collapsed
 			kv.Lanes[i] = lkv
 		} else {
 			kv.Lanes[i] = laneKV{
-				ID:   lr.id,
-				Flex: lr.flex,
+				ID:        lr.id,
+				Flex:      lr.flex,
+				Collapsed: lr.collapsed,
 			}
 		}
 	}
@@ -331,7 +338,7 @@ func (t *TabActor) doRestoreFromKV(ctx actor.Context, kv tabKV) {
 	t.pipelineEnabled = kv.PipelineEnabled
 	t.pipelineActive = kv.PipelineActive
 	if kv.PipelineOutput != "" {
-		t.pipelineBuffer.WriteString(kv.PipelineOutput)
+		t.pipelineBuffer.Append(kv.PipelineOutput, maxPipelineBytes)
 	}
 	if kv.Pipelines != nil {
 		t.pipelines = kv.Pipelines
@@ -349,8 +356,9 @@ func (t *TabActor) doRestoreFromKV(ctx actor.Context, kv tabKV) {
 		pid := ctx.Spawn(laneProps)
 
 		ref := &laneRef{
-			id:   lkvCopy.ID,
-			flex: lkvCopy.Flex,
+			id:        lkvCopy.ID,
+			flex:      lkvCopy.Flex,
+			collapsed: lkvCopy.Collapsed,
 		}
 		// Compute pane count and active pane from KV data.
 		totalPanes := 0

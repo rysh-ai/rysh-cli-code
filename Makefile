@@ -1,4 +1,4 @@
-BIN      := rysh_local
+BIN      := rysh
 BIN_ALT  := rysh
 BIN_DIR  := .
 VERSION  := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -15,10 +15,9 @@ export GOWORK=off
         deps \
         test test-cover wire-test wire-test-real registry registry-serve \
         lint vet \
-        bundle-check bundle-rebuild build-frontend frontend-dev \
+        bundle-check bundle-stamp-check bundle-rebuild build-frontend frontend-dev \
         clean \
-        release release-snapshot release-check goreleaser-install goreleaser-local \
-        setup-dist \
+        release-snapshot release-check goreleaser-install \
         help
 
 # ── Default ───────────────────────────────────────────────────────────────────
@@ -29,11 +28,11 @@ help: ## Show this help
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
-build: ## Build the rysh binary
+build: facetime-helper ## Build the rysh binary
 	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BIN) ./cmd/rysh
 	@echo "Built $(BIN_DIR)/$(BIN)"
 
-build-alt: ## Build legacy 'ry' alias binary
+build-alt: facetime-helper ## Build legacy 'ry' alias binary
 	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BIN_ALT) ./cmd/rysh
 	@echo "Built $(BIN_DIR)/$(BIN_ALT)"
 
@@ -65,6 +64,23 @@ deps: ## Tidy Go module dependencies
 # and the Go suite must not grow a JavaScript toolchain dependency.
 bundle-check: ## Verify internal/web/static matches a fresh build of the renderer (E-50)
 	@./scripts/check-embedded-bundle.sh
+
+# bundle-stamp-check answers the other half: is the RUNNING daemon serving the
+# bundle in this checkout? //go:embed bakes static/ in at compile time, so a
+# binary built before a bundle refresh keeps serving the old UI. /health reports
+# web_bundle = sha256(embedded static/index.html)[:12]; this compares it with the
+# checkout's file. Local daemon only (127.0.0.1); not part of `test`.
+BUNDLE_STAMP_PORT ?= 23232
+bundle-stamp-check: ## Check the running daemon's embedded web bundle matches internal/web/static (MATCH/STALE)
+	@want=$$(shasum -a 256 internal/web/static/index.html | cut -c1-12); \
+	got=$$(curl -s --max-time 5 http://127.0.0.1:$(BUNDLE_STAMP_PORT)/health | sed -n 's/.*"web_bundle":"\([0-9a-f]*\)".*/\1/p'); \
+	if [ -z "$$got" ]; then \
+		echo "UNKNOWN: no web_bundle from 127.0.0.1:$(BUNDLE_STAMP_PORT)/health (daemon down, or built before the stamp existed)"; exit 2; \
+	elif [ "$$got" = "$$want" ]; then \
+		echo "MATCH: running daemon serves web bundle $$got"; \
+	else \
+		echo "STALE: daemon serves $$got, checkout has $$want — rebuild the rysh binary"; exit 1; \
+	fi
 
 bundle-rebuild: ## Rebuild internal/web/static from the renderer, then commit it
 	@./scripts/check-embedded-bundle.sh --write
@@ -133,12 +149,6 @@ clean: ## Remove build artefacts
 	rm -rf .build dist
 	@echo "Cleaned."
 
-# ── Distribution Setup (one-time) ─────────────────────────────────────────────
-
-setup-dist: ## Run the one-time automated distribution channel setup
-	@chmod +x scripts/setup-distribution.sh
-	@scripts/setup-distribution.sh
-
 # ── Release (GoReleaser) ──────────────────────────────────────────────────────
 
 goreleaser-install: ## Install goreleaser if not present
@@ -151,16 +161,6 @@ release-check: goreleaser-install ## Validate .goreleaser.yml configuration
 release-snapshot: goreleaser-install ## Build all platform binaries locally (no publish)
 	goreleaser release --snapshot --clean
 
-## release: Tag and push a new release (triggers the full GitHub Actions pipeline).
-##   Usage: make release VERSION_TAG=0.1.0
-release:
-	@[ -n "$(VERSION_TAG)" ] || (echo "Usage: make release VERSION_TAG=0.1.0" && exit 1)
-	git tag -a "v$(VERSION_TAG)" -m "Release v$(VERSION_TAG)"
-	git push origin "v$(VERSION_TAG)"
-	@echo ""
-	@echo "✓ Release v$(VERSION_TAG) tagged and pushed."
-	@echo "  GitHub Actions will build, sign, and publish automatically."
-	@echo "  Monitor: https://github.com/rysh-ai/rysh-cli/actions"
-
-goreleaser-local: goreleaser-install ## Full release build locally (requires GITHUB_TOKEN)
-	goreleaser release --clean
+.PHONY: facetime-helper
+facetime-helper: ## Build the embedded macOS Contacts helper (macOS hosts only)
+	@if [ "$$(uname -s)" = Darwin ]; then ./scripts/build-facetime-helper.sh; fi

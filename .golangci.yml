@@ -106,15 +106,6 @@ linters:
         linters:
           - staticcheck
 
-      # internal/forge/ingest/grpc_reflect.go speaks gRPC reflection v1alpha,
-      # which upstream has deprecated wholesale. Moving to v1 is a functional
-      # change to reflection support, not lint cleanup — it needs its own change
-      # with its own testing. Excluded until then rather than left red.
-      # TODO: migrate to grpc/reflection/v1 and drop this exclusion.
-      - path: internal/forge/ingest/grpc_reflect\.go
-        text: "SA1019"
-        linters:
-          - staticcheck
 
 issues:
   # Report everything rather than the default 3-per-linter / 3-per-issue caps,

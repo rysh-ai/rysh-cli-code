@@ -31,6 +31,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/board"
+	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 )
 
@@ -43,6 +45,10 @@ import (
 // without a ceiling a single clipboard_copy of a busy pane could blow the
 // deadline and take the whole connection down with it, which is exactly the
 // failure that made the seed a sequence of batches.
+//
+// It is also board.CopyMaxBytes — `##board copy`, the board pane's y/Y and a
+// board pane's clipboard_copy all refuse above it — and a test pins the two
+// equal, so a copy one surface refuses is not one another happily makes.
 const clipboardMaxBytes = 256 * 1024
 
 // clipboardCopyCmd is the clipboard_copy ws command payload.
@@ -64,7 +70,7 @@ type clipboardCopyCmd struct {
 // readable just because it happens to live on the same struct.
 var clipboardSources = []string{
 	"output", "ai_output", "rysh_output", "chat_output", "external_output",
-	"vt_screen", "remote_vt_screen",
+	"vt_screen", "remote_vt_screen", "board",
 }
 
 // handleClipboardCopy answers one clipboard_copy, to the requesting client only.
@@ -82,25 +88,27 @@ func (s *Server) handleClipboardCopy(c *wsClient, data json.RawMessage) {
 	}
 
 	go func() {
-		text, err := s.paneClipboardText(cmd)
+		text, windowed, err := s.paneClipboardText(cmd)
 		limit := clipboardMaxBytes
 		if cmd.MaxBytes > 0 && cmd.MaxBytes < limit {
 			limit = cmd.MaxBytes
 		}
 		capped := capTail(text, limit)
 
-		s.replyClipboardContent(c, cmd, capped, len(capped) < len(text), err)
+		s.replyClipboardContent(c, cmd, capped, windowed || len(capped) < len(text), err)
 	}()
 }
 
-// paneClipboardText fetches one pane buffer over the bus.
-func (s *Server) paneClipboardText(cmd clipboardCopyCmd) (string, string) {
+// paneClipboardText fetches one pane buffer over the bus. windowed reports
+// that the text is a bounded window of something larger (a board with threads
+// withheld or filtered), which the reply's `truncated` flag carries.
+func (s *Server) paneClipboardText(cmd clipboardCopyCmd) (text string, windowed bool, errMsg string) {
 	source := strings.TrimSpace(cmd.Source)
 	if source == "" {
 		source = "output"
 	}
 	if !containsString(clipboardSources, source) {
-		return "", fmt.Sprintf("unknown clipboard source %q — expected one of %s",
+		return "", false, fmt.Sprintf("unknown clipboard source %q — expected one of %s",
 			source, strings.Join(clipboardSources, ", "))
 	}
 
@@ -110,31 +118,63 @@ func (s *Server) paneClipboardText(cmd clipboardCopyCmd) (string, string) {
 		// Fail visible, like webpane_error: a copy that silently yields nothing
 		// is indistinguishable from a pane that is genuinely empty, and the
 		// user is left pressing the button again.
-		return "", "pane did not answer: " + err.Error()
+		return "", false, "pane did not answer: " + err.Error()
 	}
 	pr, ok := reply.(*msg.MsgPaneSnapshotReply)
 	if !ok {
-		return "", "pane returned an unexpected reply"
+		return "", false, "pane returned an unexpected reply"
 	}
 	p := pr.Snapshot
 
+	// An agents-board pane has no buffer worth copying — it is shell-less, and
+	// what sits in its output is whatever happened to land there (board.go's
+	// header records the stale `##pane list` dump seen live). Its content is
+	// the board, so that is what a copy of it returns, whichever plane the
+	// client defaulted to: the same unwrapped text `##board copy` produces.
+	if source == "board" || (p.PaneType == domain.PaneTypeAgentsBoard && source == "output") {
+		if p.PaneType != domain.PaneTypeAgentsBoard {
+			return "", false, "source \"board\" needs an agents-board pane"
+		}
+		return s.boardClipboardText(p.Meta[boardIDMetaKey])
+	}
+
 	switch source {
 	case "output":
-		return p.Output, ""
+		return p.Output, false, ""
 	case "ai_output":
-		return p.AIOutput, ""
+		return p.AIOutput, false, ""
 	case "rysh_output":
-		return p.RyshOutput, ""
+		return p.RyshOutput, false, ""
 	case "chat_output":
-		return p.ChatOutput, ""
+		return p.ChatOutput, false, ""
 	case "external_output":
-		return p.ExternalOutput, ""
+		return p.ExternalOutput, false, ""
 	case "vt_screen":
-		return strings.Join(p.VTScreen, "\n"), ""
+		return strings.Join(p.VTScreen, "\n"), false, ""
 	case "remote_vt_screen":
-		return strings.Join(p.RemoteVTScreen, "\n"), ""
+		return strings.Join(p.RemoteVTScreen, "\n"), false, ""
 	}
-	return "", "unhandled clipboard source " + source
+	return "", false, "unhandled clipboard source " + source
+}
+
+// boardIDMetaKey is the pane meta naming a board pane's board
+// (actors.paneMetaBoardID; the TUI keeps the same constant).
+const boardIDMetaKey = "board.id"
+
+// boardClipboardText is a board pane's copy: the recorder's answer, through
+// the shared copy pipeline (board.BuildCopy), over the same window the web
+// board view shows. An unanswered query is an error, never empty text.
+func (s *Server) boardClipboardText(metaBoard string) (string, bool, string) {
+	boardID := msg.BoardIDFromMeta(metaBoard)
+	reply, err := board.Ask(s.nc, boardID, board.Query{Limit: boardDefaultLimit}, boardQueryTimeout)
+	if err != nil {
+		return "", false, err.Error()
+	}
+	res, err := board.BuildCopy(reply, "", 0)
+	if err != nil {
+		return "", false, err.Error()
+	}
+	return res.Text, board.TruncationNotes(reply) != "", ""
 }
 
 // replyClipboardContent sends the answer to one client. Never broadcast.
@@ -157,10 +197,7 @@ func (s *Server) replyClipboardContent(c *wsClient, cmd clipboardCopyCmd, text s
 	if err != nil {
 		return
 	}
-	select {
-	case c.send <- reply:
-	default: // client too slow or gone — drop, exactly as completion_result does
-	}
+	c.trySend(reply) // dropped if the client is too slow or gone
 }
 
 func containsString(haystack []string, needle string) bool {

@@ -248,6 +248,11 @@ func (p *PaneActor) handleSubmitInput(m *msg.MsgPaneSubmitInput) {
 			_ = p.pub.Send(msg.T("humanoid", p.registeredHumanoid, "inbox"),
 				&msg.MsgAgenticPrompt{Prompt: m.Text})
 		}
+	case "company":
+		// The company view (design 037) is read-only in this cut; typed input
+		// has nowhere to go, so say so in the mode's own buffer.
+		_ = p.pub.SendPaneModeOutput(p.id, "company",
+			"[company] this view is read-only — g refreshes, esc returns to the shell\n")
 	default:
 		// Dynamic per-humanoid mode: the mode name is the humanoid name, so route
 		// input straight to that humanoid and echo into the mode's own buffer.

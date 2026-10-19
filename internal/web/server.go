@@ -8,8 +8,10 @@ package web
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -34,9 +36,34 @@ import (
 //go:embed static/*
 var staticFiles embed.FS
 
+// webBundleStamp identifies the web bundle compiled into this binary: the
+// first 12 hex chars of sha256 over the embedded static/index.html, which names
+// Vite's content-hashed assets and so changes with any bundle change. /health
+// reports it so a stale embed is detectable (design 018 §4): compare with
+// `shasum -a 256 internal/web/static/index.html | cut -c1-12`, or run
+// `make bundle-stamp-check`. Only the short hash — /health is public.
+var webBundleStamp = sync.OnceValue(func() string {
+	return bundleStampOf(staticFiles, "static/index.html")
+})
+
+// bundleStampOf returns "" when the file is missing, and /health then omits
+// the field rather than reporting a stamp of nothing.
+func bundleStampOf(fsys fs.FS, name string) string {
+	b, err := fs.ReadFile(fsys, name)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])[:12]
+}
+
 // Server is the web UI server. It serves static assets over HTTP and maintains
 // WebSocket connections to push real-time workspace snapshots to browsers.
 type Server struct {
+	// guestOf reports design 028 §9 limit 7's guest_of for /health: whose NATS
+	// server this daemon joined as a guest. It returns nil for a daemon that owns
+	// its server; nil itself means not wired. Set before Start.
+	guestOf     func() any
 	port        int
 	host        string // optional bind IP (empty = historical default; see listenAddr)
 	sessionName string
@@ -97,6 +124,13 @@ type Server struct {
 	webPaneMu sync.Mutex
 	webPanes  map[string]*webPaneSession
 
+	// approvalTypes remembers the type of each approval request forwarded to
+	// clients, keyed by request ID, so approval_response can echo a question's
+	// answer as an answer rather than an approval (F-92). See approval.go.
+	approvalTypesMu sync.Mutex
+	approvalTypes   map[string]msg.ApprovalType
+	approvalOrder   []string // request IDs in insertion order, oldest first
+
 	httpSrv *http.Server
 
 	// engine is the built route set, kept after Start so a SHARED listener can
@@ -126,10 +160,15 @@ type Server struct {
 	emailListSub     *nats.Subscription
 	emailDetailSub   *nats.Subscription
 	emailChangedSub  *nats.Subscription
+	companySnapSub   *nats.Subscription
 	waListSub        *nats.Subscription
 	waDetailSub      *nats.Subscription
 	waChangedSub     *nats.Subscription
 	pairingSub       *nats.Subscription
+
+	// syncPaused is the set of panes whose meta turns their web repaint stream
+	// off (web.sync=off, `##pane sync off`). See pane_sync.go.
+	syncPaused syncPausedSet
 
 	// control enables the WS5 control-dashboard surface (design 005 DB4):
 	// pairing approve/allow, channel start/stop, governance and reply-mode
@@ -251,6 +290,8 @@ func (s *Server) Start() error {
 	// Subscribe to email-client events (inbox listing, single-email detail,
 	// inbox-changed) published by email humanoids and forward them to the app.
 	s.subscribeEmailEvents()
+	// Company Connect (design 037): the follower's snapshot pushes.
+	s.subscribeCompanyEvents()
 	s.subscribeWhatsAppEvents()
 
 	// Subscribe to contact-pairing events (WS3 / design 005 DB2) published by
@@ -307,7 +348,18 @@ func (s *Server) Start() error {
 	// Keep /static for backward compatibility.
 	r.StaticFS("/static", http.FS(staticFS))
 	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		h := gin.H{"status": "ok"}
+		if stamp := webBundleStamp(); stamp != "" {
+			h["web_bundle"] = stamp
+		}
+		// A guest daemon keeps its state in another daemon's NATS store; say
+		// whose (design 028 §9 limit 7). Absent for a daemon that owns its server.
+		if s.guestOf != nil {
+			if g := s.guestOf(); g != nil {
+				h["guest_of"] = g
+			}
+		}
+		c.JSON(http.StatusOK, h)
 	})
 	// Username/password login (auth.go). Reachable without credentials — it is
 	// how a browser acquires them.
@@ -408,6 +460,10 @@ func (s *Server) Stop() error {
 		_ = s.emailChangedSub.Unsubscribe()
 		s.emailChangedSub = nil
 	}
+	if s.companySnapSub != nil {
+		_ = s.companySnapSub.Unsubscribe()
+		s.companySnapSub = nil
+	}
 	if s.waListSub != nil {
 		_ = s.waListSub.Unsubscribe()
 		s.waListSub = nil
@@ -471,11 +527,24 @@ func (s *Server) Port() int {
 // WebSocket
 // ---------------------------------------------------------------------------
 
+// EnableCompression negotiates permessage-deflate with any client that offers
+// it (every browser does). The stream is mostly pane_vt screens — JSON rows of
+// terminal text padded with spaces — which measured at 1.4% of their size under
+// deflate. Uncompressed, a single busy pane cost ~40 KB/s, which a reverse SSH
+// tunnel on a mobile uplink could not carry; see visible_panes.go for the
+// other half of that fix. Clients that do not offer the extension are served
+// uncompressed exactly as before.
 var upgrader = websocket.Upgrader{
-	CheckOrigin:     func(r *http.Request) bool { return true },
-	ReadBufferSize:  4096,
-	WriteBufferSize: 4096,
+	CheckOrigin:       func(r *http.Request) bool { return true },
+	ReadBufferSize:    4096,
+	WriteBufferSize:   4096,
+	EnableCompression: true,
 }
+
+// compressMinBytes is the smallest frame worth deflating. Below it the
+// per-message deflate overhead (no context takeover: a fresh stream per frame)
+// costs CPU and can grow the frame.
+const compressMinBytes = 256
 
 func (s *Server) handleWebSocket(c *gin.Context) {
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
@@ -568,6 +637,22 @@ func (s *Server) snapshotMessageRaw(layoutOnly, fresh bool) *domain.WorkspaceSna
 	return &r.Snapshot
 }
 
+// snapshotMessageStructural returns the decoded structural snapshot — ids,
+// layout and per-pane flags, no output and no histories — for callers that
+// only ask "does this pane still exist".
+func (s *Server) snapshotMessageStructural() *domain.WorkspaceSnapshot {
+	reply, err := s.pub.Request(msg.T("ws", "snapshot"),
+		&msg.MsgGetWorkspaceSnapshot{LayoutOnly: true, NoHistories: true}, 2*time.Second)
+	if err != nil {
+		return nil
+	}
+	r, ok := reply.(*msg.MsgWorkspaceSnapshotReply)
+	if !ok {
+		return nil
+	}
+	return &r.Snapshot
+}
+
 // snapshotMessageOpts is snapshotMessage with the histories switch exposed. The
 // seed path uses it; everything else keeps the previous behaviour.
 func (s *Server) snapshotMessageOpts(layoutOnly, fresh, noHistories bool) []byte {
@@ -616,6 +701,8 @@ func (s *Server) subscribeApprovalRequests() {
 		if len(parts) >= 3 {
 			paneID = parts[2]
 		}
+
+		s.rememberApprovalType(req.RequestID, req.Type)
 
 		data, err := json.Marshal(map[string]interface{}{
 			"type": "approval_request",
@@ -1153,6 +1240,20 @@ func (s *Server) handleCommand(action string, data json.RawMessage) {
 		if json.Unmarshal(data, &cmd) == nil {
 			_ = s.pub.Send(wsInbox, &msg.MsgFocusPaneByID{ID: cmd.ID})
 		}
+	case "lane_collapse":
+		// Design 053: the desktop/web twin of `##lane collapse|expand|toggle`
+		// and the TUI's strip click. Only the three verbs act; anything else
+		// is dropped rather than guessed at.
+		var cmd struct {
+			Verb string `json:"verb"`
+			Lane string `json:"lane"`
+		}
+		if json.Unmarshal(data, &cmd) == nil {
+			switch cmd.Verb {
+			case "collapse", "expand", "toggle":
+				_ = s.pub.Send(wsInbox, &msg.MsgLaneCollapse{Verb: cmd.Verb, Lane: cmd.Lane})
+			}
+		}
 	case "submit_input":
 		var cmd struct {
 			Text string `json:"text"`
@@ -1251,6 +1352,7 @@ func (s *Server) handleCommand(action string, data json.RawMessage) {
 			RequestID string `json:"request_id"`
 			Decision  string `json:"decision"`
 			Reason    string `json:"reason"`
+			ChoiceIdx int    `json:"choice_idx"`
 		}
 		// Every rejection answers with approval_error (same fail-visible rule
 		// as webpane_input). A dropped approval is indistinguishable from a
@@ -1282,16 +1384,29 @@ func (s *Server) handleCommand(action string, data json.RawMessage) {
 			RequestID: cmd.RequestID,
 			Decision:  msg.ApprovalDecision(cmd.Decision),
 			Reason:    cmd.Reason,
+			ChoiceIdx: cmd.ChoiceIdx,
 		}
 		_ = s.pub.Send(subject, resp)
 
-		// Also echo the decision to the pane's output.
+		// Also echo the decision to the pane's output. A question (ask_user)
+		// is not a gate, so its answer is echoed as an answer (F-92). A choice
+		// answers a question too; a gate refuses it (F-47), so it is echoed as
+		// the choice it is.
 		label := "approved"
-		switch msg.ApprovalDecision(cmd.Decision) {
-		case msg.DecisionNo, msg.DecisionNoWithExplanation:
-			label = "rejected"
-		case msg.DecisionYesAlways:
-			label = "approved (always)"
+		if s.takeApprovalType(cmd.RequestID) == msg.ApprovalTypeQuestion {
+			label = msg.QuestionEchoLabel(msg.ApprovalDecision(cmd.Decision), cmd.Reason, cmd.ChoiceIdx)
+		} else {
+			switch msg.ApprovalDecision(cmd.Decision) {
+			case msg.DecisionNo, msg.DecisionNoWithExplanation:
+				label = "rejected"
+			case msg.DecisionYesAlways:
+				label = "approved (always)"
+			case msg.DecisionChoiceSelected:
+				label = fmt.Sprintf("chose option %d", cmd.ChoiceIdx+1)
+				if cmd.Reason != "" {
+					label += ": " + cmd.Reason
+				}
+			}
 		}
 		_ = s.pub.SendPaneAIOutput(cmd.PaneID, fmt.Sprintf("[%s]\n", label))
 
@@ -1566,6 +1681,11 @@ func (s *Server) handleCommand(action string, data json.RawMessage) {
 	// these from its EmailAdapter and replies asynchronously as the
 	// "email_list" / "email_detail" events (see subscribeEmailEvents).
 	// -----------------------------------------------------------------------
+	// Company Connect (design 037): fire-and-forget; the follower's answer
+	// arrives as a broadcast company_snapshot (see company.go).
+	case "company_refresh":
+		_ = s.pub.Send(msg.CompanyRefreshSubject(), &msg.MsgCompanyRefresh{})
+
 	case "email_list", "email_refresh":
 		var cmd struct {
 			HumanoidName string `json:"humanoid_name"`
@@ -1840,6 +1960,13 @@ func (s *Server) subscribePaneOutput() {
 		if mode == "" {
 			return
 		}
+		// A sync-paused pane streams nothing to web clients (pane_sync.go).
+		// Checked before decoding: a fleet of paused agents is exactly the case
+		// where this handler runs hottest. Chat output is exempt for the same
+		// reason wantsOutput exempts it.
+		if mode != "chat" && s.syncPaused.has(paneID) {
+			return
+		}
 		text, turnID, ok := s.decodeOutputText(natMsg.Data)
 		if !ok || text == "" {
 			return
@@ -1854,7 +1981,7 @@ func (s *Server) subscribePaneOutput() {
 		if err != nil {
 			return
 		}
-		s.hub.sendWhere(data, func(c *wsClient) bool { return c.streamContent })
+		s.hub.sendWhere(data, func(c *wsClient) bool { return c.streamContent && c.wantsOutput(paneID, mode) })
 	})
 	if err != nil {
 		s.logger.Error("failed to subscribe to pane output", "err", err)
@@ -1954,6 +2081,14 @@ func (s *Server) streamPaneVT(ctx context.Context) {
 	// Cleared with prevInteractive when the last stream client leaves, so the
 	// next one starts from a clean slate rather than inheriting stale hashes.
 	lastFrame := map[string]uint64{}
+	// Event-driven (vt_signals.go): the structure is re-read only when a change
+	// signal says it may have moved, or every vtStructureResync; a pane's frame
+	// is fetched only when it signalled, is owed to a client, is new, or on the
+	// vtSweepInterval sweep. Mirror panes emit no signal and are polled as before.
+	signals := s.subscribeVTSignals()
+	defer signals.close()
+	var interactive []interactivePane
+	var lastStructure, lastSweep time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -1966,30 +2101,75 @@ func (s *Server) streamPaneVT(ctx context.Context) {
 				if len(lastFrame) > 0 {
 					lastFrame = map[string]uint64{}
 				}
+				signals.reset()
+				interactive = nil
 				continue
 			}
-			// NoHistories: this loop reads pane ids and the RawMode /
-			// RemoteInteractive flags and nothing else, but a layout-only snapshot
-			// still carries each pane's command history — measured at 28.9 KB of a
-			// 29.9 KB pane reply, the same seeded file duplicated across every pane
-			// (F-7c). At 10Hz over 50 panes that was ~7.5 MB/s of bus traffic for
-			// bytes discarded on arrival.
-			reply, err := s.pub.Request(msg.T("ws", "snapshot"),
-				&msg.MsgGetWorkspaceSnapshot{LayoutOnly: true, NoHistories: true}, time.Second)
-			if err != nil {
-				continue
+			dirty, structureChanged := signals.take()
+			now := time.Now()
+			if structureChanged || now.Sub(lastStructure) >= vtStructureResync {
+				panes, syncState, ok := s.readInteractivePanes()
+				if !ok {
+					// Retry next tick: keep the structure marked stale.
+					signals.mu.Lock()
+					signals.structure = true
+					signals.mu.Unlock()
+					continue
+				}
+				interactive, lastStructure = panes, now
+				// Panes whose web sync just came back on (pane_sync.go). Their
+				// clients hold whatever screen they had when the pause began,
+				// so forget the last-broadcast hash — the next frame goes out
+				// even if it happens to match — force a fetch this tick, and
+				// send their text buffers again.
+				if resumed := s.syncPaused.replace(syncState); len(resumed) > 0 {
+					for _, id := range resumed {
+						delete(lastFrame, id)
+						dirty[id] = true
+					}
+					go s.sendResumeCatchUp(resumed)
+				}
 			}
-			r, ok := reply.(*msg.MsgWorkspaceSnapshotReply)
-			if !ok {
-				continue
+			sweep := now.Sub(lastSweep) >= vtSweepInterval
+			if sweep {
+				lastSweep = now
 			}
+			// Which panes any client is showing (visible_panes.go). Collected
+			// only once the structure is known, because it consumes the clients'
+			// pending catch-ups.
+			demand := s.collectVTDemand()
 			current := map[string]bool{}
-			for _, pane := range interactivePanes(&r.Snapshot) {
+			for _, pane := range interactive {
 				// Mark interactive before any per-pane fetch error so a transient
 				// snapshot failure doesn't spuriously clear the pane next tick.
 				current[pane.id] = true
+				// Sync-paused (pane_sync.go): nothing is fetched and nothing is
+				// sent, whoever is showing it. A catch-up owed to a client that
+				// just scrolled it into view is dropped with it; resuming sync
+				// sends every client showing the pane its current frame.
+				if s.syncPaused.has(pane.id) {
+					continue
+				}
+				// Nobody is showing this pane: skip the fetch and the frame. Its
+				// lastFrame hash stays as it was; a client that later shows the
+				// pane is sent the current frame through pending.
+				if !demand.polls(pane.id) {
+					continue
+				}
+				owed := demand.pending[pane.id]
+				// Nothing says this frame moved: skip the fetch. Mirror panes
+				// never signal, so they are still pulled every tick.
+				_, seen := lastFrame[pane.id]
+				if seen && len(owed) == 0 && !sweep && !dirty[pane.id] && !isMirrorPaneID(pane.id) {
+					continue
+				}
 				data, ok := s.paneVTFrame(pane)
 				if !ok {
+					// Keep the catch-up for the next tick rather than leaving
+					// the client on a stale screen until the pane next changes.
+					for c := range owed {
+						c.vt.addPending(pane.id)
+					}
 					continue
 				}
 				// Identical bytes render identically, so there is nothing for a
@@ -1998,15 +2178,28 @@ func (s *Server) streamPaneVT(ctx context.Context) {
 				// drift from the comparison the skip is claiming to make.
 				h := frameHash(data)
 				if prev, seen := lastFrame[pane.id]; seen && prev == h {
+					// Unchanged, but a client that just started showing the pane
+					// never received it. Sent through the hub, not trySend, so it
+					// stays ordered behind any frame for this pane still queued.
+					if len(owed) > 0 {
+						s.hub.sendWhere(data, func(c *wsClient) bool { return owed[c] })
+					}
 					continue
 				}
 				lastFrame[pane.id] = h
-				s.hub.sendWhere(data, func(c *wsClient) bool { return c.streamContent })
+				id := pane.id
+				s.hub.sendWhere(data, func(c *wsClient) bool { return c.streamContent && c.vt.wants(id) })
 			}
 			// Panes that were interactive last tick but aren't now: push one
 			// clearing frame so stream clients leave the VT view.
 			for paneID := range prevInteractive {
 				if current[paneID] {
+					continue
+				}
+				// A paused pane stays frozen on its last screen even when its
+				// program exits; the resume catch-up carries raw_mode=false.
+				if s.syncPaused.has(paneID) {
+					delete(lastFrame, paneID)
 					continue
 				}
 				// Drop the remembered frame too, so a pane that goes interactive
@@ -2029,6 +2222,24 @@ func (s *Server) streamPaneVT(ctx context.Context) {
 			prevInteractive = current
 		}
 	}
+}
+
+// readInteractivePanes reads the structural snapshot and returns the panes
+// showing a VT screen, plus the sync-paused panes (pane_sync.go). NoHistories:
+// only ids, meta and the RawMode / RemoteInteractive flags are read — a
+// layout-only snapshot still carries every pane's command history otherwise
+// (F-7c).
+func (s *Server) readInteractivePanes() ([]interactivePane, paneSyncState, bool) {
+	reply, err := s.pub.Request(msg.T("ws", "snapshot"),
+		&msg.MsgGetWorkspaceSnapshot{LayoutOnly: true, NoHistories: true}, time.Second)
+	if err != nil {
+		return nil, paneSyncState{}, false
+	}
+	r, ok := reply.(*msg.MsgWorkspaceSnapshotReply)
+	if !ok {
+		return nil, paneSyncState{}, false
+	}
+	return interactivePanes(&r.Snapshot), readPaneSyncState(&r.Snapshot), true
 }
 
 // frameHash is an FNV-1a hash of an encoded pane_vt frame. Mirrors the TUI's
@@ -2121,7 +2332,8 @@ func (s *Server) paneVTFrame(pane interactivePane) ([]byte, bool) {
 		return data, true
 	}
 
-	preply, err := s.pub.Request(subject, &msg.MsgGetPaneSnapshot{}, time.Second)
+	// NoHistories: this runs at 10Hz and reads only the VT fields below.
+	preply, err := s.pub.Request(subject, &msg.MsgGetPaneSnapshot{NoHistories: true}, time.Second)
 	if err != nil {
 		return nil, false
 	}
@@ -2168,3 +2380,8 @@ func newPrefixFS(inner fs.FS, prefix string) *prefixFS {
 func (p *prefixFS) Open(name string) (fs.File, error) {
 	return p.inner.Open(path.Join(p.prefix, name))
 }
+
+// SetGuestOf wires /health's guest_of (design 028 §9 limit 7). /health is
+// public, so fn should return the public view (bus.GuestOf.Public): no host
+// path. Call it before Start.
+func (s *Server) SetGuestOf(fn func() any) { s.guestOf = fn }

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"os/exec"
+	"sort"
 	"sync"
 	"time"
 )
@@ -22,8 +23,22 @@ type BackgroundSession struct {
 	exitCode  int
 	exitErr   error
 	finished  bool
-	mu        sync.Mutex
+	// finishedAt is when the process exited; pruneFinishedLocked ages
+	// finished sessions out by it.
+	finishedAt time.Time
+	mu         sync.Mutex
 }
+
+// A finished session is kept so its output can still be read (bash_output),
+// but not forever: only kill_shell ever removed one, so every command an agent
+// ran in the background kept its 256 KB ring buffer for the life of the daemon
+// (F-71). Finished sessions are dropped once older than finishedSessionTTL,
+// and beyond maxFinishedSessions the oldest go first. Running ones are never
+// touched.
+const (
+	finishedSessionTTL  = time.Hour
+	maxFinishedSessions = 32
+)
 
 // BackgroundSessionManager manages background shell sessions.
 type BackgroundSessionManager struct {
@@ -66,6 +81,7 @@ func (m *BackgroundSessionManager) Start(id, command, workDir string) error {
 		err := cmd.Wait()
 		sess.mu.Lock()
 		sess.finished = true
+		sess.finishedAt = time.Now()
 		sess.exitErr = err
 		if err != nil {
 			if exitErr, ok := err.(*exec.ExitError); ok {
@@ -79,10 +95,41 @@ func (m *BackgroundSessionManager) Start(id, command, workDir string) error {
 	}()
 
 	m.mu.Lock()
+	m.pruneFinishedLocked(time.Now())
 	m.sessions[id] = sess
 	m.mu.Unlock()
 
 	return nil
+}
+
+// pruneFinishedLocked drops finished sessions past finishedSessionTTL, then
+// the oldest finished ones beyond maxFinishedSessions. Caller holds m.mu.
+func (m *BackgroundSessionManager) pruneFinishedLocked(now time.Time) {
+	type fin struct {
+		id string
+		at time.Time
+	}
+	var finished []fin
+	for id, s := range m.sessions {
+		s.mu.Lock()
+		done, at := s.finished, s.finishedAt
+		s.mu.Unlock()
+		if !done {
+			continue
+		}
+		if now.Sub(at) > finishedSessionTTL {
+			delete(m.sessions, id)
+			continue
+		}
+		finished = append(finished, fin{id, at})
+	}
+	if len(finished) <= maxFinishedSessions {
+		return
+	}
+	sort.Slice(finished, func(i, j int) bool { return finished[i].at.Before(finished[j].at) })
+	for _, f := range finished[:len(finished)-maxFinishedSessions] {
+		delete(m.sessions, f.id)
+	}
 }
 
 // Get retrieves a session by ID.

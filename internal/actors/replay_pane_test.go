@@ -25,10 +25,19 @@ import (
 // the given (content, tsMs) events for pane "p1" in tab "tab-1".
 func newReplayWorkspace(t *testing.T, events ...int64) (*WorkspaceActor, *nats.Conn, *msg.CodecRegistry) {
 	t.Helper()
+	return newReplayWorkspaceWith(t, func(nc *nats.Conn, codecs *msg.CodecRegistry) {
+		tabSnapshotResponder(t, nc, codecs, "tab-1", "p1")
+	}, events...)
+}
+
+// newReplayWorkspaceWith is newReplayWorkspace with the caller's own tab-1
+// snapshot responder (exactly one may answer a snapshot request).
+func newReplayWorkspaceWith(t *testing.T, responder func(*nats.Conn, *msg.CodecRegistry), events ...int64) (*WorkspaceActor, *nats.Conn, *msg.CodecRegistry) {
+	t.Helper()
 	nc := startInProcessNATS(t)
 	codecs := msg.DefaultCodecRegistry()
 	pub := msg.NewNATSPublisher(nc, codecs)
-	tabSnapshotResponder(t, nc, codecs, "tab-1", "p1")
+	responder(nc, codecs)
 
 	capt := replay.NewCapture(nc, codecs, "replay-pane-test")
 	if err := capt.Start(); err != nil {
@@ -64,6 +73,18 @@ func newReplayWorkspace(t *testing.T, events ...int64) (*WorkspaceActor, *nats.C
 		lastKVWrite:  time.Now(), // skip the immediate KV write (no KV store here)
 	}
 	return w, nc, codecs
+}
+
+// onlyReplayPane returns the single running replay-pane playback.
+func onlyReplayPane(t *testing.T, w *WorkspaceActor) (string, *replay.Player) {
+	t.Helper()
+	if len(w.replayPanes) != 1 {
+		t.Fatalf("replay-pane playbacks = %d, want exactly 1", len(w.replayPanes))
+	}
+	for id, p := range w.replayPanes {
+		return id, p
+	}
+	return "", nil
 }
 
 // decodeEnvelope decodes one NATS envelope into its typed message.
@@ -105,16 +126,11 @@ func TestReplayPlayCreatesDedicatedReplayPane(t *testing.T) {
 	if !strings.Contains(out.String(), "into replay pane") {
 		t.Fatalf("play output = %q, want a replay-pane announcement", out.String())
 	}
-	if w.replayPaneID == "" {
-		t.Fatal("replayPaneID not recorded")
-	}
-	if w.replayPlayer == nil {
-		t.Fatal("no player started")
-	}
-	if _, ok := w.replayPlayer.Status(); !ok {
+	rpID, player := onlyReplayPane(t, w)
+	if _, ok := player.Status(); !ok {
 		t.Fatal("player is not a controlled player (Status not supported)")
 	}
-	defer w.replayPlayer.Stop()
+	defer player.Stop()
 
 	raw, err := tabInbox.NextMsg(2 * time.Second)
 	if err != nil {
@@ -128,8 +144,8 @@ func TestReplayPlayCreatesDedicatedReplayPane(t *testing.T) {
 	if create.PaneType != "replay" {
 		t.Fatalf("create.PaneType = %q, want \"replay\" (the pane must never start a shell)", create.PaneType)
 	}
-	if create.PaneID == "" || create.PaneID != w.replayPaneID {
-		t.Fatalf("create.PaneID = %q, want the recorded replay pane %q", create.PaneID, w.replayPaneID)
+	if create.PaneID == "" || create.PaneID != rpID {
+		t.Fatalf("create.PaneID = %q, want the recorded replay pane %q", create.PaneID, rpID)
 	}
 	if create.LaneID != "lane-tab-1" {
 		t.Fatalf("create.LaneID = %q, want the invoking pane's lane", create.LaneID)
@@ -148,7 +164,7 @@ func TestReplayPlayCreatesDedicatedReplayPane(t *testing.T) {
 	if !ok || !strings.HasPrefix(st.Status, "REPLAY ") || !strings.Contains(st.Status, "/") {
 		t.Fatalf("first status = %#v, want a REPLAY position/total badge", st)
 	}
-	if !strings.Contains(rawStatus.Subject, w.replayPaneID) {
+	if !strings.Contains(rawStatus.Subject, rpID) {
 		t.Fatalf("badge published on %q, want the replay pane's status subject", rawStatus.Subject)
 	}
 }
@@ -171,13 +187,13 @@ func TestReplayPlayHereKeepsV1InPane(t *testing.T) {
 	if strings.Contains(out.String(), "into replay pane") {
 		t.Fatalf("--here output = %q, want the v1 in-pane announcement", out.String())
 	}
-	if w.replayPaneID != "" {
-		t.Fatalf("replayPaneID = %q after --here, want empty", w.replayPaneID)
+	if len(w.replayPanes) != 0 {
+		t.Fatalf("replay panes = %v after --here, want none", w.replayPanes)
 	}
-	if w.replayPlayer == nil {
+	if w.replayHere == nil {
 		t.Fatal("no player started")
 	}
-	if _, ok := w.replayPlayer.Status(); ok {
+	if _, ok := w.replayHere.Status(); ok {
 		t.Fatal("--here must use the v1 (uncontrolled) player")
 	}
 	// The replayed bytes land on the invoking pane's own output path.
@@ -196,36 +212,34 @@ func TestReplayControlDispatch(t *testing.T) {
 
 	var out strings.Builder
 	w.handleReplayCommand(&out, "p1", []string{"play", "--pane", "p1"})
-	if w.replayPlayer == nil || w.replayPaneID == "" {
-		t.Fatalf("playback not started: %q", out.String())
-	}
-	defer w.replayPlayer.Stop()
+	rpID, player := onlyReplayPane(t, w)
+	defer player.Stop()
 
 	waitStatus := func(desc string, pred func(replay.PlayerStatus) bool) {
 		t.Helper()
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
-			if st, ok := w.replayPlayer.Status(); ok && pred(st) {
+			if st, ok := player.Status(); ok && pred(st) {
 				return
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
-		st, _ := w.replayPlayer.Status()
+		st, _ := player.Status()
 		t.Fatalf("timed out waiting for %s (status %+v)", desc, st)
 	}
 
 	// Wrong pane ID: dropped.
 	w.handleReplayControl(&msg.MsgReplayControl{PaneID: "someone-else", Action: "pause"})
-	if st, ok := w.replayPlayer.Status(); !ok || st.Paused {
+	if st, ok := player.Status(); !ok || st.Paused {
 		t.Fatalf("control for a foreign pane must be dropped (status %+v ok=%v)", st, ok)
 	}
 
 	// Matching pane ID: pause, speed, seek all land.
-	w.handleReplayControl(&msg.MsgReplayControl{PaneID: w.replayPaneID, Action: "pause"})
+	w.handleReplayControl(&msg.MsgReplayControl{PaneID: rpID, Action: "pause"})
 	waitStatus("paused", func(st replay.PlayerStatus) bool { return st.Paused })
-	w.handleReplayControl(&msg.MsgReplayControl{PaneID: w.replayPaneID, Action: "faster"})
+	w.handleReplayControl(&msg.MsgReplayControl{PaneID: rpID, Action: "faster"})
 	waitStatus("speed 2x", func(st replay.PlayerStatus) bool { return st.Speed == 2 })
-	w.handleReplayControl(&msg.MsgReplayControl{PaneID: w.replayPaneID, Action: "seek", DeltaMs: 10_000})
+	w.handleReplayControl(&msg.MsgReplayControl{PaneID: rpID, Action: "seek", DeltaMs: 10_000})
 	waitStatus("pos 10s", func(st replay.PlayerStatus) bool { return st.Pos == 10*time.Second })
 
 	// ##replay stop still works for a pane playback.
@@ -235,7 +249,7 @@ func TestReplayControlDispatch(t *testing.T) {
 		t.Fatalf("stop output = %q", out.String())
 	}
 	select {
-	case <-w.replayPlayer.Done():
+	case <-player.Done():
 	case <-time.After(5 * time.Second):
 		t.Fatal("##replay stop did not stop the pane playback")
 	}
@@ -249,16 +263,13 @@ func TestStopReplayIfPaneClosed(t *testing.T) {
 
 	var out strings.Builder
 	w.handleReplayCommand(&out, "p1", []string{"play"})
-	if w.replayPlayer == nil || w.replayPaneID == "" {
-		t.Fatalf("playback not started: %q", out.String())
-	}
-	replayPane := w.replayPaneID
+	replayPane, player := onlyReplayPane(t, w)
 
 	// A different pane closing must not stop the playback.
 	if w.stopReplayIfPaneClosed("unrelated-pane") {
 		t.Fatal("unrelated pane close stopped the playback")
 	}
-	if !w.replayPlayer.Active() {
+	if !player.Active() {
 		t.Fatal("player no longer active after an unrelated close")
 	}
 
@@ -267,12 +278,12 @@ func TestStopReplayIfPaneClosed(t *testing.T) {
 		t.Fatal("replay pane close did not stop the playback")
 	}
 	select {
-	case <-w.replayPlayer.Done():
+	case <-player.Done():
 	case <-time.After(5 * time.Second):
 		t.Fatal("playback still running after its pane closed")
 	}
-	if w.replayPaneID != "" {
-		t.Fatalf("replayPaneID = %q after close, want cleared", w.replayPaneID)
+	if _, still := w.replayPanes[replayPane]; still {
+		t.Fatalf("replay pane %q still tracked after close", replayPane)
 	}
 }
 
@@ -308,12 +319,14 @@ func TestReplayPaneTypePropagates(t *testing.T) {
 
 // TestReplayBadgeFeedDedupes: the badge feed publishes only when the rendered
 // badge text changes — its 1-second display resolution is the throttle that
-// keeps per-emission status updates off the wire.
+// keeps per-emission status updates off the wire. The wall clock ticks with
+// the same 1-second resolution, so it adds no publishes of its own.
 func TestReplayBadgeFeedDedupes(t *testing.T) {
 	var got []string
 	feed := replayBadgeFeed(func(b string) { got = append(got, b) })
 
-	st := replay.PlayerStatus{Pos: 0, Total: 10 * time.Second, Speed: 1}
+	start := time.Date(2026, 10, 3, 14, 30, 44, 0, time.UTC)
+	st := replay.PlayerStatus{Start: start, Pos: 0, Total: 120 * time.Second, Speed: 1}
 	feed(st)
 	st.Pos = 200 * time.Millisecond // same displayed second — no publish
 	feed(st)
@@ -323,8 +336,15 @@ func TestReplayBadgeFeedDedupes(t *testing.T) {
 	feed(st)
 	st.Paused = true // state change — publish
 	feed(st)
+	st.Pos = 60 * time.Second // a scrub: bar and wall clock both move — publish
+	feed(st)
 
-	want := []string{"REPLAY 00:00/00:10", "REPLAY 00:01/00:10", "REPLAY 00:01/00:10 ⏸"}
+	want := []string{
+		"REPLAY ▕░░░░░░░░░░░░▏ 00:00/02:00 · 14:30:44",
+		"REPLAY ▕░░░░░░░░░░░░▏ 00:01/02:00 · 14:30:45",
+		"REPLAY ▕░░░░░░░░░░░░▏ 00:01/02:00 · 14:30:45 ⏸",
+		"REPLAY ▕██████░░░░░░▏ 01:00/02:00 · 14:31:44 ⏸",
+	}
 	if len(got) != len(want) {
 		t.Fatalf("published %d badge(s) %v, want %d %v", len(got), got, len(want), want)
 	}

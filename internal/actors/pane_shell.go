@@ -253,8 +253,15 @@ func (p *PaneActor) startShell() {
 		p.status = "error"
 		return
 	}
+	// Pollable, so read deadlines and Close reach a pending Read (F-68).
+	f = pollablePTY(f)
 	p.ptyFile = f
 	p.cmd = cmd
+	// Reap the shell. Nothing else ever Waits on it, so every shell that
+	// exited — a closed pane, an `exit`, a pane actor restart — stayed a
+	// zombie, holding its pidfd, for the rest of the daemon's life (a 45-day
+	// daemon had seven). Kill in stopShell is still safe after this returns.
+	go func() { _ = cmd.Wait() }()
 	if cmd.Process != nil {
 		// pty.Start runs the shell with Setsid, so it leads its own process
 		// group. Record it to detect when foreground commands are running.
@@ -267,7 +274,7 @@ func (p *PaneActor) startShell() {
 	// Initialize PTY size (default 80x24, will be updated by TUI resize).
 	p.ptyRows = 24
 	p.ptyCols = 80
-	_ = pty.Setsize(f, &pty.Winsize{Rows: p.ptyRows, Cols: p.ptyCols})
+	_ = setPTYSize(f, &pty.Winsize{Rows: p.ptyRows, Cols: p.ptyCols})
 
 	// Initialize virtual terminal emulator.
 	p.vtermEmu = vterm.NewWithWriter(int(p.ptyRows), int(p.ptyCols), terminalResponseWriter{
@@ -621,6 +628,17 @@ func (p *PaneActor) rawReadLoop(r io.Reader) {
 				fgRedrew = true
 			}
 
+			// A redrawing foreground program on the PRIMARY screen (not alt-screen
+			// — that case is vim/htop/less, already excluded from vt10x's own
+			// scrollback by design) never triggers vt10x's scroll-region capture,
+			// since it repaints via cursor addressing rather than linefeeds. Absent
+			// this, such a pane (codex) has no history at all to scroll back
+			// through. captureRedrawFrame is its own cheap no-op once per interval,
+			// so this costs nothing on every other pane.
+			if childFg && fgRedrew && !vtAltScreen {
+				p.captureRedrawFrame()
+			}
+
 			// wasInteractive is the pane's current (debounced) interactive state.
 			wasInteractive := p.rawMode || p.cursorHidden
 
@@ -946,8 +964,8 @@ func (p *PaneActor) handleRelayActivate(cols, rows int) {
 		if shrunk.Rows > 1 {
 			shrunk.Rows--
 		}
-		_ = pty.Setsize(p.ptyFile, &shrunk)
-		_ = pty.Setsize(p.ptyFile, &ws)
+		_ = setPTYSize(p.ptyFile, &shrunk)
+		_ = setPTYSize(p.ptyFile, &ws)
 
 		// Relay resizes the PTY directly to the caller's terminal dimensions, so
 		// the interactive program repaints at THIS size. Propagate the same size to
@@ -1104,7 +1122,7 @@ type paneSizeSettleMsg struct{}
 // is not expressible (backlog `F-52`). A shell makes this permanent — readline
 // repaints only the line being edited on SIGWINCH, so every command already
 // committed keeps the hole. That is what produced the reported paste, where
-// `…/marketing/assets/videos/…` came back as `…/marketing/a` + `deos/…`.
+// a long `…/assets/videos/…` path came back as `…/a` + `deos/…`.
 //
 // The settle window does not make narrowing safe; it makes SPURIOUS narrowing
 // stop happening. A pane narrows with no user gesture whenever the claim set
@@ -1267,7 +1285,7 @@ func (p *PaneActor) handleResize(rows, cols int) {
 	p.ptyRows = uint16(rows)
 	p.ptyCols = uint16(cols)
 	if p.ptyFile != nil {
-		_ = pty.Setsize(p.ptyFile, &pty.Winsize{Rows: p.ptyRows, Cols: p.ptyCols})
+		_ = setPTYSize(p.ptyFile, &pty.Winsize{Rows: p.ptyRows, Cols: p.ptyCols})
 	}
 	if p.vtermEmu != nil {
 		p.vtermEmu.Resize(rows, cols)

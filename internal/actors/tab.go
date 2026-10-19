@@ -4,7 +4,6 @@ package actors
 
 import (
 	"log/slog"
-	"strings"
 
 	"github.com/asynkron/protoactor-go/actor"
 	"github.com/google/uuid"
@@ -38,6 +37,7 @@ type laneRef struct {
 	flex         int
 	activePaneID string // cached active pane ID from the lane
 	paneCount    int    // cached pane count from the lane
+	collapsed    bool   // folded to a strip; tab-owned and authoritative, like flex
 }
 
 // TabActor manages the lanes within a single tab.
@@ -81,7 +81,7 @@ type TabActor struct {
 	// Pipeline state
 	pipelineEnabled          bool // gate for ##pipe commands and pipeline mode
 	pipelineActive           bool
-	pipelineBuffer           strings.Builder
+	pipelineBuffer           cappedBuffer // capped at maxPipelineBytes
 	pipelineLLMPromptExecPID *actor.PID
 	pipelinePaneID           string                     // synthetic pane ID: "pipeline-" + tabID
 	pipelines                map[string]*LoadedPipeline // name -> pipeline
@@ -376,7 +376,7 @@ func (t *TabActor) Receive(ctx actor.Context) {
 		}
 
 	case *msg.MsgPipelineOutputAppend:
-		t.pipelineBuffer.WriteString(m.Text)
+		t.pipelineBuffer.Append(m.Text, maxPipelineBytes)
 
 	// --- CLI targeted operations ---
 
@@ -404,7 +404,7 @@ func (t *TabActor) Receive(ctx actor.Context) {
 	case *msg.RequestEnvelope:
 		switch inner := m.Inner.(type) {
 		case *msg.MsgGetTabSnapshot:
-			snap := t.collectSnapshot(inner.LayoutOnly, inner.NoHistories)
+			snap := t.collectSnapshot(inner.LayoutOnly, inner.NoHistories, inner.HistoryPaneID)
 			_ = m.Reply(&msg.MsgTabSnapshotReply{Snapshot: snap})
 		case *msg.MsgGetActivePane:
 			// Refresh lane pane counts to avoid stale cached values.
@@ -418,6 +418,9 @@ func (t *TabActor) Receive(ctx actor.Context) {
 				paneID = t.laneRefs[t.activeLane].activePaneID
 			}
 			_ = m.Reply(&msg.MsgActivePaneReply{PaneID: paneID, PaneCount: totalPanes})
+		case *msg.MsgSetLaneCollapsed:
+			errText := t.setLaneCollapsed(inner.LaneID, inner.Collapsed)
+			_ = m.Reply(&msg.MsgSetLaneCollapsedReply{Error: errText, ActivePaneID: t.ActivePaneID()})
 		}
 	}
 }

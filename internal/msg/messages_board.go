@@ -2,7 +2,13 @@
 
 package msg
 
-import "strconv"
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"regexp"
+	"strconv"
+)
 
 // agents-board (design 025) — the message contract for a threaded, push-based
 // view of what every agent in a session is doing.
@@ -40,6 +46,16 @@ const (
 	BoardKindTaskDone  = "task-done"
 	BoardKindBlocked   = "blocked"
 	BoardKindReply     = "reply"
+
+	// BoardKindCmd and BoardKindAck are the two kinds that are NOT chat
+	// (design 050, polling-stream). A cmd is a work order addressed to ONE
+	// pane (ToPaneID), carrying a CmdID; the courier delivers it into that
+	// agent's own inbox beside its keyboard, never through its PTY. An ack is
+	// the recipient saying "got it", filed on the command's own thread and
+	// naming the same CmdID. Every other kind is status, and nothing consumes
+	// status as work.
+	BoardKindCmd = "cmd"
+	BoardKindAck = "ack"
 )
 
 // MsgBoardPost is one message on the agents board: a root, or a reply under a
@@ -74,10 +90,14 @@ type MsgBoardPost struct {
 	// that adding them later is a breaking change; the schema is still V=1, so
 	// it is still cheap.
 	//
-	// A directed message is still CHAT, not routing: this says who was spoken
-	// TO, exactly as a chat app shows an @mention. It carries no chain, no
-	// msg id and no delivery semantics, and ANSA — not this field — is what
-	// actually delivers anything.
+	// On every kind EXCEPT BoardKindCmd these are still chat: who was spoken
+	// TO, as a chat app shows an @mention, with no delivery behind it.
+	//
+	// ON A cmd THEY ARE THE ADDRESS (design 050, founder 2026-10-11: the board
+	// becomes the fleet's message bus). ToPaneID is required, is always the
+	// FULL pane uuid (the door resolves a name to it), and the courier delivers
+	// the command to exactly that pane. ToPersona stays display-only, for the
+	// file header's reason: a given-name is not unique per session.
 	//
 	// Both are empty for a broadcast, which stays the default. Gate 3 is
 	// unaffected: a non-fleet claude directs a message exactly as a fleet one
@@ -85,7 +105,24 @@ type MsgBoardPost struct {
 	ToPersona string `json:"to_persona,omitempty"`
 	ToPaneID  string `json:"to_pane_id,omitempty"`
 
-	// STILL DELIBERATELY ABSENT: Envelope, Fleet, Role, Unit.
+	// CmdID names a command (BoardKindCmd) and, on an ack (BoardKindAck), the
+	// command being acknowledged. Empty on every other kind.
+	//
+	// Minted by the SENDER, like ThreadID and for the same two reasons: no
+	// round trip, and a retried send is idempotent rather than a second order.
+	// A caller may supply its own (fleetctl passes its msg-NNNN); otherwise the
+	// door mints one with MintCmdID. Unique per sender, not per session — the
+	// pair (PaneID, CmdID) is the identity, which is why a command's thread is
+	// CmdThreadID(PaneID, CmdID).
+	CmdID string `json:"cmd_id,omitempty"`
+
+	// File is an absolute path the recipient must read in full, for an order
+	// too long to carry inline (fleetctl's --file). Optional; cmd only.
+	File string `json:"file,omitempty"`
+
+	// STILL DELIBERATELY ABSENT: Envelope, Fleet, Role, Unit. (CmdID and File
+	// are not fleet fields: a non-fleet claude sends a command exactly as a
+	// fleet one does.)
 	//
 	// The "FROM manager … TO worker …" routing envelope remains a fleet
 	// concern and does not enter this schema — gate 4's reopening added a
@@ -143,6 +180,70 @@ type MsgCLIBoardPost struct {
 	// costs nothing to gate 4, which is about the schema on the wire between
 	// agents.
 	Board string `json:"board,omitempty"`
+
+	// To is the recipient of a command (Kind == BoardKindCmd): a pane id, an
+	// auto-title or a given-name, resolved by the door to a full pane uuid.
+	// Required on a cmd and REFUSED on every other kind — a directed status
+	// post that nothing delivers would read like an order that was sent.
+	To string `json:"to,omitempty"`
+
+	// CmdID is optional on a cmd (the door mints one) and required on an ack.
+	CmdID string `json:"cmd_id,omitempty"`
+
+	// File is an absolute path for the recipient to read in full; cmd only.
+	// The CLI checks it exists before sending.
+	File string `json:"file,omitempty"`
+}
+
+// MsgCLIBoardResolve asks the workspace who a pane is and which board it is on:
+// `rysh board inbox` and `rysh board ack` need both before they can read.
+//
+// Its own message for the reason MsgCLIBoardPost is: the ## path would focus
+// the pane and echo into it. The reply is a MsgCLIResponse with ID = the full
+// pane uuid and Output = the board id.
+type MsgCLIBoardResolve struct {
+	AsPaneID string `json:"as_pane_id"`
+	// WantCaps asks the daemon to append its board capabilities to Output as
+	// a second line, "caps: <a> <b> ...". Opt-in so the first line stays the
+	// bare board id for every caller; a daemon that predates the field ignores
+	// it and answers with no caps line, which IS the answer "no capabilities".
+	WantCaps bool `json:"want_caps,omitempty"`
+}
+
+// BoardCaps are the board capabilities this daemon reports (design 051):
+// "queue" means its courier leaves queue-messaging panes to their own
+// listeners. A daemon without it would deliver their prompts twice.
+var BoardCaps = []string{"queue"}
+
+// cmdIDPattern bounds what a caller-supplied CmdID may contain. It ends up in a
+// thread id, a KV key (design 050 §5.2) and an envelope an agent reads, so it is
+// kept to characters that are safe in all three.
+var cmdIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// ValidateCmdID refuses a CmdID that could not travel safely.
+func ValidateCmdID(id string) error {
+	if !cmdIDPattern.MatchString(id) {
+		return fmt.Errorf("invalid command id %q: want 1-64 of [A-Za-z0-9._-], starting with a letter or digit", id)
+	}
+	return nil
+}
+
+// MintCmdID builds a command id the sender owns: "cmd-<base36 millis>-<4 hex>".
+// The random suffix covers two sends in the same millisecond from one pane.
+func MintCmdID(nowMillis int64) string {
+	var b [2]byte
+	_, _ = rand.Read(b[:])
+	return "cmd-" + strconv.FormatInt(nowMillis, 36) + "-" + hex.EncodeToString(b[:])
+}
+
+// CmdThreadID is the thread a command opens: "<sender-pane-uuid>/<cmd-id>".
+//
+// It has the shape of a MintThreadID id on purpose, so the board's store files
+// the command as the ROOT of its own thread (it owns the prefix) and every reply
+// and ack lands under it. The recipient's ack and `rysh board reply` both
+// address this id.
+func CmdThreadID(senderPaneID, cmdID string) string {
+	return senderPaneID + "/" + cmdID
 }
 
 // NewBoardPost stamps the schema version and the poster's clock. Every producer
@@ -275,3 +376,23 @@ func BoardQuerySubject(board string) string { return boardSubject(board, "query"
 
 // BoardQueryPattern is the wildcard the recorder serves every named board on.
 func BoardQueryPattern() string { return T("board", "*", "query") }
+
+// ClipboardWriteSubject is where the daemon asks an attached terminal UI to put
+// text on the user's clipboard (`##board copy`).
+//
+// The daemon cannot write the clipboard that matters: over SSH its own
+// clipboard is the remote host's, and only the TUI owns the tty that OSC 52
+// travels down to the user's local terminal. So the command's OUTPUT is made in
+// the daemon — the recorder query, the selection, the text — and only the last
+// hop is handed to the TUI, on this subject, as a REQUEST. A TUI that wrote the
+// clipboard answers; no answer (web-only or `rysh send` sessions) sends the
+// daemon to its local clipboard instead, and the confirmation says which path
+// the copy took.
+func ClipboardWriteSubject() string { return T("ws", "clipboard", "write") }
+
+// MsgClipboardWrite asks an attached TUI to copy Text to the clipboard, and is
+// answered with a MsgCLIResponse (OK, Output naming the path taken).
+type MsgClipboardWrite struct {
+	PaneID string `json:"pane_id"` // the pane the command was typed in
+	Text   string `json:"text"`
+}

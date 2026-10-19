@@ -51,6 +51,7 @@ func (p *PaneActor) buildSnapshot(includeContent, includeConversations, includeH
 		GivenName:             p.givenName,
 		Hidden:                p.hidden,
 		Program:               p.Program(),
+		ProgramPGID:           int(p.programPGID.Load()),
 		Meta:                  p.metaCopy(),
 		ListeningToID:         p.listeningToID,
 		RegisteredHumanoid:    p.registeredHumanoid,
@@ -385,7 +386,7 @@ func (p *PaneActor) maybePersist() {
 }
 
 func (p *PaneActor) persistNow(snap domain.PaneSnapshot) {
-	if p.kvStore == nil {
+	if p.kvStore == nil || p.removed.Load() {
 		return
 	}
 	data, err := json.Marshal(snap)
@@ -402,7 +403,7 @@ func (p *PaneActor) persistNow(snap domain.PaneSnapshot) {
 // persistBuffers writes the private buffer to its own KV key,
 // separate from the pane snapshot.
 func (p *PaneActor) persistBuffers() {
-	if p.kvStore == nil {
+	if p.kvStore == nil || p.removed.Load() {
 		return
 	}
 	_, _ = p.kvStore.Put(p.id+".private", []byte(p.privateBuffer.String()))
@@ -420,16 +421,40 @@ func (p *PaneActor) FlushKV() {
 	p.flushKV()
 }
 
-// DeleteKV removes this pane's entry and its buffer entries from the KV store.
+// paneKVSuffixes are the pane-bucket keys a pane owns, as suffixes of its id.
+// ".llm_session" is the agentic session (rysh-shared SessionMemory, written by
+// the pane's LLM execution child); it was missing here, so every closed pane
+// that ever ran a prompt left its whole conversation in KV for good (F-69).
+var paneKVSuffixes = []string{"", ".private", ".public", ".llm_conversation", ".llm_session", paneMetaKVSuffix}
+
+// DeleteKV marks the pane removed and deletes everything it persisted. Called
+// by the parent that is closing the pane, just before it stops the actor.
+//
+// The mark is what makes the delete stick: the stop is asynchronous, and the
+// pane's Stopping handler flushed its full state back to KV AFTER this delete
+// had run, resurrecting the very keys it removed. Every persist path checks
+// the mark, and Stopped (which runs after the pane's children — the LLM
+// execution actor and memory manager, which persist on their own — have
+// terminated) deletes once more.
 func (p *PaneActor) DeleteKV() {
-	if p.kvStore == nil {
-		return
+	p.removed.Store(true)
+	p.deleteKVKeys()
+}
+
+// MarkRemoved flags the pane as being closed for good without deleting yet;
+// its Stopped handler does the delete. For parents that stop a pane without
+// an explicit DeleteKV call (a closed tab).
+func (p *PaneActor) MarkRemoved() { p.removed.Store(true) }
+
+// deleteKVKeys deletes the pane's pane-bucket keys and its rysh-memory
+// summaries. Idempotent.
+func (p *PaneActor) deleteKVKeys() {
+	if p.kvStore != nil {
+		for _, suffix := range paneKVSuffixes {
+			_ = p.kvStore.Delete(p.id + suffix)
+		}
 	}
-	_ = p.kvStore.Delete(p.id)
-	_ = p.kvStore.Delete(p.id + ".private")
-	_ = p.kvStore.Delete(p.id + ".public")
-	_ = p.kvStore.Delete(p.id + ".llm_conversation")
-	_ = p.kvStore.Delete(p.id + paneMetaKVSuffix)
+	deleteMemoryKV(p.nc, p.id)
 }
 
 // RestoreState loads previously persisted state including output, mode, status,
@@ -471,12 +496,14 @@ func (p *PaneActor) RestoreState(snap domain.PaneSnapshot) {
 	// after the holder exists but before the executor spawns.
 	p.providerOverride = snap.ProviderOverride
 	p.providerOverrideModel = snap.ProviderOverrideModel
-	p.mergedHistory = snap.MergedHistory
-	p.shellHistory = snap.ShellHistory
-	p.promptHistory = snap.PromptHistory
-	p.ryshHistory = snap.RyshHistory
-	p.chatHistory = snap.ChatHistory
-	p.externalHistory = snap.ExternalHistory
+	// Clamped: a KV document written before the cap existed can carry a
+	// history of any length, and restoring it whole would re-arm the growth.
+	p.mergedHistory = lastNHistory(snap.MergedHistory, p.historyLimit())
+	p.shellHistory = lastNHistory(snap.ShellHistory, p.historyLimit())
+	p.promptHistory = lastNHistory(snap.PromptHistory, p.historyLimit())
+	p.ryshHistory = lastNHistory(snap.RyshHistory, p.historyLimit())
+	p.chatHistory = lastNHistory(snap.ChatHistory, p.historyLimit())
+	p.externalHistory = lastNHistory(snap.ExternalHistory, p.historyLimit())
 	p.shellOutput.Set(snap.ShellOutput)
 	p.aiOutput.Set(snap.AIOutput)
 	p.ryshOutput.Set(snap.RyshOutput)
@@ -582,7 +609,7 @@ type paneMetaKV struct {
 // LOGGED, not swallowed — a silent persist failure is precisely how F-54
 // stayed invisible until a restart destroyed every fleet's addressing.
 func (p *PaneActor) persistDurableMeta() {
-	if p.kvStore == nil {
+	if p.kvStore == nil || p.removed.Load() {
 		return
 	}
 	data, err := json.Marshal(paneMetaKV{GivenName: p.givenName, Meta: p.metaCopy()})

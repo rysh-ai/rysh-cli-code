@@ -180,12 +180,15 @@ func (s *Server) handleBoardGet(c *wsClient, data json.RawMessage) {
 // Dropping is right for this message specifically: the client POLLS, so a lost
 // frame costs one refresh interval and nothing else. A blocking send here would
 // park a goroutine on a socket nobody is reading.
+//
+// "Gone" is the half this used to get wrong. It sent with a select and a
+// default, which drops on a FULL channel but panics on a CLOSED one — and the
+// hub closes it when the client disconnects, which a polling viewer does
+// mid-query often enough that this took the whole daemon down twice. trySend
+// is what actually makes the send safe; see its comment.
 func sendToClient(c *wsClient, frame []byte) {
 	if c == nil {
 		return
 	}
-	select {
-	case c.send <- frame:
-	default:
-	}
+	c.trySend(frame)
 }

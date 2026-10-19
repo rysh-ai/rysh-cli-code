@@ -1,0 +1,185 @@
+{
+  "_comment": "Shared meeting-URL test vectors (MTG-10). Source of truth: rysh-cli internal/meeting MeetingPlatform. rysh-server tests load the same file; change both sides together.",
+  "platforms": [
+    "google_meet",
+    "zoom",
+    "microsoft_teams"
+  ],
+  "accepted": [
+    {
+      "url": "https://meet.google.com/abc-defg-hij",
+      "platform": "google_meet",
+      "why": "Meet code"
+    },
+    {
+      "url": "https://zoom.us/j/81234567890?pwd=AbCdEf123.1",
+      "platform": "zoom",
+      "why": "zoom.us /j with passcode"
+    },
+    {
+      "url": "https://us06web.zoom.us/j/81234567890?pwd=AbCdEf123.1",
+      "platform": "zoom",
+      "why": "regional subdomain"
+    },
+    {
+      "url": "https://acme.zoom.us/j/81234567890?pwd=x&omn=81234567890",
+      "platform": "zoom",
+      "why": "vanity subdomain, omn key"
+    },
+    {
+      "url": "https://zoom.com/j/81234567890",
+      "platform": "zoom",
+      "why": "zoom.com, no passcode"
+    },
+    {
+      "url": "https://app.zoom.us/wc/join/81234567890?pwd=x",
+      "platform": "zoom",
+      "why": "web client /wc/join/<id>"
+    },
+    {
+      "url": "https://zoom.us/wc/81234567890/join?pwd=x",
+      "platform": "zoom",
+      "why": "web client /wc/<id>/join"
+    },
+    {
+      "url": "https://acme.zoom.us/my/jane.doe",
+      "platform": "zoom",
+      "why": "personal link /my/<name>"
+    },
+    {
+      "url": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_NjQ1MjBkYzItYjU0Yi00ZDIxLWE4ZGEtOTc0YzQ5ZjQ2ZmZh%40thread.v2/0?context=%7b%22Tid%22%3a%2272f988bf-86f1-41af-91ab-2d7cd011db47%22%2c%22Oid%22%3a%22a1b2c3d4-0000-4000-8000-000000000000%22%7d",
+      "platform": "microsoft_teams",
+      "why": "meetup-join with JSON context"
+    },
+    {
+      "url": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_NjQ1MjBkYzItYjU0Yi00ZDIxLWE4ZGEtOTc0YzQ5ZjQ2ZmZh%40thread.v2/0?context=%7b%22Tid%22%3a%2272f988bf-86f1-41af-91ab-2d7cd011db47%22%2c%22Oid%22%3a%22a1b2c3d4-0000-4000-8000-000000000000%22%7d&anon=true",
+      "platform": "microsoft_teams",
+      "why": "meetup-join with anon"
+    },
+    {
+      "url": "https://teams.microsoft.com/l/meetup-join/19%3a5a8b0c1d2e3f4a5b6c7d8e9f0a1b2c3d%40thread.tacv2/1695812345678?context=%7b%22Tid%22%3a%22t%22%7d",
+      "platform": "microsoft_teams",
+      "why": "channel meeting thread.tacv2"
+    },
+    {
+      "url": "https://teams.microsoft.com/meet/2345678901234?p=AbCdEfGh",
+      "platform": "microsoft_teams",
+      "why": "business short link"
+    },
+    {
+      "url": "https://teams.live.com/meet/9876543210987?p=XyZ123",
+      "platform": "microsoft_teams",
+      "why": "personal Teams short link"
+    }
+  ],
+  "refused": [
+    {
+      "url": "http://zoom.us/j/81234567890",
+      "why": "not https"
+    },
+    {
+      "url": "https://zoom.us.evil.example/j/81234567890",
+      "why": "suffix host"
+    },
+    {
+      "url": "https://evilzoom.us/j/81234567890",
+      "why": "lookalike host"
+    },
+    {
+      "url": "https://a.b.zoom.us/j/81234567890",
+      "why": "nested subdomain"
+    },
+    {
+      "url": "https://zoom.us:8443/j/81234567890",
+      "why": "explicit port"
+    },
+    {
+      "url": "https://user@zoom.us/j/81234567890",
+      "why": "userinfo"
+    },
+    {
+      "url": "https://zoom.us/j/81234567890#success",
+      "why": "fragment"
+    },
+    {
+      "url": "https://zoom.us/s/81234567890?zak=hosttoken",
+      "why": "host start link"
+    },
+    {
+      "url": "https://zoom.us/j/81234567890?zak=hosttoken",
+      "why": "host ZAK credential in query"
+    },
+    {
+      "url": "https://zoom.us/j/81234567890?tk=registrant",
+      "why": "registrant token"
+    },
+    {
+      "url": "https://zoom.us/j/81234567890?pwd=a&pwd=b",
+      "why": "repeated query key"
+    },
+    {
+      "url": "https://zoom.us/j/abc",
+      "why": "non-numeric meeting id"
+    },
+    {
+      "url": "https://zoom.us/w/81234567890",
+      "why": "webinar link (unsupported)"
+    },
+    {
+      "url": "https://zoom.us/meetings/81234567890/invitations",
+      "why": "invitation page"
+    },
+    {
+      "url": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0",
+      "why": "missing context"
+    },
+    {
+      "url": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0?context=notjson",
+      "why": "context not JSON"
+    },
+    {
+      "url": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0?context=%7b%22a%22%3a1%7d",
+      "why": "context value not a string"
+    },
+    {
+      "url": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0?context=%7b%7d&url=https://x",
+      "why": "unknown query key"
+    },
+    {
+      "url": "https://teams.microsoft.com/dl/launcher/launcher.html?url=%2F_%23%2Fl%2Fmeetup-join",
+      "why": "launcher wrapper"
+    },
+    {
+      "url": "https://teams.live.com/l/meetup-join/19%3ameeting_x%40thread.v2/0?context=%7b%22Tid%22%3a%22t%22%7d",
+      "why": "meetup-join on teams.live.com"
+    },
+    {
+      "url": "https://nam12.safelinks.protection.outlook.com/?url=https%3A%2F%2Fteams.microsoft.com%2Fmeet%2F1",
+      "why": "Outlook Safe Link"
+    },
+    {
+      "url": "https://teams.microsoft.com/meet/abc?p=x",
+      "why": "non-numeric Teams id"
+    },
+    {
+      "url": "https://teams.microsoft.com/meet/2345678901234?p=x&redirect=y",
+      "why": "unknown query key"
+    },
+    {
+      "url": "https://meet.google.com/abc-defg-hij?authuser=1",
+      "why": "Meet with query"
+    },
+    {
+      "url": "https://meet.google.com.evil.example/abc-defg-hij",
+      "why": "suffix host"
+    },
+    {
+      "url": "https://bit.ly/abc",
+      "why": "shortener"
+    },
+    {
+      "url": "",
+      "why": "empty"
+    }
+  ]
+}

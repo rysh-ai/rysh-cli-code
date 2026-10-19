@@ -6,6 +6,7 @@ package actors
 
 import (
 	"bytes"
+	"encoding/binary"
 
 	"golang.org/x/sys/unix"
 )
@@ -35,4 +36,48 @@ func processName(pid int) string {
 		comm = comm[:i]
 	}
 	return string(bytes.TrimSpace(comm))
+}
+
+// processExecArgs returns the executable path a pid was exec'd with and its
+// argv, from sysctl kern.procargs2 — the same source `ps -o args=` reads.
+//
+// The path is the one passed to execve, NOT resolved: for the native-installer
+// `claude` it is ~/.local/bin/claude, the symlink, while p_comm above is the
+// version-named file it points at (F-15). Measured 2026-10-03 on claude
+// 2.1.287/2.1.288: p_comm="2.1.288", exec path=".../.local/bin/claude",
+// argv[0]="claude".
+//
+// The buffer is: int32 argc, the exec path, NUL padding, then argc
+// NUL-terminated arguments (followed by the environment, which is not read).
+// Any error — including EINVAL for another user's process — yields "", nil.
+func processExecArgs(pid int) (string, []string) {
+	if pid <= 0 {
+		return "", nil
+	}
+	raw, err := unix.SysctlRaw("kern.procargs2", pid)
+	if err != nil || len(raw) < 4 {
+		return "", nil
+	}
+	argc := int(binary.LittleEndian.Uint32(raw[:4]))
+	rest := raw[4:]
+	end := bytes.IndexByte(rest, 0)
+	if end < 0 {
+		return string(rest), nil
+	}
+	exe := string(rest[:end])
+	rest = rest[end:]
+	for len(rest) > 0 && rest[0] == 0 {
+		rest = rest[1:]
+	}
+	var argv []string
+	for len(argv) < argc && len(rest) > 0 {
+		end := bytes.IndexByte(rest, 0)
+		if end < 0 {
+			argv = append(argv, string(rest))
+			break
+		}
+		argv = append(argv, string(rest[:end]))
+		rest = rest[end+1:]
+	}
+	return exe, argv
 }

@@ -30,6 +30,11 @@ const (
 	// session is doing (design 025). A founder ruling made this a pane type
 	// rather than an input mode.
 	PaneTypeAgentsBoard = "agents-board"
+
+	// PaneTypeMeeting is a meeting the human joins in the desktop app (design
+	// 043, ##meeting join): its meta carries the meeting.* keys and the app
+	// renders the meeting; the TUI shows a placeholder.
+	PaneTypeMeeting = "meeting"
 )
 
 // IsShelllessPaneType reports whether a pane of this type must never start a
@@ -42,7 +47,7 @@ const (
 // hit.
 func IsShelllessPaneType(paneType string) bool {
 	switch paneType {
-	case PaneTypeReplay, PaneTypeAgentsBoard:
+	case PaneTypeReplay, PaneTypeAgentsBoard, PaneTypeMeeting:
 		return true
 	default:
 		// PaneTypeApproval is deliberately NOT here: an approval pane's

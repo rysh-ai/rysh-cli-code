@@ -12,6 +12,7 @@ import (
 	"github.com/asynkron/protoactor-go/actor"
 	"github.com/google/uuid"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/agentenv"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 )
 
@@ -134,16 +135,23 @@ func (w *WorkspaceActor) scheduleClaudeLaunchAs(alias, sessionID, promptFile, gi
 
 // scheduleClaudeLaunchWith is scheduleClaudeLaunchAs plus extra claude flags.
 func (w *WorkspaceActor) scheduleClaudeLaunchWith(alias, sessionID, promptFile, givenName, extraArgs string, hidden bool, retries int) {
+	w.scheduleClaudeLaunchMsg(msg.MsgLaunchClaudeInPane{
+		Alias:      alias,
+		SessionID:  sessionID,
+		PromptFile: promptFile,
+		GivenName:  givenName,
+		Hidden:     hidden,
+		ExtraArgs:  extraArgs,
+		Retries:    retries,
+	})
+}
+
+// scheduleClaudeLaunchMsg is the launcher's one timer. It takes the whole
+// message so a retry carries every field forward — a field added to the
+// message and dropped by a hand-copied retry is the bug this shape avoids.
+func (w *WorkspaceActor) scheduleClaudeLaunchMsg(m msg.MsgLaunchClaudeInPane) {
 	time.AfterFunc(claudeLaunchRetryEvery, func() {
-		_ = w.pub.Send(msg.T("ws", "inbox"), &msg.MsgLaunchClaudeInPane{
-			Alias:      alias,
-			SessionID:  sessionID,
-			PromptFile: promptFile,
-			GivenName:  givenName,
-			Hidden:     hidden,
-			ExtraArgs:  extraArgs,
-			Retries:    retries,
-		})
+		_ = w.pub.Send(msg.T("ws", "inbox"), &m)
 	})
 }
 
@@ -153,7 +161,9 @@ func (w *WorkspaceActor) handleLaunchClaudeInPane(m *msg.MsgLaunchClaudeInPane) 
 	paneID := w.resolvePaneID(m.Alias)
 	if paneID == "" {
 		if m.Retries > 0 {
-			w.scheduleClaudeLaunchWith(m.Alias, m.SessionID, m.PromptFile, m.GivenName, m.ExtraArgs, m.Hidden, m.Retries-1)
+			next := *m
+			next.Retries--
+			w.scheduleClaudeLaunchMsg(next)
 		}
 		// Out of retries: the pane never appeared, and there is nothing to
 		// launch into. Silent by design — the pane's absence is already visible
@@ -164,9 +174,16 @@ func (w *WorkspaceActor) handleLaunchClaudeInPane(m *msg.MsgLaunchClaudeInPane) 
 	// Record before launching. If claude dies on startup the pane still says
 	// which session it was meant to be, which is what makes the failure
 	// diagnosable instead of just empty.
-	_ = w.pub.Send(msg.T("pane", paneID, "inbox"), &msg.MsgPaneSetMeta{
-		Key: "claude.session_id", Value: m.SessionID,
-	})
+	if m.Native {
+		// The full design-029 stamp, which includes claude.session_id: this is
+		// what lets the post-restore sweep bring the claude back.
+		cwd, _ := nativeAgentCwd(w.paneSnapshotByID(paneID))
+		w.stampNativeAgentMeta(paneID, nativeAgentClaude, cwd, m.ExtraArgs, m.SessionID, false, "")
+	} else {
+		_ = w.pub.Send(msg.T("pane", paneID, "inbox"), &msg.MsgPaneSetMeta{
+			Key: "claude.session_id", Value: m.SessionID,
+		})
+	}
 	if m.PromptFile != "" {
 		_ = w.pub.Send(msg.T("pane", paneID, "inbox"), &msg.MsgPaneSetMeta{
 			Key: "claude.prompt_file", Value: m.PromptFile,
@@ -189,24 +206,13 @@ func (w *WorkspaceActor) handleLaunchClaudeInPane(m *msg.MsgLaunchClaudeInPane) 
 	})
 }
 
-// claudeCleanEnv unsets the markers a parent claude exports, so a claude
-// started from inside another one is a top-level session rather than a nested
-// child of the conversation that launched it.
-var claudeCleanEnv = []string{
-	"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH",
-	"CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID",
-	"CLAUDE_PID", "CLAUDE_EFFORT",
-}
-
-// claudeLaunchCommand builds the shell line the pane runs.
+// claudeLaunchCommand builds the shell line the pane runs. The scrub — the
+// nesting markers a parent claude exports AND every credential an rc file may
+// have exported into the pane shell — is agentenv's one definition, applied by
+// `rysh exec-clean` (agentenv.TypedLine).
 func claudeLaunchCommand(sessionID, promptFile, extraArgs string) string {
 	var b strings.Builder
-	b.WriteString("env")
-	for _, v := range claudeCleanEnv {
-		b.WriteString(" -u ")
-		b.WriteString(v)
-	}
-	b.WriteString(" claude --session-id ")
+	b.WriteString("claude --session-id ")
 	b.WriteString(sessionID)
 	if extraArgs != "" {
 		b.WriteString(" ")
@@ -220,5 +226,5 @@ func claudeLaunchCommand(sessionID, promptFile, extraArgs string) string {
 		b.WriteString(promptFile)
 		b.WriteString(`)"`)
 	}
-	return b.String()
+	return agentenv.TypedLine(agentenv.Claude, b.String())
 }

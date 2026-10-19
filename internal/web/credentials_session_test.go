@@ -36,26 +36,26 @@ func TestSessionCredentialsFallBackToProject(t *testing.T) {
 // second one to set a login silently changed the first one's.
 func TestSessionCredentialsAreIndependent(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := SaveCredentials(dir, "halilagin", "cli-password"); err != nil {
+	if _, err := SaveCredentials(dir, "alice", "cli-password"); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
 	cli := SessionCredentials(dir, "macmini-rysh")
 	app := SessionCredentials(dir, "macmini-rysh-elect")
 
-	if _, err := SaveCredentialsFor(app, "halilagin", "app-password"); err != nil {
+	if _, err := SaveCredentialsFor(app, "alice", "app-password"); err != nil {
 		t.Fatalf("save app login: %v", err)
 	}
 
 	appCreds, err := LoadCredentialsFor(app)
-	if err != nil || appCreds == nil || !appCreds.Verify("halilagin", "app-password") {
+	if err != nil || appCreds == nil || !appCreds.Verify("alice", "app-password") {
 		t.Fatalf("app session does not accept its own password: %+v (%v)", appCreds, err)
 	}
-	if appCreds.Verify("halilagin", "cli-password") {
+	if appCreds.Verify("alice", "cli-password") {
 		t.Fatal("app session still accepts the project password")
 	}
 	// The other session kept the project login, untouched.
 	cliCreds, err := LoadCredentialsFor(cli)
-	if err != nil || cliCreds == nil || !cliCreds.Verify("halilagin", "cli-password") {
+	if err != nil || cliCreds == nil || !cliCreds.Verify("alice", "cli-password") {
 		t.Fatalf("the CLI session's login was disturbed: %+v (%v)", cliCreds, err)
 	}
 	// Distinct signing keys, so a token minted for one is not valid on the other.

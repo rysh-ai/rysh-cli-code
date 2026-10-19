@@ -66,7 +66,27 @@ func (p *PaneActor) noteForegroundProgram(pgid int) {
 		srv.NoteForeground(p.id, "")
 		return
 	}
-	srv.NoteForeground(p.id, processName(pgid))
+	srv.NoteForeground(p.id, foregroundCLI(pgid))
+}
+
+// foregroundCLI names the program a process group leader is, in the terms the
+// CLI profile table uses: the known agent CLI it is, or — when it is none —
+// the kernel's name for it, which the proxy then declines to watch (F-13).
+//
+// processName alone is the kernel's accounting name, and for the native-
+// installer `claude` that is its version, "2.1.288" (F-15); the exec path and
+// argv are what still say "claude".
+func foregroundCLI(pid int) string {
+	return identifyCLI(pid, processName(pid))
+}
+
+// identifyCLI is foregroundCLI for a pid whose kernel name is already known.
+func identifyCLI(pid int, comm string) string {
+	exe, argv := processExecArgs(pid)
+	if name, ok := proxy.IdentifyCLI(comm, exe, argv); ok {
+		return name
+	}
+	return comm
 }
 
 // emitUnproxiedWarning writes the one-shot warning for a pane whose known CLI

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	neturl "net/url"
 	"strings"
 	"time"
 
@@ -16,6 +15,7 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/bridge"
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
+	"github.com/rysh-ai/rysh-cli-code/internal/upstream"
 )
 
 // RemoteUpstreamActor subscribes to the local pane's sharedOutput NATS topic
@@ -234,9 +234,6 @@ func (r *RemoteUpstreamActor) connectRemote() {
 	// since share connections are lightweight and should not count as sessions.
 	proxyPath := "/workspaces/" + workspace + "/nats"
 	proxyPath += "?connection_type=share"
-	if r.config.APIKey != "" {
-		proxyPath += "&api_key=" + neturl.QueryEscape(r.config.APIKey)
-	}
 
 	// Use unlimited reconnects for upstream connections to maintain resilience.
 	maxReconnects := r.config.MaxReconnectAttempts
@@ -247,6 +244,7 @@ func (r *RemoteUpstreamActor) connectRemote() {
 	opts := []nats.Option{
 		nats.Name(fmt.Sprintf("rysh-upstream-%s", r.paneID[:8])),
 		nats.ProxyPath(proxyPath),
+		upstream.NATSAPIKeyHeader(r.config.APIKey), // the key rides in a header, not the URL (F-86)
 		nats.MaxReconnects(maxReconnects),
 		nats.Token(r.config.APIKey),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {

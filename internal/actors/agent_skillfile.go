@@ -27,6 +27,12 @@ type skillFrontmatter struct {
 	// consequential tool call on an explicit approval instead. Policy
 	// `always_gate` / `bash.deny` (design 013) still overrides this.
 	AutoApprove *bool `yaml:"auto_approve"`
+	// Voice is the TTS voice the agent speaks with when attached to a meeting
+	// (`rysh meeting join --agent`, `##agent meeting`), for the meeting's
+	// --tts provider (design 048): an Aura 2 model such as
+	// "aura-2-apollo-en" (deepgram, the default), an ElevenLabs voice id, or
+	// an OpenAI voice such as "nova". Empty = a distinct default per agent.
+	Voice string `yaml:"voice"`
 }
 
 // agentDefinition holds the parsed result of a skill file.
@@ -36,7 +42,9 @@ type agentDefinition struct {
 	Model        string
 	Isolation    string
 	AutoApprove  *bool // nil = default (true); see skillFrontmatter
+	Voice        string
 	SystemPrompt string
+	Path         string // the resolved skill file, absolute when resolvable
 }
 
 // parseSkillFile parses a Claude Code skill-format .md file.
@@ -73,7 +81,12 @@ func parseSkillFile(path string, expand func(string) string) (*agentDefinition, 
 	// value (e.g. "# --- section ---") does not truncate the frontmatter.
 	fmRaw, body, ok := splitFrontmatter(content)
 	if !ok {
+		abs, aerr := filepath.Abs(path)
+		if aerr != nil {
+			abs = path
+		}
 		return &agentDefinition{
+			Path:         abs,
 			Name:         deriveSkillName(path),
 			SystemPrompt: strings.TrimSpace(expand(content)),
 		}, nil
@@ -98,12 +111,18 @@ func parseSkillFile(path string, expand func(string) string) (*agentDefinition, 
 		fm.Isolation = ""
 	}
 
+	abs, aerr := filepath.Abs(path)
+	if aerr != nil {
+		abs = path
+	}
 	return &agentDefinition{
+		Path:         abs,
 		Name:         fm.Name,
 		Description:  fm.Description,
 		Model:        fm.Model,
 		Isolation:    fm.Isolation,
 		AutoApprove:  fm.AutoApprove,
+		Voice:        fm.Voice,
 		SystemPrompt: strings.TrimSpace(expand(body)),
 	}, nil
 }

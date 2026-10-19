@@ -8,9 +8,10 @@
 // test reads its credentials from RYSH_LIVE_<CHANNEL>_* env vars and SKIPS when
 // they are absent — a missing credential is a skip, never a failure. Run one with:
 //
-//	RYSH_LIVE_EMAIL_IMAP_HOST=… RYSH_LIVE_EMAIL_SMTP_HOST=… \
-//	RYSH_LIVE_EMAIL_USERNAME=… RYSH_LIVE_EMAIL_PASSWORD=… \
-//	go test -tags livechannels -run TestLiveEmail -v ./internal/channels/
+//	RYSH_LIVE_CHATBOT_SERVER_URL=… RYSH_LIVE_CHATBOT_WORKSPACE_ID=… \
+//	RYSH_LIVE_CHATBOT_API_KEY=… RYSH_LIVE_CHATBOT_CONFIG_ID=… \
+//	RYSH_LIVE_CHATBOT_WIDGET_KEY=… \
+//	go test -tags livechannels -run TestLiveChatbot -v ./internal/channels/
 //
 // Credentials come from the environment only and are never logged; assertions
 // print subjects/addresses, never secrets.

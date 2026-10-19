@@ -34,8 +34,8 @@ import (
 // index within a lane — so those resolve against the CALLER's tab/lane only,
 // and never leak into a sweep where they would silently match a different
 // container's slot 3. This is the same reasoning `##move` documents for why
-// `--tab` applies to `to-lane` but not to pane or stack ids
-// (designs/033-live-layout-moves.md §1).
+// `--tab` applies to `to-lane` but not to pane or stack ids (see the `##move`
+// help).
 
 // infoRef returns the positional ref of a `##<family> info <ref>` invocation,
 // or "" for the bare form. args is the whole subcommand slice, so args[0] is

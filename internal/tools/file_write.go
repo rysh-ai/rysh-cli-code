@@ -56,36 +56,20 @@ func (t *FileWriteTool) RequiresApproval(params json.RawMessage) bool {
 	return true
 }
 
+// Preview returns the unified diff the write would produce, without touching
+// disk — the approval gate shows this, and Execute runs only after approval.
+func (t *FileWriteTool) Preview(ctx context.Context, params json.RawMessage) (*ToolOutput, error) {
+	out, _, err := t.compute(params)
+	return out, err
+}
+
 // Execute writes the content to the specified file and returns a unified diff.
 func (t *FileWriteTool) Execute(ctx context.Context, params json.RawMessage) (*ToolOutput, error) {
-	var p FileWriteParams
-	if err := json.Unmarshal(params, &p); err != nil {
-		return nil, fmt.Errorf("invalid parameters: %w", err)
+	out, content, err := t.compute(params)
+	if err != nil {
+		return nil, err
 	}
-
-	// Resolve file path.
-	filePath := p.FilePath
-	if !filepath.IsAbs(filePath) {
-		filePath = filepath.Join(t.workDir, filePath)
-	}
-
-	// Check if file exists and read old content for diff.
-	var oldContent string
-	var operation string
-	if data, err := os.ReadFile(filePath); err == nil {
-		oldContent = string(data)
-		operation = "overwrite"
-	} else {
-		operation = "create"
-	}
-
-	// Generate diff.
-	var diff string
-	if operation == "overwrite" {
-		diff = generateWriteDiff(oldContent, p.Content, filePath)
-	} else {
-		diff = generateNewFileDiff(p.Content, filePath)
-	}
+	filePath := out.Metadata["file_path"]
 
 	// Create parent directories if needed.
 	dir := filepath.Dir(filePath)
@@ -101,7 +85,7 @@ func (t *FileWriteTool) Execute(ctx context.Context, params json.RawMessage) (*T
 	}
 
 	// Write file.
-	if err := os.WriteFile(filePath, []byte(p.Content), 0644); err != nil {
+	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
 		return &ToolOutput{
 			Content:   "",
 			Error:     fmt.Sprintf("failed to write file: %s", err),
@@ -112,13 +96,34 @@ func (t *FileWriteTool) Execute(ctx context.Context, params json.RawMessage) (*T
 		}, nil
 	}
 
+	return out, nil
+}
+
+// compute resolves the path and builds the diff for the write. It never writes.
+func (t *FileWriteTool) compute(params json.RawMessage) (*ToolOutput, string, error) {
+	var p FileWriteParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, "", fmt.Errorf("invalid parameters: %w", err)
+	}
+	filePath := p.FilePath
+	if !filepath.IsAbs(filePath) {
+		filePath = filepath.Join(t.workDir, filePath)
+	}
+	var diff, operation string
+	if data, err := os.ReadFile(filePath); err == nil {
+		operation = "overwrite"
+		diff = generateWriteDiff(string(data), p.Content, filePath)
+	} else {
+		operation = "create"
+		diff = generateNewFileDiff(p.Content, filePath)
+	}
 	return &ToolOutput{
 		Content: diff,
 		Metadata: map[string]string{
 			"file_path": filePath,
 			"operation": operation,
 		},
-	}, nil
+	}, p.Content, nil
 }
 
 // generateWriteDiff produces a unified diff for overwriting an existing file.

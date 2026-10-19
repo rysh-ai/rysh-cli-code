@@ -108,6 +108,23 @@ type MsgActivePaneReply struct {
 	PaneCount int    `json:"pane_count"`
 }
 
+// MsgSetLaneCollapsed folds one lane of a TabActor down to a thin strip, or
+// opens it again. A request, not a fire-and-forget: the tab may refuse (the
+// last open lane cannot fold) and may move focus off the lane it folds, and
+// the caller needs both answers before it reports and re-syncs the active
+// pane.
+type MsgSetLaneCollapsed struct {
+	LaneID    string `json:"lane_id"`
+	Collapsed bool   `json:"collapsed"`
+}
+
+// MsgSetLaneCollapsedReply answers MsgSetLaneCollapsed. Error is empty on
+// success; ActivePaneID is the tab's active pane afterwards.
+type MsgSetLaneCollapsedReply struct {
+	Error        string `json:"error,omitempty"`
+	ActivePaneID string `json:"active_pane_id,omitempty"`
+}
+
 // ---------------------------------------------------------------------------
 // Layout management messages (Workspace → Tab)
 // ---------------------------------------------------------------------------

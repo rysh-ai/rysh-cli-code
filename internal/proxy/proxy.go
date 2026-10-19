@@ -308,7 +308,8 @@ func (s *Server) Strict() bool {
 
 // NoteForeground records which program a pane is running (design 022 §4.4), so
 // a known agent CLI that never reaches the proxy can be reported. Pass "" when
-// the pane returns to its shell.
+// the pane returns to its shell. A binary with no CLI profile is not watched;
+// pass the name IdentifyCLI returns, not the kernel's process name.
 func (s *Server) NoteForeground(paneID, binary string) {
 	s.gov.noteForeground(paneID, binary, time.Now())
 }

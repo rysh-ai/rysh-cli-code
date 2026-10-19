@@ -350,7 +350,7 @@ Subscription billing:
 - The server integrates Stripe for subscription billing with four tiers: free, solo, team, enterprise.
 - Each tier defines resource limits (max workspaces, sessions, panes) and monthly/yearly pricing.
 - Free: 1 workspace, 3 sessions, 30 panes ($0). Solo: 3 workspaces, 10 sessions, 100 panes ($19/mo). Team: 20 workspaces, 200 sessions, 2000 panes ($49/mo). Enterprise: unlimited (custom pricing).
-- Workspaces are enforced server-side on creation. Sessions are enforced at WebSocket upgrade (transparent proxy) and via GET /api/resource/check-session-limit. Panes are enforced daemon-side in WorkspaceActor.
+- Workspaces are enforced server-side on creation. Sessions are not enforced against a rysh daemon: the server checks the session cap at WebSocket upgrade only for connections that are not connection_type=share or connection_type=channel (rysh-server internal/nats/ws_transparent_proxy.go:138), and every rysh daemon upstream dial is share or channel (internal/actors/upstream_dial.go, remote_upstream.go, remote_share_listener.go, upstream_share.go, mirror_tab_listener.go, internal/company/follower.go, internal/channels/email_relay.go, whatsapp_relay.go). GET /api/resource/check-session-limit reports the cap (402 with upgrade_url when over) but no rysh-cli code calls it. Panes are enforced daemon-side in WorkspaceActor.
 - SubscriptionService handles Checkout Sessions, Billing Portal, webhook processing (checkout.completed, subscription.updated, subscription.deleted, invoice.paid, invoice.payment_failed).
 - REST endpoints: GET /api/billing/plans, GET /api/billing/subscription, GET /api/billing/limits, POST /api/billing/checkout, POST /api/billing/portal, POST /api/billing/webhook, GET /api/resource/check-session-limit.
 

@@ -52,14 +52,15 @@ func TestVisibilityCommands_UnknownAction(t *testing.T) {
 
 // TestVisibilityCommands_DescribeDifferentThings guards the one real risk in
 // having two commands this similar: that a later edit makes them describe the
-// same output. public is redacted, private is raw, and the help must say so.
+// same output. public is the output as shown, private is raw, and the help must
+// say so. (public is NOT redacted — root-0172; never describe it as such.)
 func TestVisibilityCommands_DescribeDifferentThings(t *testing.T) {
 	w := &WorkspaceActor{}
 	pub := visibilityCmd(t, w.handlePublicCommand, "wibble")
 	priv := visibilityCmd(t, w.handlePrivateCommand, "wibble")
 
-	if !strings.Contains(pub, "redacted (public)") {
-		t.Errorf("##public help must describe redacted output:\n%s", pub)
+	if !strings.Contains(pub, "public output") {
+		t.Errorf("##public help must describe the public output:\n%s", pub)
 	}
 	if !strings.Contains(priv, "raw (private)") {
 		t.Errorf("##private help must describe raw output:\n%s", priv)

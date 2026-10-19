@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"github.com/rysh-ai/rysh-cli-code/internal/agentenv"
 	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"strings"
 	"sync"
@@ -34,19 +35,38 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/mcp"
 	"github.com/rysh-ai/rysh-cli-code/internal/metrics"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
+	coord "github.com/rysh-ai/rysh-cli-code/internal/peercoord"
 	"github.com/rysh-ai/rysh-cli-code/internal/pipeline"
 	"github.com/rysh-ai/rysh-cli-code/internal/session"
 	"github.com/rysh-ai/rysh-cli-code/internal/tui"
 )
 
 // version, commit and date are set by goreleaser at build time via -ldflags.
+// A build without them fills version and commit from build info (buildinfo.go).
 var (
-	version = "dev"
-	commit  = "none"
+	version = defaultVersion
+	commit  = defaultCommit
 	date    = "unknown"
 )
 
 func main() {
+	applyBuildInfo()
+	// Native contacts are local and must bypass config, daemon discovery and logs.
+	if len(os.Args) > 1 && os.Args[1] == "facetime" {
+		if err := runFaceTimeCmd(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "FaceTime:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// exec-clean is the agent-exec env scrub (internal/agentenv): it filters its
+	// own environment and exec()s the agent in place, so it must not load config,
+	// discover a daemon or log — it is typed in front of every agent launch.
+	if len(os.Args) > 1 && os.Args[1] == "exec-clean" {
+		os.Exit(agentenv.Main(os.Args[2:], os.Environ(), os.Stdout, os.Stderr, agentenv.SysExec))
+	}
+
 	// Extract global flags before subcommand dispatch. These are accepted in any
 	// position (before or after the subcommand) and are stripped from the args
 	// handed to the command router.
@@ -84,7 +104,14 @@ func main() {
 
 	logger := logging.Setup(cfg.LogLevel, cfg.SessionName)
 
-	if err := run(cfg, logger, args, configPath, shared, upgrade, force); err != nil {
+	err := run(cfg, logger, args, configPath, shared, upgrade, force)
+	// `##rysh restart` in the TUI: become `rysh attach <session> --upgrade
+	// --force`, running whatever binary is on disk now (restart.go).
+	var restart *restartRequest
+	if errors.As(err, &restart) {
+		err = reexecAttach(restart.session, configPath, logLevel)
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, progname.Rewrite("rysh: %v\n"), err)
 		os.Exit(1)
 	}
@@ -96,6 +123,9 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 	// the one that lingered for 8 days holding the NATS port) is cleaned up
 	// rather than confusing attach/create/list. Skipped when this process IS the
 	// daemon, and for commands that don't touch sessions.
+	if len(args) > 0 && args[0] == "peer" && os.Getenv("RYSH_PEER_CONTEXT") != "" {
+		return runPeerCmd(cfg, args)
+	}
 	maybeReapOrphans(cfg, logger, args)
 
 	// Fail fast on a host that cannot allocate a PTY (native Windows). Every
@@ -241,6 +271,20 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 			return daemonStartError(args[1], err)
 		}
 		return runAttachUI(cfg, logger, store, rec)
+	case "restart":
+		// rysh restart <session> — stop the daemon and start a fresh one from
+		// this binary (always --upgrade --force). --from-daemon is passed by
+		// `##rysh restart` inside the daemon: wait for it to finish replying.
+		if len(args) < 2 {
+			return errors.New("restart requires a session name")
+		}
+		var delay time.Duration
+		for _, a := range args[2:] {
+			if a == "--from-daemon" {
+				delay = time.Second
+			}
+		}
+		return restartSession(cfg, args[1], configPath, shared, delay)
 	case "detach":
 		if len(args) < 2 {
 			return errors.New("detach requires a session name")
@@ -348,12 +392,29 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 		// fleet_cmd.go.
 		return runFleetCmd(cfg, args)
 
+	case "meeting":
+		return runMeetingCmd(cfg, args)
+	case "peer-agent":
+		if len(args) != 2 {
+			return fmt.Errorf("peer-agent requires its local execution file")
+		}
+		return coord.RunAgent(args[1])
+	case "peer":
+		return runPeerCmd(cfg, args)
+
 	case "board":
 		// rysh board post [--as <pane-id>] -- <text> — post to the agents
 		// board WITHOUT focusing anything or echoing into a pane. Deliberately
 		// not the generated `rysh --board` alias, which goes through the ##
 		// path and does both. See board_cmd.go (design 025 §4).
 		return runBoardCmd(cfg, args)
+
+	case "cron":
+		// rysh cron apply <job-name> <file> — the non-interactive half of
+		// `##cron edit <name>`, chained onto $EDITOR's exit so a saved edit
+		// applies without round-tripping the file's raw content through the
+		// "##" command parser. See cron_cmd.go.
+		return runCronCmd(cfg, args)
 
 	case "script":
 		// rysh script <file.rysh> [args...] — run a bash script in which ##
@@ -460,6 +521,14 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 		}
 		return runAttachUI(cfg, logger, store, rec)
 
+	case "connect":
+		// Company connect (design 037): claim a dashboard connect code, write
+		// the company workspace, open it. --json for the desktop app.
+		return runConnect(cfg, logger, args[1:])
+	case "company":
+		// The bound company at the shell, and as a stdio MCP server for agents
+		// (design 037, second cut): `rysh company status|orders|…|mcp`.
+		return runCompanyCLI(cfg, args[1:])
 	case "onboard":
 		// Guided first-run wizard: provider + key (validated), optional first
 		// humanoid, start hand-off. Flag-driven fallback for scripts/no-TTY.
@@ -529,6 +598,17 @@ func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error 
 	logger.Info(progname.Rewrite("rysh: resolved config"),
 		"config_file", cfg.ConfigFile, "rysh_dir", cfg.RyshDir, "session", sessionName)
 
+	// Arm the crash log BEFORE anything that can panic, and well before
+	// goHeadless() takes fd 2 away. Without this a panic in any goroutine exits
+	// the process with status 2 and writes its report to /dev/null, which is the
+	// entire reason repeated daemon deaths on this session were undiagnosable:
+	// the supervisor logged `code=2 signal=null` and there was nothing else,
+	// anywhere, to read. See crashlog.go.
+	crashLog, noteCrashLog := installCrashLog(cfg.RyshDir, sessionName)
+	if crashLog != "" {
+		logger.Info(progname.Rewrite("rysh: crash log armed"), "path", crashLog)
+	}
+
 	// Reap headless Chromiums orphaned by a previous daemon that died without
 	// actor shutdown (force-kill, crash) — mirrors the orphaned-daemon sweep.
 	if killed := cdp.SweepOrphanedHeadless(browserinstance.RootDir(daemonWorkDir(cfg))); len(killed) > 0 {
@@ -563,6 +643,9 @@ func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error 
 		DataDir:     cfg.NATS.DataDir,
 		SessionName: cfg.SessionName,
 		Port:        cfg.NATS.Port,
+		// The project root, as in the session record below: a guest compares it
+		// with its host's, and an owner answers it (design 028 §9 limit 7).
+		Workspace: mustGetwd(),
 	})
 	if err != nil {
 		return fmt.Errorf("start nats bus: %w", err)
@@ -596,6 +679,13 @@ func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error 
 
 	// On exit, mark stopped.
 	defer func() {
+		// This marker is what separates the three deaths that the supervisor
+		// reports identically. It is written only on an ORDERLY return from
+		// runDaemon, so in the crash log: header + "clean shutdown" = the daemon
+		// was asked to stop (code=0); header + a runtime crash report = it
+		// panicked (code=2); header + nothing at all = it was killed outright
+		// (SIGKILL) and never got to run this.
+		noteCrashLog("clean shutdown")
 		record.State = "stopped"
 		record.PID = 0
 		_, _ = store.Upsert(record)
@@ -727,6 +817,29 @@ func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error 
 			"err", aerr)
 	}
 
+	// Board courier (design 050, polling-stream): delivers board commands into
+	// each recipient agent's own session — claude inbox socket, codex queue —
+	// never through the pane's keyboard. Singleton by name, beside ABLA; a
+	// failure is logged, not fatal.
+	courierActor := actors.NewBoardCourierActor(b.Conn(), b.Codecs(), b.Publisher())
+	courierProps := actor.PropsFromProducer(func() actor.Actor { return courierActor })
+	if _, cerr := b.ActorSystem().Root.SpawnNamed(courierProps, "board-courier"); cerr != nil {
+		slog.Warn(progname.Rewrite("rysh: board courier not started; board commands will not be delivered"),
+			"err", cerr)
+	}
+
+	// Company follower (design 037): a session bound to an AI-native company
+	// keeps its snapshot fresh daemon-side, so the terminal and the desktop
+	// app both attach to a session that already knows its company. Singleton
+	// by name; a failure is logged, not fatal.
+	if cfg.Company.Enabled() {
+		companyActor := actors.NewCompanyActor(b.Conn(), b.Publisher(), cfg.Company, cfg.Upstream)
+		companyProps := actor.PropsFromProducer(func() actor.Actor { return companyActor })
+		if _, cerr := b.ActorSystem().Root.SpawnNamed(companyProps, "company"); cerr != nil {
+			slog.Warn(progname.Rewrite("rysh: company follower not started; the company view will be empty"), "err", cerr)
+		}
+	}
+
 	// AFA — the agent-fleet registry (design 028 §6.5). Root-spawned beside
 	// ABLA and BEFORE the workspace farm, for the same reason: `fleetctl` may
 	// register a fleet before any workspace has finished starting, and a
@@ -737,6 +850,8 @@ func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error 
 	// from their own half of the truth, which is worse than none — a caller
 	// would see a fleet appear and disappear depending on which one replied.
 	fleetActor := actors.NewAgentFleetActor(b.Conn(), b.Codecs(), b.FleetKV())
+	// The status scout (design 056) runs the session's own claude CLI.
+	fleetActor.SetScoutCommand(cfg.ClaudeCommand)
 	fleetProps := actor.PropsFromProducer(func() actor.Actor { return fleetActor })
 	if _, ferr := b.ActorSystem().Root.SpawnNamed(fleetProps, "agent-fleet"); ferr != nil {
 		slog.Warn(progname.Rewrite("rysh: fleet registry not started; fleets will not be tracked"),
@@ -764,6 +879,7 @@ func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error 
 		sessionName,
 		configPath,
 	)
+	farmActor.SetGuestOf(b.GuestOf)
 	farmProps := actor.PropsFromProducer(func() actor.Actor { return farmActor })
 	farmPID, err := b.ActorSystem().Root.SpawnNamed(farmProps, "workspace-farm")
 	if err != nil {
@@ -859,6 +975,7 @@ func runAttachUI(cfg config.Config, logger *slog.Logger, store *session.Store, r
 		Mode:        "external",
 		URL:         fmt.Sprintf("nats://127.0.0.1:%d", rec.NATSPort),
 		SessionName: sessionName,
+		Attach:      true,
 	})
 	if err != nil {
 		return fmt.Errorf("connect to session %q: %w", rec.Name, err)
@@ -903,6 +1020,9 @@ func runAttachUI(cfg config.Config, logger *slog.Logger, store *session.Store, r
 
 	if m, ok := finalModel.(tui.Model); ok && m.Detached() {
 		fmt.Fprintln(os.Stderr, "[detached from session "+cfg.SessionName+"]")
+	}
+	if m, ok := finalModel.(tui.Model); ok && m.RestartRequested() {
+		return &restartRequest{session: rec.Name}
 	}
 
 	return nil
@@ -1493,6 +1613,8 @@ func printUsage() {
 	usageLine("       rysh attach <session-name> [--upgrade]")
 	usageLine("       rysh detach <session-name>")
 	usageLine("       rysh stop <session-name>")
+	usageLine("       rysh restart <session-name>   stop the daemon and start one from this binary")
+	usageLine("                    (always --upgrade --force; ##rysh restart does it from inside)")
 	usageLine("       rysh list-sessions")
 	usageLine("       rysh delete-session <session-name>")
 	usageLine("       rysh send <session-name> <input> [--pane <pane-id>] [--mode shell|prompt]")
@@ -1511,6 +1633,14 @@ func printUsage() {
 	usageLine("       rysh search [query]        find packages in the registry index")
 	usageLine("       rysh update [@ns/name]     reinstall packages the index has newer versions of")
 	usageLine("       rysh list-packages         show installed packages (.rysh/rysh.lock)")
+	usageLine("       rysh connect <server> <code> [--json] [--device <label>] [--dir <path>] [--no-open]")
+	usageLine("                    bind this machine to an AI-native company with the connect code from")
+	usageLine("                    the dashboard: writes ~/Rysh/<slug>/rysh.config.yaml (read-only key)")
+	usageLine("                    and opens the session on the company view. --json prints the")
+	usageLine("                    directory and session for the desktop app and does not open.")
+	usageLine("       rysh company <status|orders|enquiries|activity|services|mcp> [--json] [--config <file>]")
+	usageLine("                    the company this directory is bound to (##config load <file> binds a")
+	usageLine("                    running session); `mcp` serves the same data to agents over stdio")
 	usageLine("       rysh onboard [--provider <name> --key-env <VAR> [--model <m>] [--no-validate]]")
 	usageLine("                    guided first-run setup for using rysh AT the keyboard:")
 	usageLine("                    provider + key (validated) and terminal prefs written to")
@@ -1530,6 +1660,8 @@ func printUsage() {
 	usageLine("                    Does not focus a pane or echo into one. An ambiguous @name is")
 	usageLine("                    refused with the candidate ids, never guessed.")
 	usageLine("                    `rysh ansa prompt <target> -- '<text>'` delivers it as a prompt.")
+	usageLine("       rysh meeting — Meet/Zoom/Teams assistant via Recall.ai; host a rysh room (LiveKit)")
+	usageLine("       rysh facetime [contacts|call|doctor] — local Mac contacts and FaceTime audio")
 	usageLine("       rysh board post [--as <pane-id>] [--kind <k>] [--thread <id>] -- '<text>'")
 	usageLine("                    post to the agents board without focusing a pane or echoing")
 	usageLine("                    into one. --as defaults to $RYSH_PANE, so an agent inside a")
@@ -1548,8 +1680,8 @@ func printUsage() {
 	usageLine("                    error, never an empty session.")
 	usageLine("       rysh fleet register <name> [--board <id>] [--source <path>] [--roadmap <dir>]")
 	usageLine("                    track a fleet. Registering opens NO panes — it is the cheap")
-	usageLine("                    half; `rysh fleet state <name> up` is what costs, and the")
-	usageLine("                    registry refuses more than 3 fleets up at once (D-14).")
+	usageLine("                    half; `rysh fleet state <name> up` is what costs. There is no")
+	usageLine("                    cap on fleets up (R11 retired D-14); the token ceiling is the limit.")
 	usageLine("       rysh fleet member add|rm <fleet> --pane <id> [--role <r>] [--label <l>]")
 	usageLine("                    membership, reconciled against the panes that actually exist.")
 	usageLine("       rysh prompt [--session <n>] [--pane-id <p>] [--timeout <d>] [--json] -- '<text>'")
@@ -1634,9 +1766,9 @@ func printUsage() {
 	usageLine("       rysh --ws|--workspace  list | create <name> <api_key>")
 	usageLine("       rysh --pipe|--pipeline  help|list|load|unload|show|build|run|status|clear|name|placeholder")
 	usageLine("       rysh --auto       web|task|agent|humanoid|code  run|resume|continue|list|show|save|delete|results")
-	usageLine("       rysh --agent      spawn | spawn-all <dir> | list | delete <name> | activate | deactivate")
+	usageLine("       rysh --agent      spawn | spawn-all <dir> | list | show <name> | delete <name> | activate | deactivate")
 	usageLine("                         | register-output | unregister-output")
-	usageLine("       rysh --humanoid   spawn | spawn-all <dir> | stop <name> | list [all|instances|artefacts]")
+	usageLine("       rysh --humanoid   spawn | spawn-all <dir> | stop <name> | list [all|instances|artefacts] | show <name>")
 	usageLine("                         | activate | deactivate")
 	usageLine("                         | channels | channel start|stop | register-output | unregister-output")
 	usageLine("       rysh --rysh       new ... | tab name <n> | lane name <n> | web start|stop|status")

@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/rysh-ai/rysh-cli-code/internal/proxy"
 )
 
 // processName is the hinge of design 022 §4.4 and §8.2: it is the ONLY thing
@@ -92,5 +94,91 @@ func TestProcessNameOnADeadPidIsEmpty(t *testing.T) {
 		if got := processName(bad); got != "" {
 			t.Fatalf("processName(%d) = %q, want \"\"", bad, got)
 		}
+	}
+}
+
+// TestForegroundCLIResolvesAVersionNamedClaude is F-15 at the OS boundary: a
+// version-named binary behind a symlink named `claude` — the native
+// installer's layout — must be identified as `claude`, although the kernel's
+// own name for it is the version.
+func TestForegroundCLIResolvesAVersionNamedClaude(t *testing.T) {
+	const version = "9.9.999"
+	root := t.TempDir()
+	versions := filepath.Join(root, "share", "claude", "versions")
+	if err := os.MkdirAll(versions, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	real := filepath.Join(versions, version)
+	buildSleeper(t, real)
+	link := filepath.Join(root, "claude")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	// Exactly what a shell does for `claude …` found on PATH: exec the symlink,
+	// with argv[0] the bare name typed.
+	cmd := &exec.Cmd{Path: link, Args: []string{"claude", "60"}}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot start %s: %v", link, err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() {
+		_ = syscall.Kill(-processPgid(pid), syscall.SIGKILL)
+		_ = cmd.Wait()
+	})
+
+	// Precondition: the kernel really does call it by its version, or this
+	// test is not about F-15 at all.
+	var comm string
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if comm = processName(pid); comm == version {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if comm != version {
+		t.Fatalf("processName(%d) = %q, want %q — the fixture does not reproduce "+
+			"the native installer's layout", pid, comm, version)
+	}
+
+	if got := foregroundCLI(pid); got != "claude" {
+		exe, argv := processExecArgs(pid)
+		t.Fatalf("foregroundCLI(%d) = %q, want \"claude\" (comm=%q exe=%q argv=%q) — "+
+			"strict would warn about %q and offer `##proxy check %s`, which does not resolve",
+			pid, got, comm, exe, argv, got, got)
+	}
+}
+
+// TestForegroundCLIOfAnUnknownProgramIsNotAKnownCLI: the identity of a plain
+// program is its own name, and that name has no profile — which is what keeps
+// strict away from it (F-13).
+func TestForegroundCLIOfAnUnknownProgramIsNotAKnownCLI(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "ryshbuildjob")
+	buildSleeper(t, bin)
+	cmd := exec.Command(bin, "60")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot start %s: %v", bin, err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() {
+		_ = syscall.Kill(-processPgid(pid), syscall.SIGKILL)
+		_ = cmd.Wait()
+	})
+	var got string
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if got = foregroundCLI(pid); got == "ryshbuildjob" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got != "ryshbuildjob" {
+		t.Fatalf("foregroundCLI(%d) = %q, want \"ryshbuildjob\"", pid, got)
+	}
+	if _, ok := proxy.ProfileFor(got); ok {
+		t.Fatalf("%q resolved to a known CLI profile", got)
 	}
 }

@@ -42,7 +42,7 @@ func writeCase(t *testing.T, root, name, task, expect string) string {
 // plays the agent in it — touching real disk, emitting real message structs.
 func hermeticRunner(t *testing.T, act func(prompt, workDir string, c *runCollector)) liveRunFunc {
 	t.Helper()
-	return func(prompt, _ string) (runOutcome, eval.Result, error) {
+	return func(prompt, _, _ string) (runOutcome, eval.Result, error) {
 		var res eval.Result
 		workDir := t.TempDir()
 		gitT(t, workDir, "init", "-q")
@@ -106,7 +106,7 @@ commands_forbidden:
 	})
 
 	var tap bytes.Buffer
-	passed, total := runEvalLive(cases, run, nil, false, &tap)
+	passed, total := runEvalLive(cases, run, nil, false, false, &tap)
 	if passed != 1 || total != 2 {
 		t.Fatalf("passed/total = %d/%d, want 1/2\nTAP:\n%s", passed, total, tap.String())
 	}
@@ -137,13 +137,13 @@ func TestEvalLive_NonDoneOutcomeFailsCase(t *testing.T) {
 	writeCase(t, fixtures, "gated", "Do something gated.\n", `output_matches:
   - "partial"
 `)
-	run := func(prompt, _ string) (runOutcome, eval.Result, error) {
+	run := func(prompt, _, _ string) (runOutcome, eval.Result, error) {
 		return runOutcome{Status: "gate_blocked", ExitCode: runExitGateBlocked,
 				Detail: "approval requested (destructive_action): rm -rf build/"},
 			eval.Result{Output: "partial answer"}, nil
 	}
 	var tap bytes.Buffer
-	passed, total := runEvalLive([]string{filepath.Join(fixtures, "gated")}, run, nil, false, &tap)
+	passed, total := runEvalLive([]string{filepath.Join(fixtures, "gated")}, run, nil, false, false, &tap)
 	if passed != 0 || total != 1 {
 		t.Fatalf("passed/total = %d/%d, want 0/1", passed, total)
 	}
@@ -157,11 +157,11 @@ func TestEvalLive_NonDoneOutcomeFailsCase(t *testing.T) {
 func TestEvalLive_RunErrorFailsCase(t *testing.T) {
 	fixtures := t.TempDir()
 	writeCase(t, fixtures, "broken", "task\n", "max_tokens: 10\n")
-	run := func(prompt, _ string) (runOutcome, eval.Result, error) {
+	run := func(prompt, _, _ string) (runOutcome, eval.Result, error) {
 		return runOutcome{}, eval.Result{}, errors.New("no usable agentic provider")
 	}
 	var tap bytes.Buffer
-	passed, total := runEvalLive([]string{filepath.Join(fixtures, "broken")}, run, nil, false, &tap)
+	passed, total := runEvalLive([]string{filepath.Join(fixtures, "broken")}, run, nil, false, false, &tap)
 	if passed != 0 || total != 1 {
 		t.Fatalf("passed/total = %d/%d, want 0/1", passed, total)
 	}

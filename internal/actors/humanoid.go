@@ -4,6 +4,7 @@ package actors
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -53,6 +54,10 @@ const conversationTTL = 24 * time.Hour
 //
 // All fields are unguarded — proto.actor mailbox guarantees sequential Receive().
 type HumanoidActor struct {
+	// channelStatusSink, when set (tests), receives every channel status
+	// report in addition to the parent.
+	channelStatusSink func(*msg.MsgHumanoidChannelStatus)
+
 	// parent/actorCtx let the humanoid report real channel state back to the
 	// registry, which cannot observe adapters itself.
 	parent   *actor.PID
@@ -135,6 +140,9 @@ type HumanoidActor struct {
 	emailGovernance string
 	// emailAdapter is pre-created for email tool access (even before Start).
 	emailAdapter *channels.EmailAdapter
+	// mailbox overrides emailAdapter for the email-client handlers (tests
+	// only; nil in production). See uiMailbox.
+	mailbox emailMailbox
 	// drafts holds in-memory drafts for human-governed mode (shared by email and
 	// whatsapp — a humanoid is human-governed on at most one channel in practice).
 	drafts *channels.DraftStore
@@ -272,6 +280,7 @@ func NewHumanoidActor(
 	agSetup *agentic.Setup,
 	secrets *secretResolver,
 ) *HumanoidActor {
+	contacts = applySessionEmailDefaults(contacts, cfg.Email)
 	h := &HumanoidActor{
 		name:               name,
 		systemPrompt:       systemPrompt,
@@ -810,11 +819,32 @@ func (h *HumanoidActor) Receive(ctx actor.Context) {
 		// which the web server forwards to the desktop app as an "email_list"
 		// event. Fields are captured into locals so the goroutine never touches
 		// actor state concurrently.
-		h.handleEmailListQuery(m.Count, m.Search)
+		h.handleEmailListQuery(m.Folder, m.Count, m.Search)
+
+	case *msg.MsgHumanoidEmailMove:
+		// The email client's delete (d) / archive (e): move one mail to the
+		// account's \Trash / \Archive (or \All) folder over IMAP; reply on
+		// humanoid.<name>.email.move.
+		h.handleEmailMove(m.Folder, m.UID, m.Action)
+
+	case *msg.MsgHumanoidEmailSaveAttachment:
+		// The email client's save-attachment key: fetch (PEEK) and write the
+		// attachment on this machine; reply on humanoid.<name>.email.attachment.
+		h.handleEmailSaveAttachment(m.Folder, m.UID, m.Index)
+
+	case *msg.MsgHumanoidEmailFolders:
+		// The email client's folder rail; reply on humanoid.<name>.email.folders.
+		h.handleEmailFoldersQuery()
 
 	case *msg.MsgHumanoidEmailRead:
 		// UI single-email read request; reply on humanoid.<name>.email.detail.
-		h.handleEmailReadQuery(m.UID)
+		h.handleEmailReadQuery(m.Folder, m.UID)
+
+	case *msg.MsgHumanoidEmailSetSeen:
+		// The email client's read/unread toggle: store the \Seen flag over IMAP
+		// off the actor goroutine, then signal email.changed so every UI
+		// re-lists and shows the server's real state.
+		h.handleEmailSetSeen(m.Folder, m.UID, m.Seen)
 
 	case *msg.MsgHumanoidEmailCompose:
 		// The email client's manual-compose path: the human wrote and sent this
@@ -1024,15 +1054,19 @@ func (h *HumanoidActor) Receive(ctx actor.Context) {
 // whether the *humanoid* was active and called that the channel's connection
 // state — meaning a channel that failed to start still listed as connected.
 func (h *HumanoidActor) reportChannelStatus(channelType string, connected bool, errMsg string) {
-	if h.actorCtx == nil || h.parent == nil {
-		return
-	}
-	h.actorCtx.Send(h.parent, &msg.MsgHumanoidChannelStatus{
+	status := &msg.MsgHumanoidChannelStatus{
 		Name:        h.name,
 		ChannelType: channelType,
 		Connected:   connected,
 		Error:       errMsg,
-	})
+	}
+	if h.channelStatusSink != nil {
+		h.channelStatusSink(status)
+	}
+	if h.actorCtx == nil || h.parent == nil {
+		return
+	}
+	h.actorCtx.Send(h.parent, status)
 }
 
 // startChannel creates and starts a channel adapter.
@@ -1043,7 +1077,11 @@ func (h *HumanoidActor) startChannel(channelType string, cc msg.ChannelConfig) {
 	// Stop existing adapter if running.
 	h.stopChannel(channelType)
 
-	cc = h.resolveChannelCredentialsFromUpstream(channelType, cc)
+	cc, refused := h.resolveChannelCredentialsFromUpstream(channelType, cc)
+	if refused != nil {
+		h.reportChannelStatus(channelType, false, refused.Error())
+		return
+	}
 
 	slog.Debug("humanoid: creating adapter", "name", h.name,
 		"channel", channelType)
@@ -1108,11 +1146,16 @@ func (h *HumanoidActor) startChannel(channelType string, cc msg.ChannelConfig) {
 	slog.Info("humanoid: channel started", "name", h.name, "channel", channelType)
 }
 
+// credentialsForbiddenHint is the fix a refused credentials fetch points at.
+const credentialsForbiddenHint = "ask a workspace admin to change your role, or use a member key"
+
 // resolveChannelCredentialsFromUpstream overlays missing tokens with credentials
 // stored server-side in the workspace's External Connection. Skill files can
 // declare a channel without secrets and the CLI will pull them at start time.
-// Locally-provided tokens always take precedence.
-func (h *HumanoidActor) resolveChannelCredentialsFromUpstream(channelType string, cc msg.ChannelConfig) msg.ChannelConfig {
+// Locally-provided tokens always take precedence. A non-nil error means the
+// server refused the credentials (403): the caller must not start the
+// channel. Any other fetch failure is logged and the config returned as is.
+func (h *HumanoidActor) resolveChannelCredentialsFromUpstream(channelType string, cc msg.ChannelConfig) (msg.ChannelConfig, error) {
 	needsFetch := false
 	switch channelType {
 	case "slack":
@@ -1125,26 +1168,38 @@ func (h *HumanoidActor) resolveChannelCredentialsFromUpstream(channelType string
 		// Relay mode always fetches: it needs the server-side connection id to
 		// build its subjects, and deliberately holds no platform credentials.
 		needsFetch = cc.Relay || cc.APIKey == "" || cc.Phone == ""
+	case "email":
+		needsFetch = cc.Relay
 	}
 	slog.Debug("humanoid: resolveChannelCredentials", "name", h.name,
 		"channel", channelType, "needs_fetch", needsFetch,
 		"upstream_enabled", h.cfg.Upstream.Enabled)
 	if !needsFetch {
-		return cc
+		return cc, nil
 	}
 	if !h.cfg.Upstream.Enabled || h.cfg.Upstream.URL == "" || h.cfg.Upstream.APIKey == "" {
 		slog.Debug("humanoid: upstream not configured, skipping credential fetch",
 			"name", h.name, "channel", channelType)
-		return cc
+		return cc, nil
 	}
 
 	slog.Debug("humanoid: fetching credentials from upstream", "name", h.name,
 		"channel", channelType, "upstream_url", h.cfg.Upstream.URL)
 	creds, err := upstream.FetchConnectionCredentials(h.cfg, channelType)
+	var forbidden *upstream.CredentialsForbiddenError
+	if errors.As(err, &forbidden) {
+		// The server refused this key (D-10 / E31-R piece 6: an observer's
+		// key may not read channel secrets). Starting without the token would
+		// fail later and quietly; refuse now and say why and what to do.
+		refusal := fmt.Errorf("%s — %s", forbidden.Message, credentialsForbiddenHint)
+		slog.Error("humanoid: channel not started: upstream refused the credentials",
+			"name", h.name, "channel", channelType, "error", refusal)
+		return cc, refusal
+	}
 	if err != nil {
 		slog.Warn("humanoid: upstream credentials fetch failed",
 			"name", h.name, "channel", channelType, "err", err)
-		return cc
+		return cc, nil
 	}
 
 	switch channelType {
@@ -1180,7 +1235,7 @@ func (h *HumanoidActor) resolveChannelCredentialsFromUpstream(channelType string
 			slog.Info("humanoid: whatsapp relay configured from upstream",
 				"name", h.name, "workspace", creds.WorkspaceID,
 				"connection", creds.ConnectionID)
-			return cc
+			return cc, nil
 		}
 		if cc.APIKey == "" {
 			cc.APIKey = creds.Secrets["access_token"]
@@ -1195,11 +1250,26 @@ func (h *HumanoidActor) resolveChannelCredentialsFromUpstream(channelType string
 			// channel with "phone (phone_number_id) is required".
 			cc.Phone = creds.Config["phone_number_id"]
 		}
+	case "email":
+		if cc.Relay {
+			cc.RelayURL = h.cfg.Upstream.URL
+			cc.RelayAPIKey = h.cfg.Upstream.APIKey
+			cc.RelayWorkspace = h.cfg.Upstream.WorkspaceName()
+			cc.RelayWorkspaceID = creds.WorkspaceID
+			cc.RelayConnectionID = creds.ConnectionID
+			if cc.EmailConfig == nil {
+				cc.EmailConfig = &msg.EmailChannelConfig{}
+			}
+			if cc.EmailConfig.Address == "" {
+				cc.EmailConfig.Address = creds.Config["email_address"]
+			}
+			return cc, nil
+		}
 	}
 
 	slog.Info("humanoid: loaded channel credentials from upstream",
 		"name", h.name, "channel", channelType, "connection_id", creds.ConnectionID)
-	return cc
+	return cc, nil
 }
 
 // stopChannel stops a running channel adapter.
@@ -3038,6 +3108,15 @@ func (h *HumanoidActor) cleanExpiredConversations() {
 	}
 }
 
+// surfaceMode is the visible mode register-output opens on a pane: the rich
+// "email" client for a humanoid with an email channel, else "external".
+func (h *HumanoidActor) surfaceMode() string {
+	if h.emailAdapter != nil {
+		return "email"
+	}
+	return "external"
+}
+
 // updateOutputRouting picks the first registered pane and wires it up for
 // external-mode output. The pane will receive inbound channel messages and the
 // LLM's streaming response — visible in external mode (esc×2 from chat).
@@ -3060,10 +3139,15 @@ func (h *HumanoidActor) updateOutputRouting() {
 	h.activeChatPaneID = newPaneID
 
 	// Disable this humanoid's dedicated mode on the pane it left, so its mode
-	// stops appearing in that pane's cycle.
+	// stops appearing in that pane's cycle, and release the visible surface
+	// ("email"/"external") and the pane's humanoid binding it set up at
+	// register time (design 020 §5.7) — the pane honours the release only if
+	// this humanoid still owns it.
 	if oldPaneID != "" {
 		_ = h.pub.Send(msg.T("pane", oldPaneID, "inbox"),
 			&msg.MsgPaneDisableMode{PaneID: oldPaneID, Mode: h.name, Humanoid: true})
+		_ = h.pub.Send(msg.T("pane", oldPaneID, "inbox"),
+			&msg.MsgPaneReleaseHumanoid{Humanoid: h.name, Surface: h.surfaceMode()})
 	}
 
 	// Tell the LLMPromptExecutionActor about the pane so it can also annotate
@@ -3092,10 +3176,7 @@ func (h *HumanoidActor) updateOutputRouting() {
 		// buffer the user had to cycle to by hand). A humanoid with an email
 		// channel opens the rich three-column "email" client; every other humanoid
 		// opens "external", the streamed text mirror of its channel traffic.
-		surface := "external"
-		if h.emailAdapter != nil {
-			surface = "email"
-		}
+		surface := h.surfaceMode()
 		_ = h.pub.Send(msg.T("pane", newPaneID, "inbox"),
 			&msg.MsgPaneEnableMode{PaneID: newPaneID, Mode: surface})
 		_ = h.pub.Send(msg.T("pane", newPaneID, "activateMode"),
@@ -3103,25 +3184,54 @@ func (h *HumanoidActor) updateOutputRouting() {
 	}
 }
 
+// emailMailbox is what the email-client handlers (list, read, compose,
+// set-seen, folders, save-attachment) need from the mailbox — the subset of
+// *channels.EmailAdapter they call — so they can be driven by a fake.
+type emailMailbox interface {
+	ListEmailsIn(folder string, count int, search string) ([]msg.EmailSummary, error)
+	ReadEmailIn(folder string, uid int) (*msg.EmailDetail, error)
+	SendEmail(to, subject, body, inReplyTo string, attachments []channels.Attachment) error
+	SetSeen(folder string, uid int, seen bool) error
+	ListFolders() ([]msg.EmailFolder, error)
+	SaveAttachment(folder string, uid, index int, dir string) (string, error)
+	MoveToRole(folder string, uid int, action string) (string, error)
+}
+
+// uiMailbox is the mailbox the email-client handlers use: the test override
+// when set, else the humanoid's email adapter. It returns a true nil when
+// there is no adapter — never an interface holding a nil *EmailAdapter — so
+// the handlers' "no email channel configured" check still fires.
+func (h *HumanoidActor) uiMailbox() emailMailbox {
+	if h.mailbox != nil {
+		return h.mailbox
+	}
+	if h.emailAdapter == nil {
+		return nil
+	}
+	return h.emailAdapter
+}
+
 // handleEmailListQuery serves a desktop email-client inbox-listing request. The
 // IMAP fetch is blocking and slow, so it runs in a goroutine and publishes
 // MsgHumanoidEmailListReply on humanoid.<name>.email.list, which the web server
 // forwards to the app as an "email_list" event. Actor fields are captured into
 // locals so the goroutine never reads mutable actor state concurrently.
-func (h *HumanoidActor) handleEmailListQuery(count int, search string) {
-	adapter := h.emailAdapter
+func (h *HumanoidActor) handleEmailListQuery(folder string, count int, search string) {
+	adapter := h.uiMailbox()
 	name := h.name
 	pub := h.pub
 	subject := msg.T("humanoid", name, "email", "list")
 	if adapter == nil {
 		_ = pub.Send(subject, &msg.MsgHumanoidEmailListReply{
-			HumanoidName: name, Err: "no email channel configured",
+			HumanoidName: name, Folder: folder, Err: "no email channel configured",
 		})
 		return
 	}
 	go func() {
-		emails, err := adapter.ListEmails(count, search)
-		reply := &msg.MsgHumanoidEmailListReply{HumanoidName: name, Emails: emails}
+		emails, err := adapter.ListEmailsIn(folder, count, search)
+		// Folder is echoed so a UI that has since switched folders can drop a
+		// late reply instead of showing one folder's mail under another's name.
+		reply := &msg.MsgHumanoidEmailListReply{HumanoidName: name, Folder: folder, Emails: emails}
 		if err != nil {
 			reply.Err = err.Error()
 		}
@@ -3131,12 +3241,100 @@ func (h *HumanoidActor) handleEmailListQuery(count int, search string) {
 	}()
 }
 
+// handleEmailSaveAttachment saves one attachment of one email into
+// channels.AttachmentDir — email.attachment_dir when configured, else
+// ~/Downloads, else home — on the daemon's machine.
+// The blocking IMAP fetch and file write run in a goroutine; the outcome is
+// published on humanoid.<name>.email.attachment.
+func (h *HumanoidActor) handleEmailSaveAttachment(folder string, uid, index int) {
+	adapter := h.uiMailbox()
+	name := h.name
+	pub := h.pub
+	subject := msg.T("humanoid", name, "email", "attachment")
+	configuredDir := h.cfg.Email.AttachmentDir
+	reply := &msg.MsgHumanoidEmailSaveAttachmentReply{HumanoidName: name, UID: uid, Index: index}
+	if adapter == nil {
+		reply.Err = "no email channel configured"
+		_ = pub.Send(subject, reply)
+		return
+	}
+	go func() {
+		dir, err := channels.AttachmentDir(configuredDir)
+		if err == nil {
+			reply.Path, err = adapter.SaveAttachment(folder, uid, index, dir)
+		}
+		if err != nil {
+			reply.Err = err.Error()
+		}
+		if perr := pub.Send(subject, reply); perr != nil {
+			slog.Warn("humanoid: publish email attachment reply failed", "name", name, "err", perr)
+		}
+	}()
+}
+
+// handleEmailMove deletes or archives one email by moving it to the account's
+// SPECIAL-USE folder (channels.moveToRole: never an expunge, never a guessed
+// folder). The blocking IMAP work runs in a goroutine; the outcome is
+// published on humanoid.<name>.email.move, and a successful move also
+// announces email.changed so every UI re-lists.
+func (h *HumanoidActor) handleEmailMove(folder string, uid int, action string) {
+	adapter := h.uiMailbox()
+	name := h.name
+	pub := h.pub
+	subject := msg.T("humanoid", name, "email", "move")
+	reply := &msg.MsgHumanoidEmailMoveReply{HumanoidName: name, Folder: folder, UID: uid, Action: action}
+	if adapter == nil {
+		reply.Err = "no email channel configured"
+		_ = pub.Send(subject, reply)
+		return
+	}
+	go func() {
+		target, err := adapter.MoveToRole(folder, uid, action)
+		if err != nil {
+			reply.Err = err.Error()
+		} else {
+			reply.Target = target
+		}
+		if perr := pub.Send(subject, reply); perr != nil {
+			slog.Warn("humanoid: publish email move reply failed", "name", name, "err", perr)
+		}
+		if err == nil {
+			_ = pub.Send(msg.T("humanoid", name, "email", "changed"), &msg.MsgHumanoidEmailChanged{HumanoidName: name})
+		}
+	}()
+}
+
+// handleEmailFoldersQuery serves the email client's folder rail. The IMAP LIST
+// runs in a goroutine; the reply is published on humanoid.<name>.email.folders.
+func (h *HumanoidActor) handleEmailFoldersQuery() {
+	adapter := h.uiMailbox()
+	name := h.name
+	pub := h.pub
+	subject := msg.T("humanoid", name, "email", "folders")
+	if adapter == nil {
+		_ = pub.Send(subject, &msg.MsgHumanoidEmailFoldersReply{
+			HumanoidName: name, Err: "no email channel configured",
+		})
+		return
+	}
+	go func() {
+		folders, err := adapter.ListFolders()
+		reply := &msg.MsgHumanoidEmailFoldersReply{HumanoidName: name, Folders: folders}
+		if err != nil {
+			reply.Err = err.Error()
+		}
+		if perr := pub.Send(subject, reply); perr != nil {
+			slog.Warn("humanoid: publish email folders reply failed", "name", name, "err", perr)
+		}
+	}()
+}
+
 // handleEmailReadQuery serves a desktop email-client single-email read. Like
 // handleEmailListQuery, the IMAP fetch runs in a goroutine; the reply is
 // published on humanoid.<name>.email.detail (forwarded as an "email_detail"
 // event).
-func (h *HumanoidActor) handleEmailReadQuery(uid int) {
-	adapter := h.emailAdapter
+func (h *HumanoidActor) handleEmailReadQuery(folder string, uid int) {
+	adapter := h.uiMailbox()
 	name := h.name
 	pub := h.pub
 	subject := msg.T("humanoid", name, "email", "detail")
@@ -3147,13 +3345,35 @@ func (h *HumanoidActor) handleEmailReadQuery(uid int) {
 		return
 	}
 	go func() {
-		detail, err := adapter.ReadEmail(uid)
+		detail, err := adapter.ReadEmailIn(folder, uid)
 		reply := &msg.MsgHumanoidEmailReadReply{HumanoidName: name, Email: detail}
 		if err != nil {
 			reply.Err = err.Error()
 		}
 		if perr := pub.Send(subject, reply); perr != nil {
 			slog.Warn("humanoid: publish email detail reply failed", "name", name, "err", perr)
+		}
+	}()
+}
+
+// handleEmailSetSeen sets or clears the \Seen flag on one email (the email
+// client's read/unread toggle). The blocking IMAP STORE runs in a goroutine.
+// Success or failure, it publishes MsgHumanoidEmailChanged: the UI flipped the
+// row optimistically, and the re-list that follows corrects it if the store
+// failed.
+func (h *HumanoidActor) handleEmailSetSeen(folder string, uid int, seen bool) {
+	adapter := h.uiMailbox()
+	name := h.name
+	pub := h.pub
+	if adapter == nil {
+		return
+	}
+	go func() {
+		if err := adapter.SetSeen(folder, uid, seen); err != nil {
+			slog.Warn("humanoid: email set-seen failed", "name", name, "uid", uid, "seen", seen, "err", err)
+		}
+		if perr := pub.Send(msg.T("humanoid", name, "email", "changed"), &msg.MsgHumanoidEmailChanged{HumanoidName: name}); perr != nil {
+			slog.Warn("humanoid: publish email changed failed", "name", name, "err", perr)
 		}
 	}()
 }
@@ -3166,7 +3386,7 @@ func (h *HumanoidActor) handleEmailReadQuery(uid int) {
 // a draft store, the message is staged as an approved draft first so it shows the
 // same provenance as an AI draft the human approved.
 func (h *HumanoidActor) handleEmailCompose(m *msg.MsgHumanoidEmailCompose) {
-	adapter := h.emailAdapter
+	adapter := h.uiMailbox()
 	name := h.name
 	pub := h.pub
 	drafts := h.drafts

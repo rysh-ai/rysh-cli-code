@@ -631,6 +631,11 @@ func ProcessAlive(pid int) bool {
 	if err != nil {
 		return false
 	}
+	// Since Go 1.23, FindProcess holds a pidfd that only Release (or a GC
+	// finalizer) closes. The daemon calls this every couple of seconds per
+	// pane with more than one size claim, so without Release the pidfds pile
+	// up between GCs — a 45-day daemon held 11 open on one attached TUI.
+	defer func() { _ = process.Release() }()
 	if process.Signal(syscall.Signal(0)) != nil {
 		return false
 	}

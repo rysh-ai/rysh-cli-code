@@ -37,6 +37,30 @@ func NewClient(port int, sessionName string) (*Client, error) {
 	return &Client{nc: nc, pub: pub, codecs: codecs, session: sessionName}, nil
 }
 
+// NewPersistentClient is NewClient for a LONG-LIVED caller (rysh board listen):
+// it reconnects forever instead of never, so a listener outlives a daemon
+// restart or a NATS host that blips. A one-shot command keeps NewClient's
+// fail-fast behaviour, where a dead session must be an error now.
+func NewPersistentClient(port int, sessionName string) (*Client, error) {
+	url := fmt.Sprintf("nats://127.0.0.1:%d", port)
+	nc, err := nats.Connect(url,
+		nats.Timeout(3*time.Second),
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(2*time.Second),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("connect to session NATS at %s: %w", url, err)
+	}
+	codecs := msg.DefaultCodecRegistry()
+	return &Client{nc: nc, pub: msg.NewNATSPublisher(nc, codecs), codecs: codecs, session: sessionName}, nil
+}
+
+// Conn, Publisher and Codecs expose the connection to a long-lived caller that
+// subscribes rather than making one request.
+func (c *Client) Conn() *nats.Conn              { return c.nc }
+func (c *Client) Publisher() *msg.NATSPublisher { return c.pub }
+func (c *Client) Codecs() *msg.CodecRegistry    { return c.codecs }
+
 // Close drains and closes the NATS connection.
 func (c *Client) Close() {
 	if c.nc != nil {
@@ -69,9 +93,13 @@ func (c *Client) Request(message interface{}, timeout time.Duration) (interface{
 	return c.pub.Request(c.wsInbox(), message, timeout)
 }
 
-// RequestSnapshot requests the full workspace snapshot.
+// RequestSnapshot requests the structural workspace snapshot: ids, titles,
+// layout and per-pane flags, with no output buffers and no command history.
+// Its only callers are the list commands, which read nothing else — and the
+// full snapshot they used to pull measured 4.2 MB / 444 ms on a 22-pane
+// session, once per `rysh tab|lane|pane list`, which agents run in loops.
 func (c *Client) RequestSnapshot(timeout time.Duration) (interface{}, error) {
-	return c.pub.Request(c.snapshotSubject(), &msg.MsgGetWorkspaceSnapshot{}, timeout)
+	return c.pub.Request(c.snapshotSubject(), &msg.MsgGetWorkspaceSnapshot{LayoutOnly: true, NoHistories: true}, timeout)
 }
 
 // SendToSubject publishes a fire-and-forget message to a specific subject.

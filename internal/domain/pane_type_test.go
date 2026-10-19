@@ -26,6 +26,7 @@ func TestShelllessPaneTypes(t *testing.T) {
 	}{
 		{PaneTypeReplay, true, "design 006 v2: recorded playback, read-only by construction"},
 		{PaneTypeAgentsBoard, true, "design 025: the board renders posts, it is not a terminal"},
+		{PaneTypeMeeting, true, "design 043: the desktop app renders the meeting, there is no terminal"},
 		{PaneTypeNormal, false, "the ordinary shell pane must keep its PTY"},
 		{PaneTypeApproval, false, "handled on its own path; not claimed by this helper"},
 		{"some-future-type", false, "unknown types default to having a shell, as before"},

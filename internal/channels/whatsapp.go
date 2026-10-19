@@ -141,6 +141,13 @@ type WhatsAppAdapter struct {
 	// handledOrder is the insertion order of `handled`, used to evict the oldest
 	// ids once the set outgrows whatsAppHandledCap.
 	handledOrder []string
+
+	// relayRefused is set while another rysh session holds this relay
+	// connection (D-21): no replay and no auto-answer until a reconnect's
+	// replay succeeds. relayRefusals counts refusals, so a replay that raced a
+	// refusal cannot clear it.
+	relayRefused  bool
+	relayRefusals int
 }
 
 // waDeliveryFailure is one failed delivery from the webhook statuses[] feed,

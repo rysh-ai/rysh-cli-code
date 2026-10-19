@@ -57,6 +57,10 @@ func (w *WorkspaceActor) handleFleetCommand(out *strings.Builder, paneID string,
 		}
 		return w.fleetUpdate(out, fleet.Update{Op: fleet.OpForget, Name: args[1]},
 			fmt.Sprintf("fleet %s forgotten — its panes are untouched and still running\n", args[1]))
+	case "status":
+		return w.fleetStatus(out, paneID, args[1:])
+	case "watch":
+		return w.fleetWatch(out, args[1:])
 	case "state":
 		if len(args) < 3 {
 			return w.fleetUsage(out, "##fleet state needs a fleet name and a state "+
@@ -232,6 +236,97 @@ func (w *WorkspaceActor) fleetUsage(out *strings.Builder, why string) error {
 	out.WriteString("  ##fleet register <name> [--board <id>] [--source <path>] [--roadmap <dir>] [--tab <id>]\n")
 	out.WriteString("  ##fleet state <name> registered|up|down\n")
 	out.WriteString("  ##fleet forget <name>             drop it from the registry (panes keep running)\n")
+	out.WriteString("  ##fleet status [<name>]           the status ledger: work, activity, health, blockers\n")
+	out.WriteString("  ##fleet watch <name> [--policy smart|always|off] [--interval 10m] [--stall 5m]\n")
 	w.failRyshUsage("%s", why)
 	return fmt.Errorf("%s", why)
+}
+
+// fleetStatus is `##fleet status [<name>]`: the ledger (design 054). With no
+// name it shows the calling pane's own fleet, else every fleet that has
+// members. Declaring is `rysh fleet status <work>` from the agent's shell, not
+// a ## verb: an agent's status must carry its own pane id, and a ## line runs
+// as whichever pane it was typed in.
+func (w *WorkspaceActor) fleetStatus(out *strings.Builder, paneID string, args []string) error {
+	name := ""
+	if len(args) > 0 {
+		name = args[0]
+	}
+	reply, err := fleet.Ask(w.nc, fleet.Query{Name: name}, fleetQueryTimeout)
+	if err != nil {
+		return w.fleetRefused(out, err)
+	}
+	fleets := reply.Fleets
+	if name == "" {
+		var mine, withMembers []fleet.Fleet
+		for _, f := range fleets {
+			if len(f.Members) > 0 {
+				withMembers = append(withMembers, f)
+			}
+			for _, m := range f.Members {
+				if m.PaneID == paneID {
+					mine = append(mine, f)
+				}
+			}
+		}
+		fleets = withMembers
+		if len(mine) > 0 {
+			fleets = mine
+		}
+	}
+	if len(fleets) == 0 {
+		if name != "" {
+			w.failRysh("no fleet named %q", name)
+			fmt.Fprintf(out, "no fleet named %q\n", name)
+			return fmt.Errorf("no fleet named %q", name)
+		}
+		out.WriteString("no fleet in this session has members\n")
+		return nil
+	}
+	now := time.Now().UnixMilli()
+	for i := range fleets {
+		out.WriteString(fleet.RenderStatus(&fleets[i], now))
+	}
+	out.WriteString(fleetStalenessNote(reply.ReconciledAt))
+	return nil
+}
+
+// fleetWatch is `##fleet watch <name> [--policy p] [--interval d] [--stall d]`.
+func (w *WorkspaceActor) fleetWatch(out *strings.Builder, args []string) error {
+	if len(args) == 0 {
+		return w.fleetUsage(out, "##fleet watch needs a fleet name")
+	}
+	var wt fleet.Watch
+	rest := args[1:]
+	for i := 0; i < len(rest); i++ {
+		if i+1 >= len(rest) {
+			return w.fleetUsage(out, fmt.Sprintf("%s needs a value", rest[i]))
+		}
+		v := rest[i+1]
+		switch rest[i] {
+		case "--policy":
+			wt.Policy = v
+		case "--interval", "--stall":
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				return w.fleetUsage(out, fmt.Sprintf("%s %q: want a duration like 10m or 90s", rest[i], v))
+			}
+			if rest[i] == "--interval" {
+				wt.IntervalSec = int(d.Seconds())
+			} else {
+				wt.StallSec = int(d.Seconds())
+			}
+		default:
+			return w.fleetUsage(out, fmt.Sprintf("unknown flag %q to ##fleet watch", rest[i]))
+		}
+		i++
+	}
+	reply, err := fleet.Send(w.nc, fleet.Update{Op: fleet.OpWatch, Name: args[0], Watch: wt}, fleetQueryTimeout)
+	if err != nil {
+		return w.fleetRefused(out, err)
+	}
+	r := reply.Fleet.Watch.Resolved()
+	fmt.Fprintf(out, "fleet %s: watch %s, check-in every %s, stalled after %s\n",
+		reply.Fleet.Name, r.Policy, r.IntervalText(), fleet.Watch{IntervalSec: r.StallSec}.IntervalText())
+	return nil
 }

@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/rysh-ai/rysh-cli-shared/forge/ingest"
 	"github.com/rysh-ai/rysh-cli-code/internal/forge/gen"
-	"github.com/rysh-ai/rysh-cli-code/internal/forge/ingest"
 
 	// Register all generator targets.
 	_ "github.com/rysh-ai/rysh-cli-code/internal/forge/gen/docs"
@@ -17,8 +17,8 @@ import (
 	_ "github.com/rysh-ai/rysh-cli-code/internal/forge/gen/javasdk"
 	_ "github.com/rysh-ai/rysh-cli-code/internal/forge/gen/mcpserver"
 	_ "github.com/rysh-ai/rysh-cli-code/internal/forge/gen/pysdk"
+	_ "github.com/rysh-ai/rysh-cli-code/internal/forge/gen/toolpackgen"
 	_ "github.com/rysh-ai/rysh-cli-code/internal/forge/gen/tssdk"
-	_ "github.com/rysh-ai/rysh-cli-code/internal/forge/toolpack"
 )
 
 const smokeSpec = `{

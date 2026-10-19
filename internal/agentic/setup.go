@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -80,7 +82,13 @@ type Setup struct {
 	// WorkspaceActor pushes known secrets (##secret store) into it; the
 	// ##snat / ##rst command surface reads and mutates it. Never nil after
 	// NewSetup/NewSetupAlwaysOn — disabled state is carried inside.
-	SecretNAT *secretnat.Manager
+	//
+	// SNATRejected lists [snat] custom_detectors entries refused at
+	// construction. Empty in the normal case. ##snat status prints it: a
+	// rejected detector is coverage the user configured and does not have,
+	// so it cannot live only in the daemon log.
+	SecretNAT    *secretnat.Manager
+	SNATRejected []SNATRejectedDetector
 
 	// SessionLLM is the runtime-mutable session default model/effort behind
 	// the ##llm command. Provider is wrapped to consult it per call, so a
@@ -289,6 +297,8 @@ func NewSetup(cfg config.Config, plKV nats.KeyValue) *Setup {
 	systemPrompt := loadSystemPrompt(cfg.SystemPrompt)
 	systemPrompt = appendProjectMemory(systemPrompt, workDir)
 
+	snatMgr, snatRejected := newSecretNATManager(cfg)
+
 	return &Setup{
 		Provider:     prov,
 		ToolRegistry: registry,
@@ -298,7 +308,8 @@ func NewSetup(cfg config.Config, plKV nats.KeyValue) *Setup {
 		BgSessions:   bgSessions,
 		MCP:          mcpMgr,
 		Forge:        forgeMgr,
-		SecretNAT:    newSecretNATManager(cfg),
+		SecretNAT:    snatMgr,
+		SNATRejected: snatRejected,
 		SessionLLM:   sessionLLM,
 	}
 }
@@ -362,6 +373,8 @@ func NewSetupAlwaysOn(cfg config.Config, plKV nats.KeyValue) *Setup {
 	systemPrompt := loadSystemPrompt(cfg.SystemPrompt)
 	systemPrompt = appendProjectMemory(systemPrompt, workDir)
 
+	snatMgr, snatRejected := newSecretNATManager(cfg)
+
 	return &Setup{
 		Provider:     prov,
 		ToolRegistry: registry,
@@ -371,22 +384,75 @@ func NewSetupAlwaysOn(cfg config.Config, plKV nats.KeyValue) *Setup {
 		BgSessions:   bgSessions,
 		MCP:          mcpMgr,
 		Forge:        forgeMgr,
-		SecretNAT:    newSecretNATManager(cfg),
+		SecretNAT:    snatMgr,
+		SNATRejected: snatRejected,
 		SessionLLM:   sessionLLM,
 	}
 }
 
+// SNATRejectedDetector is one entry from the [snat] custom_detectors config
+// that was refused at manager construction, kept so the ##snat command surface
+// can name it. A rejection means the user configured coverage they do not
+// have, so it must be visible where they form their mental model — the daemon
+// log is not that place.
+type SNATRejectedDetector struct {
+	// Name is the detector name exactly as configured (not normalised), so a
+	// user can find the offending entry in their config file.
+	Name string
+	// Pattern is the offending regex, echoed back so a typo is visible.
+	Pattern string
+	// Reason says why it was refused, in one line.
+	Reason string
+}
+
 // newSecretNATManager builds the process-wide SecretNAT / ReSet manager from
-// the [snat] config section. An invalid custom detector pattern is dropped
-// with a warning rather than failing daemon startup.
-func newSecretNATManager(cfg config.Config) *secretnat.Manager {
+// the [snat] config section, returning it alongside the custom detectors that
+// were refused.
+//
+// Custom detector patterns are validated INDIVIDUALLY here rather than handed
+// to secretnat.NewManager as a batch. NewDefaultRegistry fails the whole
+// registry on the first unparseable pattern, and this function used to react
+// by rebuilding with CustomDetectors = nil — so one typo discarded every
+// custom detector the user had, not just the offender. Pre-filtering keeps
+// each valid pattern independent of its siblings; the batch call below then
+// cannot fail on a pattern, and the rejects travel to ##snat status.
+//
+// The rejection rules mirror NewDefaultRegistry's own order exactly, so the
+// set passed through is the set the registry accepts: an entry disabled by
+// name is skipped silently (the user asked for that), while an unnamed entry
+// or an unparseable pattern is reported.
+func newSecretNATManager(cfg config.Config) (*secretnat.Manager, []SNATRejectedDetector) {
 	ttl, err := time.ParseDuration(cfg.SNAT.MappingTTL)
 	if err != nil {
 		ttl = 0 // "" or malformed → conversation lifetime
 	}
+	off := make(map[string]bool, len(cfg.SNAT.DisableDetectors))
+	for _, d := range cfg.SNAT.DisableDetectors {
+		off[strings.ToLower(strings.TrimSpace(d))] = true
+	}
 	custom := make([]secretnat.CustomDetector, 0, len(cfg.SNAT.CustomDetectors))
+	var rejected []SNATRejectedDetector
+	reject := func(c config.SNATCustomDetector, reason string) {
+		slog.Warn("secretnat: custom detector rejected — the other custom detectors are unaffected",
+			"name", c.Name, "pattern", c.Pattern, "reason", reason)
+		rejected = append(rejected, SNATRejectedDetector{Name: c.Name, Pattern: c.Pattern, Reason: reason})
+	}
 	for _, c := range cfg.SNAT.CustomDetectors {
-		custom = append(custom, secretnat.CustomDetector{Name: c.Name, Pattern: c.Pattern, Prefix: c.Prefix})
+		name := strings.ToLower(strings.TrimSpace(c.Name))
+		switch {
+		case name == "":
+			// NewDefaultRegistry drops these with no error at all — the same
+			// "believes they are covered and is not" defect as a bad pattern.
+			reject(c, "detector has no name")
+		case off[name]:
+			// Disabled by name in snat.disable_detectors: intentional, not a defect.
+		default:
+			if _, err := regexp.Compile(c.Pattern); err != nil {
+				reject(c, err.Error())
+				continue
+			}
+			custom = append(custom, secretnat.CustomDetector{Name: c.Name, Pattern: c.Pattern, Prefix: c.Prefix})
+		}
 	}
 	opts := secretnat.Options{
 		Enabled:           cfg.SNAT.Enabled,
@@ -398,11 +464,18 @@ func newSecretNATManager(cfg config.Config) *secretnat.Manager {
 	}
 	m, err := secretnat.NewManager(opts)
 	if err != nil {
-		slog.Warn("secretnat: invalid custom detector config — continuing without custom detectors", "err", err)
+		// Unreachable via a pattern (every one was compiled above), so this is
+		// a backstop for any future construction error. Still never fail
+		// daemon startup — but say so at the surface rather than only in the log.
+		slog.Warn("secretnat: manager construction failed — continuing without custom detectors", "err", err)
 		opts.CustomDetectors = nil
 		m, _ = secretnat.NewManager(opts)
+		rejected = append(rejected, SNATRejectedDetector{
+			Name:   "(all custom detectors)",
+			Reason: err.Error(),
+		})
 	}
-	return m
+	return m, rejected
 }
 
 // BootstrapMCP connects to MCP servers persisted in <workDir>/.rysh/mcp.json and

@@ -621,6 +621,85 @@ func (w *WorkspaceActor) endShare(entityID string) {
 	w.persistToKV()
 }
 
+// shareOrphanTicks is how many consecutive reconcile ticks (one a minute) a
+// shared entity must be missing before its share is ended. More than one, so
+// an entity whose actors are still restoring after a restart is not mistaken
+// for a closed one.
+const shareOrphanTicks = 2
+
+// reapOrphanedShares ends shares whose entity no longer exists. Only an
+// explicit ##unshare used to end a share, so closing a shared pane, group,
+// lane or tab left its UpstreamShareActor running for the life of the daemon —
+// remote connection, heartbeat, an 8ms flusher, and for multi-pane shares a
+// layout loop polling snapshots — and the persisted record re-shared the ghost
+// on every restart (F-67).
+//
+// Runs in the mailbox on the minute tick. A snapshot with a Partial tab is
+// inconclusive (a tab that timed out lists no lanes, so everything in it would
+// look gone) and is skipped without counting.
+func (w *WorkspaceActor) reapOrphanedShares() {
+	if len(w.shareRecords) == 0 {
+		w.shareMisses = nil
+		return
+	}
+	snap := w.cachedStructuralSnapshot()
+	for _, t := range snap.Tabs {
+		if t.Partial {
+			return
+		}
+	}
+	live := snapshotEntityIDs(snap)
+	if w.shareMisses == nil {
+		w.shareMisses = make(map[string]int)
+	}
+	for id := range w.shareMisses {
+		if _, ok := w.shareRecords[id]; !ok {
+			delete(w.shareMisses, id)
+		}
+	}
+	for entityID, rec := range w.shareRecords {
+		if live[entityID] {
+			delete(w.shareMisses, entityID)
+			continue
+		}
+		w.shareMisses[entityID]++
+		if w.shareMisses[entityID] < shareOrphanTicks {
+			continue
+		}
+		delete(w.shareMisses, entityID)
+		slog.Info("share: entity is gone, ending its share",
+			"entityType", rec.EntityType, "entityID", entityID, "shareID", rec.ShareID)
+		if w.shareRegistryPID != nil {
+			w.endShare(entityID)
+		} else {
+			// No registry to stop (upstream disabled): just drop the record so
+			// it is not re-shared on the next restart.
+			delete(w.localShares, entityID)
+			delete(w.shareRecords, entityID)
+			w.persistToKV()
+		}
+	}
+}
+
+// snapshotEntityIDs returns the id of every tab, lane, pane group and pane in
+// snap — the ids a share can be keyed by.
+func snapshotEntityIDs(snap domain.WorkspaceSnapshot) map[string]bool {
+	ids := make(map[string]bool)
+	for _, t := range snap.Tabs {
+		ids[t.ID] = true
+		for _, l := range t.Lanes {
+			ids[l.ID] = true
+			for _, g := range l.PaneGroups {
+				ids[g.ID] = true
+				for _, p := range g.Panes {
+					ids[p.ID] = true
+				}
+			}
+		}
+	}
+	return ids
+}
+
 // shareList returns the persisted share intents for KV serialisation.
 func (w *WorkspaceActor) shareList() []shareKV {
 	if len(w.shareRecords) == 0 {

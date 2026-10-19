@@ -44,6 +44,12 @@ func (m *Model) fireDoubleEsc() {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case faceTimeClosed:
+		if msg.err != nil {
+			m.flashMsg = "FaceTime picker could not open; run rysh facetime doctor"
+		}
+		return m, m.refreshCmd()
+
 	case flashClearMsg:
 		m.flashMsg = ""
 		return m, nil
@@ -79,10 +85,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// On a remote/mirror interactive pane (a shared pane/tab subscriber),
 			// the wheel cannot usefully reach a local PTY — a view share has none.
-			// Drop into copy/scroll mode and scroll the frozen history instead of
-			// forwarding the event into the void. Local interactive programs keep
-			// receiving wheel events below.
-			if pane != nil && pane.RemoteInteractive && msg.Action == tea.MouseActionPress &&
+			// The same is true, locally, for a foreground program that never
+			// claimed its own mouse tracking (e.g. codex): forwarding the wheel to
+			// it does nothing, since it never asked to receive mouse bytes at all.
+			// In both cases, drop into copy/scroll mode and scroll the frozen
+			// history instead of forwarding the event into the void or updating a
+			// scroll offset the live VT render ignores. A program that DOES claim
+			// mouse tracking (e.g. claude) keeps receiving wheel events below,
+			// unaffected — it's already handling its own scrollback.
+			if paneNeedsScrollFallback(pane) && msg.Action == tea.MouseActionPress &&
 				(msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown) {
 				if msg.Button == tea.MouseButtonWheelUp {
 					if ok, cmd := (&m).enterRawScroll(m.snapshot.ActivePaneID, 3); ok {
@@ -127,6 +138,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// so they never leak into a shell input line.
 		if m.mode == modeEmail {
 			return m.updateEmailMode(msg)
+		}
+		// The company view owns all keys too (design 037).
+		if m.mode == modeCompany {
+			return m.updateCompanyMode(msg)
 		}
 		// The `##llm select` picker is modal: it owns every key (including the
 		// arrows the shell readline would otherwise take for history) until a
@@ -197,11 +212,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "pgup", "shift+up":
 				// On a remote/mirror interactive pane (shared pane/tab subscriber)
-				// these scroll gestures cannot reach a local PTY, so route them into
-				// copy/scroll mode rather than forwarding them into the void. Plain
-				// arrow keys are deliberately NOT intercepted — interactive programs
-				// (e.g. claude's history) still receive them via forwardRawKey.
-				if pane := m.findPaneInSnapshot(m.snapshot.ActivePaneID); pane != nil && pane.RemoteInteractive {
+				// these scroll gestures cannot reach a local PTY, and on a local
+				// pane whose foreground program never claimed its own mouse
+				// tracking (e.g. codex) it has no scrollback of its own to page
+				// through either — so route both into copy/scroll mode rather than
+				// forwarding them into the void. Plain arrow keys are deliberately
+				// NOT intercepted — interactive programs (e.g. claude's history)
+				// still receive them via forwardRawKey, same as a program that DOES
+				// claim mouse tracking keeps receiving pgup/shift+up below.
+				if pane := m.findPaneInSnapshot(m.snapshot.ActivePaneID); paneNeedsScrollFallback(pane) {
 					if ok, cmd := (&m).enterRawScroll(m.snapshot.ActivePaneID, 0); ok {
 						if msg.String() == "pgup" {
 							m.rawScrollOffset = m.rawScrollVisibleRows()
@@ -270,6 +289,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeRejectReason {
 			return m.updateRejectReasonMode(msg)
 		}
+		if m.mode == modeQuestion {
+			return m.updateQuestionMode(msg)
+		}
 
 		// Reverse-i-search overlay (Ctrl+R in shell mode) captures every key
 		// while open — including paste, which appends to the query.
@@ -297,6 +319,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// claims just as narrowly: esc, [ / ] and the multiplexer chords fall
 		// through, so the user is never trapped in the board.
 		if handled, cmd := m.updateBoardPaneInput(msg); handled {
+			return m, cmd
+		}
+
+		// Meeting pane (design 043): its lifecycle controls (MTG-6, design
+		// 040) — pending, approve/reject, speak, pause/resume, cancel. Claimed
+		// as narrowly as replay and board.
+		if handled, cmd := m.updateMeetingPaneInput(msg); handled {
 			return m, cmd
 		}
 
@@ -366,9 +395,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "ctrl+n":
 			m.sendMsg(&msgpkg.MsgCreatePane{})
-			return m, tea.Batch(m.refreshCmd(), tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
-				return tickMsg(time.Now())
-			}))
+			return m, m.newPaneTickCmd()
 		case "[":
 			m.sendMsg(&msgpkg.MsgFocusPrevTab{})
 			return m, m.refreshCmd()
@@ -511,13 +538,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pendingApproval = msg.Request
 				m.approvalPaneID = msg.PaneID
 				m.mode = modeApproval
+				if msg.Request.Type == msgpkg.ApprovalTypeQuestion {
+					// ask_user's question opens straight into an answer
+					// field, not the gate's y/n keys (F-92).
+					m.mode = modeQuestion
+					m.rejectInput.SetValue("")
+					m.rejectInput.Placeholder = "type your answer, enter to send, esc to decline"
+					m.rejectInput.Focus()
+				}
 				m.syncPaneInputFocus()
+				// Not re-armed here: answering re-arms, so a second request
+				// waits in the channel instead of replacing this one.
+				return m, nil
 			}
 		}
-		return m, nil
+		// Nothing pending was opened, so nothing will be answered to re-arm
+		// the listener. This path used to return without it, and after one
+		// request for a pane outside the snapshot the TUI never received
+		// another approval (F-71).
+		return m, m.listenApprovalRequests()
 
 	case pipelineOutputMsg:
-		m.pipelineOutputs[msg.tabID] += msg.text
+		// Capped like pane content: this used to grow for as long as the
+		// pipeline ran, and the view re-wraps it on every append.
+		m.pipelineOutputs[msg.tabID] = capTail(m.pipelineOutputs[msg.tabID]+msg.text, m.contentCap())
 		return m, m.listenPipelineOutput()
 
 	case mirrorDirtyMsg:
@@ -583,6 +627,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := m.applyEmailEvent(msg.ev)
 		return m, tea.Batch(cmd, m.listenEmailEventCmd())
 
+	case companyEventMsg:
+		// The company follower pushed a fresh snapshot (design 037). Store it
+		// and re-arm the listener.
+		m.applyCompanySnapshot(msg.ev.snap)
+		return m, m.listenCompanyEventCmd()
+
+	case companyQueryMsg:
+		// One-shot attach-time reply; a session with no follower answers with
+		// an error, which is simply not a snapshot.
+		m.applyCompanySnapshot(msg.snap)
+		return m, nil
+
 	case boardEventMsg:
 		// A live agents-board post or registration. File it into the session
 		// store and re-arm the listener; every agents-board pane renders from
@@ -610,11 +666,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case recorderAskTick:
 		return m, m.askRecorderCmd()
 
+	case meetingReplyMsg:
+		return m, m.applyMeetingReply(msg)
+	case meetingPollTick:
+		return m, m.onMeetingPollTick()
+
 	case activateModeMsg:
 		// Backend asked a pane to switch its visible mode (register-output). Apply
 		// it, then re-arm the listener.
 		cmd := m.applyActivateMode(msg.item)
 		m.syncEmailMode()
+		m.syncCompanyMode()
 		return m, tea.Batch(cmd, m.listenActivateModeCmd())
 
 	case paneContentLoadedMsg:
@@ -803,6 +865,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyRemoteFullscreen(msg)
 		return m, tea.Batch(m.refreshCmd(), m.listenRemoteFullscreen())
 
+	case boardOutputDoneMsg:
+		return m, m.flash(msg.text)
+
+	case clipboardFlashMsg:
+		var cmd tea.Cmd
+		if msg.text != "" {
+			cmd = m.flash(msg.text)
+		}
+		return m, tea.Batch(cmd, m.listenClipboardFlashCmd())
+
 	case attentionEventMsg:
 		if msg.Event != nil {
 			paneID := msg.Event.PaneID
@@ -919,6 +991,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if cmd := m.syncRawMode(); cmd != nil {
 				contentCmds = append(contentCmds, cmd)
 			}
+			// A focused meeting pane polls its bot's pending turn.
+			if cmd := m.meetingPollStart(); cmd != nil {
+				contentCmds = append(contentCmds, cmd)
+			}
 			if len(contentCmds) > 0 {
 				return m, tea.Batch(contentCmds...)
 			}
@@ -938,6 +1014,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case newPaneRefreshMsg:
+		// One-shot follow-up refresh after a pane create. Deliberately NOT a
+		// tickMsg: that handler re-arms itself, so every pane ever created used
+		// to start one more permanent 250ms chain — a TUI that had created N
+		// panes ran N+1 chains and repainted 4×(N+1) times a second forever.
+		return m, m.refreshCmd()
 	case tickMsg:
 		// Animation/heartbeat only: blink toggle + re-arm. Layout refresh is now
 		// event-driven (layoutDirty) and per-pane content is streamed, so there is
@@ -1312,6 +1394,16 @@ func (m Model) updateLayoutMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "s":
 		m.sendMsg(&msgpkg.MsgSwapPane{})
 		return m, m.refreshCmd()
+	case "c":
+		// Fold the active lane to a strip; the open lanes share its width and
+		// focus moves to the nearest open lane. Click the strip, press o, or
+		// ##lane expand to open it again.
+		m.sendMsg(&msgpkg.MsgLaneCollapse{Verb: "collapse"})
+		return m, m.refreshCmd()
+	case "o":
+		// Opens the focused lane when it is a strip, else every folded lane.
+		m.sendMsg(&msgpkg.MsgLaneCollapse{Verb: "expand", Lane: "auto"})
+		return m, m.refreshCmd()
 	}
 	return m, nil
 }
@@ -1335,9 +1427,15 @@ func (m Model) updateApprovalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.publishApproval(msgpkg.DecisionNo, "")
 		return m, tea.Batch(m.refreshCmd(), m.listenApprovalRequests())
 	case "N":
-		// Switch to reject-reason mode to capture the explanation.
+		// Switch to reject-reason mode to capture the explanation — for a
+		// question, the typed answer (F-92).
 		m.mode = modeRejectReason
 		m.rejectInput.SetValue("")
+		if m.pendingApproval.Type == msgpkg.ApprovalTypeQuestion {
+			m.rejectInput.Placeholder = "type your answer, enter to send (empty declines)"
+		} else {
+			m.rejectInput.Placeholder = "reason for rejection"
+		}
 		m.rejectInput.Focus()
 		return m, nil
 	case "esc":
@@ -1349,15 +1447,76 @@ func (m Model) updateApprovalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// updateQuestionMode is the answer field for ask_user's question (F-92). Enter
+// sends the typed answer as yes + the text, which ask_user hands the model;
+// with options, a number 1..N or an option's exact label picks that option
+// (choice_selected + ChoiceIdx). An empty Enter is ignored — Esc is the
+// explicit decline, and a stray Enter must not answer for the user.
+func (m Model) updateQuestionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		text := strings.TrimSpace(m.rejectInput.Value())
+		if text == "" || m.pendingApproval == nil {
+			return m, nil
+		}
+		if idx, ok := pickedChoice(text, m.pendingApproval.Choices); ok {
+			m.publishApprovalChoice(msgpkg.DecisionChoiceSelected, m.pendingApproval.Choices[idx].Label, idx)
+		} else {
+			m.publishApproval(msgpkg.DecisionYes, text)
+		}
+		m.rejectInput.SetValue("")
+		m.rejectInput.Blur()
+		m.syncPaneInputFocus()
+		return m, tea.Batch(m.refreshCmd(), m.listenApprovalRequests())
+	case "esc":
+		m.publishApproval(msgpkg.DecisionNo, "")
+		m.rejectInput.SetValue("")
+		m.rejectInput.Blur()
+		m.syncPaneInputFocus()
+		return m, tea.Batch(m.refreshCmd(), m.listenApprovalRequests())
+	}
+	var cmd tea.Cmd
+	m.rejectInput, cmd = m.rejectInput.Update(msg)
+	return m, cmd
+}
+
+// pickedChoice reports whether an answer names one of the options: its number
+// (1..N, as listed in the question) or its exact label.
+func pickedChoice(text string, choices []msgpkg.Choice) (int, bool) {
+	for i, c := range choices {
+		if text == c.Label {
+			return i, true
+		}
+	}
+	if n, err := strconv.Atoi(text); err == nil && n >= 1 && n <= len(choices) {
+		return n - 1, true
+	}
+	return 0, false
+}
+
 func (m Model) updateRejectReasonMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
 		reason := strings.TrimSpace(m.rejectInput.Value())
+		decision := msgpkg.DecisionNoWithExplanation
 		if reason == "" {
 			reason = "rejected by user"
+			// For a question the reason IS the answer: an empty one declines
+			// rather than putting words in the user's mouth (F-92).
+			if m.pendingApproval != nil && m.pendingApproval.Type == msgpkg.ApprovalTypeQuestion {
+				decision, reason = msgpkg.DecisionNo, ""
+			}
 		}
-		m.publishApproval(msgpkg.DecisionNoWithExplanation, reason)
+		// An approval PANE's request never went through the listener, so
+		// answering it must not re-arm one: that parked one extra goroutine on
+		// the shared channel per reject-with-reason (F-71). Read before
+		// publishApproval clears it.
+		fromApprovalPane := m.approvalResponseSubject != ""
+		m.publishApproval(decision, reason)
 		m.rejectInput.Blur()
+		if fromApprovalPane {
+			return m, m.refreshCmd()
+		}
 		return m, tea.Batch(m.refreshCmd(), m.listenApprovalRequests())
 	case "esc":
 		// Cancel the reason input — go back to the appropriate mode.
@@ -1383,6 +1542,12 @@ func (m Model) updateRejectReasonMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // publishApproval sends the user's approval decision back to the orchestrator
 // via NATS and clears the approval state.
 func (m *Model) publishApproval(decision msgpkg.ApprovalDecision, reason string) {
+	m.publishApprovalChoice(decision, reason, 0)
+}
+
+// publishApprovalChoice is publishApproval with a ChoiceIdx, for
+// choice_selected answers to a question (F-47).
+func (m *Model) publishApprovalChoice(decision msgpkg.ApprovalDecision, reason string, choiceIdx int) {
 	if m.pendingApproval == nil {
 		return
 	}
@@ -1394,6 +1559,7 @@ func (m *Model) publishApproval(decision msgpkg.ApprovalDecision, reason string)
 		RequestID:        m.pendingApproval.RequestID,
 		Decision:         decision,
 		Reason:           reason,
+		ChoiceIdx:        choiceIdx,
 		RespondingPaneID: m.approvalPaneID,
 	}
 	_ = m.pub.Send(subject, resp)
@@ -1404,6 +1570,10 @@ func (m *Model) publishApproval(decision msgpkg.ApprovalDecision, reason string)
 		label := string(decision)
 		if reason != "" {
 			label += ": " + reason
+		}
+		if m.pendingApproval.Type == msgpkg.ApprovalTypeQuestion {
+			// ask_user's question is answered, not approved (F-92).
+			label = msgpkg.QuestionEchoLabel(decision, reason, choiceIdx)
 		}
 		_ = m.pub.SendPaneAIOutput(m.approvalPaneID, fmt.Sprintf("[%s]\n", label))
 	}
@@ -1547,6 +1717,14 @@ func (m Model) submitActiveInput() (tea.Model, tea.Cmd) {
 			text = expandPastedPlaceholder(inputMode, text, pasted)
 			delete(m.panePastedText, paneID)
 		}
+		// `##rysh restart` restarts the daemon this TUI is attached to, so it
+		// is carried out here rather than sent: quit, and let main re-exec
+		// the fresh binary (rysh_restart.go).
+		if !hasPending && isRyshRestartCommand(text, inputMode) {
+			m.restartRequested = true
+			m.setActiveInputValue("")
+			return m, tea.Quit
+		}
 		send := text
 		if inputMode == "shell" {
 			// Shell mode strips only trailing whitespace: a LEADING space is
@@ -1604,6 +1782,10 @@ func (m Model) updatePrefixMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch msg.String() {
+	case "f":
+		m.mode = modeNormal
+		m.syncPaneInputFocus()
+		return m, tea.Exec(&faceTimePicker{}, func(err error) tea.Msg { return faceTimeClosed{err} })
 	case "d":
 		// Detach: flush KV state and exit without destroying the session.
 		m.detached = true

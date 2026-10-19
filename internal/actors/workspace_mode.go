@@ -34,6 +34,8 @@ func normalizeModeName(s string) string {
 		return "external"
 	case "email", "mail", "inbox":
 		return "email"
+	case "company":
+		return "company"
 	case "web", "browser":
 		return "web"
 	default:

@@ -4,6 +4,7 @@ package actors
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -74,6 +75,28 @@ func (w *WorkspaceActor) handleNativeAgentCommand(out *strings.Builder, paneID, 
 
 	args, freshSession := nativeAgentStripFreshSession(args)
 
+	// One-shot first prompt (native_agent_prompt.go). Parsed here, with the
+	// other rysh-owned flags, so neither spelling ever reaches the CLI — and
+	// never reaches extraArgs, which is what keeps it out of agent.args and
+	// therefore out of every restore.
+	args, promptReq, perr := nativeAgentStripPromptFlags(args)
+	if perr != nil {
+		fmt.Fprintf(out, "##%s: %v\n", kind, perr)
+		return fmt.Errorf("##%s: %v", kind, perr)
+	}
+	if promptReq.any() && kind == nativeAgentCodex {
+		// Claude only, for now: every fleet agent is claude, and a codex
+		// --fresh-session cannot keep the pane id the resume file is named by.
+		fmt.Fprintf(out, "##%s: %s / %s are claude-only for now\n", kind, nativeAgentResumeDirFlag, nativeAgentPromptFileFlag)
+		return fmt.Errorf("##%s: prompt flags are claude-only", kind)
+	}
+	// --resume-dir IMPLIES --fresh-session. A resume note is a summary written
+	// for an empty context; handed to the agent's existing conversation it
+	// would only duplicate what the agent already knows.
+	if promptReq.ResumeDir != "" {
+		freshSession = true
+	}
+
 	fresh := false
 	if len(args) > 0 && strings.TrimSpace(args[0]) == "new" {
 		fresh = true
@@ -82,11 +105,32 @@ func (w *WorkspaceActor) handleNativeAgentCommand(out *strings.Builder, paneID, 
 	// The two disagree about the id, so there is no sensible merge of them.
 	// Refusing costs one retyped line; guessing costs a conversation filed under
 	// an id the user did not expect.
+	if fresh && promptReq.ResumeDir != "" {
+		fmt.Fprintf(out, "##%s: %s starts over under THIS pane's id (the resume file is named by it); it cannot be combined with `new`\n", kind, nativeAgentResumeDirFlag)
+		return fmt.Errorf("##%s: new and %s are mutually exclusive", kind, nativeAgentResumeDirFlag)
+	}
 	if fresh && freshSession {
 		fmt.Fprintf(out, "##%s: pick one — `new` starts over under a NEW id, `--fresh-session` starts over under this pane's id\n", kind)
 		return fmt.Errorf("##%s: new and --fresh-session are mutually exclusive", kind)
 	}
 	extraArgs := strings.TrimSpace(strings.Join(args, " "))
+
+	// Resolve and check the prompt BEFORE anything changes — before the pane is
+	// even probed. A refusal here must leave the pane exactly as it was, in
+	// particular the old transcript un-archived, so a typo in the folder name
+	// costs a retyped line and nothing else.
+	promptPath := ""
+	var promptData []byte
+	if promptReq.any() {
+		var err error
+		if promptPath, err = nativeAgentPromptPath(promptReq, paneID, w.cfg.RyshDir); err == nil {
+			promptData, err = readNativeAgentPrompt(promptPath)
+		}
+		if err != nil {
+			fmt.Fprintf(out, "##%s: %v\n  nothing was started and nothing was changed\n", kind, err)
+			return fmt.Errorf("##%s: %v", kind, err)
+		}
+	}
 
 	// Refuse rather than type into whatever is already there. A pane running an
 	// agent would receive this as composer text, which is the failure mode that
@@ -104,6 +148,23 @@ func (w *WorkspaceActor) handleNativeAgentCommand(out *strings.Builder, paneID, 
 			return ""
 		}
 		return strings.TrimSpace(snap.Meta[key])
+	}
+
+	// Stage the checked prompt last, just before the archive: every refusal
+	// above has had its chance to leave the pane untouched.
+	staged := ""
+	if promptData != nil {
+		var err error
+		if staged, err = stageNativeAgentPrompt(nativeAgentPromptStageDir(), paneID, promptData); err != nil {
+			fmt.Fprintf(out, "##%s: could not stage the first prompt: %v\n  nothing was started and nothing was changed\n", kind, err)
+			return fmt.Errorf("##%s: %v", kind, err)
+		}
+	}
+	// A staged copy the shell will never read is removed here instead.
+	dropStaged := func() {
+		if staged != "" {
+			_ = os.Remove(staged)
+		}
 	}
 
 	// Resume, not relaunch, when this pane already has a conversation — typing
@@ -139,6 +200,7 @@ func (w *WorkspaceActor) handleNativeAgentCommand(out *strings.Builder, paneID, 
 			var aerr error
 			archived, aerr = archiveClaudeSession(sid)
 			if aerr != nil {
+				dropStaged()
 				fmt.Fprintf(out, "##%s: could not move the old transcript aside: %v\n", kind, aerr)
 				return fmt.Errorf("##%s: %v", kind, aerr)
 			}
@@ -161,13 +223,14 @@ func (w *WorkspaceActor) handleNativeAgentCommand(out *strings.Builder, paneID, 
 		resume = claudeSessionExists(sid)
 	}
 
-	spec := nativeAgentSpec{Kind: kind, SessionID: sid, Args: extraArgs, Resume: resume}
+	spec := nativeAgentSpec{Kind: kind, SessionID: sid, Args: extraArgs, Resume: resume, PromptFile: staged}
 	// No cd at launch: the pane's shell is already where the user put it. See
 	// nativeAgentCommand.
 	command := nativeAgentCommand(spec)
 
-	w.stampNativeAgentMeta(paneID, kind, cwd, extraArgs, sid, fresh || freshSession)
+	w.stampNativeAgentMeta(paneID, kind, cwd, extraArgs, sid, fresh || freshSession, promptPath)
 	if err := w.sendPaneExec(paneID, command); err != nil {
+		dropStaged()
 		fmt.Fprintf(out, "##%s: could not start it in this pane: %v\n", kind, err)
 		return fmt.Errorf("##%s: %v", kind, err)
 	}
@@ -203,6 +266,10 @@ func (w *WorkspaceActor) handleNativeAgentCommand(out *strings.Builder, paneID, 
 	}
 	if cwd != "" {
 		fmt.Fprintf(out, "  directory  : %s%s\n", cwd, nativeAgentCwdNote(cwdSource))
+	}
+	if promptPath != "" {
+		fmt.Fprintf(out, "  first prompt: %s\n", promptPath)
+		fmt.Fprintf(out, "                (one-shot: not stored in agent.args, never replayed on restore)\n")
 	}
 	fmt.Fprintf(out, "  approvals  : %s\n", nativeAgentApprovalNote(kind, extraArgs))
 	return nil
@@ -243,26 +310,39 @@ func nativeAgentCwdNote(source string) string {
 // launch: an agent that dies on startup still leaves a pane that says what it
 // was meant to be, which is the difference between a diagnosable failure and an
 // empty pane.
-func (w *WorkspaceActor) stampNativeAgentMeta(paneID, kind, cwd, extraArgs, sid string, fresh bool) {
-	set := func(key, value string) {
-		_ = w.pub.Send(msg.T("pane", paneID, "inbox"), &msg.MsgPaneSetMeta{Key: key, Value: value})
+func (w *WorkspaceActor) stampNativeAgentMeta(paneID, kind, cwd, extraArgs, sid string, fresh bool, promptFrom string) {
+	for _, kv := range nativeAgentMeta(kind, cwd, extraArgs, sid, fresh, promptFrom) {
+		_ = w.pub.Send(msg.T("pane", paneID, "inbox"), &msg.MsgPaneSetMeta{Key: kv[0], Value: kv[1]})
 	}
-	set(metaAgentNative, "1")
-	set(metaAgentKind, kind)
-	set(metaAgentCwd, cwd)
-	// An empty value DELETES the key (MsgPaneSetMeta's convention), which is
-	// what should happen: a relaunch without flags must not inherit the flags of
-	// the launch before it, or a pane quietly keeps a permission mode the user
-	// stopped asking for.
-	set(metaAgentArgs, extraArgs)
+}
 
+// nativeAgentMeta is the stamp as key/value pairs, in the order they are sent.
+// Split out so the resume contract can be tested end to end: what a launcher
+// stamps is exactly what nativeResumePlan reads back.
+//
+// promptFrom is the file a one-shot first prompt was read from, or "" — and ""
+// is stamped too, so the key always describes the LATEST launch rather than
+// one three launches ago. It is never part of agent.args: see
+// native_agent_prompt.go for why the two must not mix.
+func nativeAgentMeta(kind, cwd, extraArgs, sid string, fresh bool, promptFrom string) [][2]string {
+	out := [][2]string{
+		{metaAgentNative, "1"},
+		{metaAgentKind, kind},
+		{metaAgentCwd, cwd},
+		// An empty value DELETES the key (MsgPaneSetMeta's convention), which is
+		// what should happen: a relaunch without flags must not inherit the flags
+		// of the launch before it, or a pane quietly keeps a permission mode the
+		// user stopped asking for.
+		{metaAgentArgs, extraArgs},
+		{metaAgentPromptFrom, promptFrom},
+	}
 	if kind == nativeAgentCodex {
 		if fresh {
-			set(metaCodexSessionID, "") // the old conversation is no longer this pane's
+			out = append(out, [2]string{metaCodexSessionID, ""}) // the old conversation is no longer this pane's
 		}
-		return
+		return out
 	}
-	set(metaClaudeSessionID, sid)
+	return append(out, [2]string{metaClaudeSessionID, sid})
 }
 
 // nativeAgentForeground reports the pane's live foreground program, or "" for a
@@ -370,6 +450,38 @@ type nativeResumeDelivery struct {
 	Command string
 }
 
+// resumableAgentPane reports whether the restart sweep owns this pane's agent.
+//
+// Two stamps qualify. `agent.native` is the ##claude / ##codex launcher's.
+// A FLEET pane is the other: fleetctl types its own `claude … --settings <f>`
+// line and so never reaches the stamping launcher, but it records the same
+// facts in the same vocabulary — `fleet.agent` for the CLI and `agent.args`
+// for the launch flags INCLUDING --settings. Without this, a daemon restart
+// brought back every ##claude pane and left every fleet agent a bare shell,
+// with the metadata needed to resume it sitting unread on the pane. Requiring
+// agent.args as well keeps the boundary: a pane that merely carries a fleet
+// role (a human's shell, a rysh in-daemon agent) has nothing to relaunch.
+func resumableAgentPane(p ansaPane) bool {
+	if strings.TrimSpace(p.meta(metaAgentNative)) != "" {
+		return true
+	}
+	switch strings.TrimSpace(p.meta("fleet.agent")) {
+	case nativeAgentClaude, nativeAgentCodex:
+		return ansaPaneAgentArgs(p) != ""
+	}
+	return false
+}
+
+// nativeAgentResumeCwd is where the resumed agent must be started: the stamped
+// launch directory, else — for a fleet pane — its worktree, which is where
+// fleetctl `cd`ed before launching and therefore where claude filed the session.
+func nativeAgentResumeCwd(p ansaPane) string {
+	if d := strings.TrimSpace(p.meta(metaAgentCwd)); d != "" {
+		return d
+	}
+	return strings.TrimSpace(p.meta("fleet.worktree"))
+}
+
 // nativeResumePlan decides what a sweep should do, given the panes and a way to
 // probe them. Split out from the sending so the decisions can be tested: which
 // panes are rysh's to resume, which are already running something, and which
@@ -387,7 +499,7 @@ func nativeResumePlan(
 	done map[string]bool,
 ) (deliveries []nativeResumeDelivery, settled []string, pending int) {
 	for _, p := range panes {
-		if strings.TrimSpace(p.meta(metaAgentNative)) == "" {
+		if !resumableAgentPane(p) {
 			// Not ours to resume. A claude the user typed at their own shell
 			// carries no stamp and stays the user's — the whole boundary of
 			// design 029 is this one line.
@@ -412,6 +524,9 @@ func nativeResumePlan(
 		}
 
 		kind := nativeAgentKind(p.meta(metaAgentKind))
+		if p.meta(metaAgentKind) == "" {
+			kind = nativeAgentKind(p.meta("fleet.agent"))
+		}
 		sid := nativeAgentSessionID(kind, p.ID, p.meta)
 		// A codex pane with no session id has NO CONVERSATION TO RESUME: codex
 		// records a session when the talking starts, so an id that never
@@ -441,7 +556,7 @@ func nativeResumePlan(
 				// starts at the session root, and claude stores its sessions
 				// per project directory — a --resume run from the wrong
 				// directory finds nothing.
-				Cwd:    strings.TrimSpace(p.meta(metaAgentCwd)),
+				Cwd:    nativeAgentResumeCwd(p),
 				Resume: resume,
 			}),
 		})

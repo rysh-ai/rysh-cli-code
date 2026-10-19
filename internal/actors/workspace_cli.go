@@ -48,6 +48,12 @@ func (w *WorkspaceActor) handleCLIDeleteTab(ctx actor.Context, m *msg.MsgCLIDele
 		activeID = w.tabs[w.activeTabIdx].id
 	}
 
+	// A closed tab's panes are gone for good: delete their KV rather than let
+	// their Stopping handlers flush it back (F-69). Closing a tab used to
+	// delete no pane KV at all.
+	if info.actor != nil {
+		info.actor.DeleteAllPaneKV()
+	}
 	ctx.Stop(info.pid)
 	w.tabs = append(w.tabs[:idx], w.tabs[idx+1:]...)
 

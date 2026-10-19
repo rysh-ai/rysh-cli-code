@@ -18,8 +18,17 @@ func foregroundPgrp(ptyFile *os.File) int {
 	if ptyFile == nil {
 		return -1
 	}
-	pgrp, err := unix.IoctlGetInt(int(ptyFile.Fd()), unix.TIOCGPGRP)
+	// SyscallConn, never Fd(): Fd() would switch the pollable PTY master back
+	// to blocking mode for good (see pollablePTY). This runs on every chunk
+	// and from the 500ms foreground poller.
+	rc, err := ptyFile.SyscallConn()
 	if err != nil {
+		return -1
+	}
+	pgrp, ioErr := -1, error(nil)
+	if err := rc.Control(func(fd uintptr) {
+		pgrp, ioErr = unix.IoctlGetInt(int(fd), unix.TIOCGPGRP)
+	}); err != nil || ioErr != nil {
 		return -1
 	}
 	return pgrp

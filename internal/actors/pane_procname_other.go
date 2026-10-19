@@ -13,3 +13,7 @@ package actors
 // stays silent instead of naming the wrong program or warning about one it
 // cannot see.
 func processName(int) string { return "" }
+
+// processExecArgs has no implementation on this platform either; see
+// processName.
+func processExecArgs(int) (string, []string) { return "", nil }

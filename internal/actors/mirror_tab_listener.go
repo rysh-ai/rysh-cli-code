@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -19,6 +18,7 @@ import (
 
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
+	"github.com/rysh-ai/rysh-cli-code/internal/upstream"
 	"github.com/rysh-ai/rysh-cli-code/internal/vterm"
 )
 
@@ -484,9 +484,6 @@ func (r *MirrorTabListenerActor) connectRemote() {
 
 	proxyPath := "/workspaces/" + workspace + "/nats"
 	proxyPath += "?connection_type=share"
-	if r.config.APIKey != "" {
-		proxyPath += "&api_key=" + url.QueryEscape(r.config.APIKey)
-	}
 
 	maxReconnects := r.config.MaxReconnectAttempts
 	if maxReconnects == 0 {
@@ -501,6 +498,7 @@ func (r *MirrorTabListenerActor) connectRemote() {
 	opts := []nats.Option{
 		nats.Name(fmt.Sprintf("rysh-mirror-tab-%s", sharePrefix)),
 		nats.ProxyPath(proxyPath),
+		upstream.NATSAPIKeyHeader(r.config.APIKey), // the key rides in a header, not the URL (F-86)
 		nats.MaxReconnects(maxReconnects),
 		nats.Token(r.config.APIKey),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {

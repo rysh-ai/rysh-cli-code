@@ -4,15 +4,19 @@ package actors
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/asynkron/protoactor-go/actor"
 	"github.com/google/uuid"
+	"github.com/nats-io/nats.go"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/cron"
+	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 )
 
 // ---------------------------------------------------------------------------
@@ -36,13 +40,33 @@ type cronTickMsg struct{}
 // cronScheduler owns the session's cron jobs and their persistence.
 type cronScheduler struct {
 	jobs []*cron.Job
+	// loaded is true once the persisted job list has been read successfully,
+	// or confirmed absent. Until then the in-memory list is NOT the source of
+	// truth: a guest daemon whose broker is still recovering gets a transient
+	// Get error at boot, and persisting the resulting empty list would erase
+	// every saved job. cronPersist refuses to write while loaded is false, and
+	// the minute tick retries the load.
+	loaded bool
 }
 
 // startCron restores persisted jobs, recomputes their next-run times (no
 // backfill), and launches the minute-aligned ticker goroutine.
 func (w *WorkspaceActor) startCron() {
 	w.cron = &cronScheduler{}
-	w.cronLoadJobs()
+	if err := w.cronLoadJobs(); err != nil {
+		slog.Warn("cron: persisted jobs unavailable at start — retrying every minute; stored jobs will not be overwritten", "err", err)
+	} else {
+		w.cronRestore()
+	}
+	w.startCronTicker()
+	if n := len(w.cron.jobs); n > 0 {
+		slog.Info("cron: started", "jobs", n)
+	}
+}
+
+// cronRestore runs once the persisted list has been loaded: sync recipe
+// schedules, recompute next-run times (no backfill), and write the result back.
+func (w *WorkspaceActor) cronRestore() {
 	// Recipe-schedule sync: recipes carrying a `schedule:` key get their
 	// auto-<kind>-<name> cron job upserted; jobs whose recipe was deleted are
 	// removed. Recipes without the key are untouched (purely on-demand).
@@ -57,7 +81,10 @@ func (w *WorkspaceActor) startCron() {
 		}
 	}
 	w.cronPersist()
+}
 
+// startCronTicker launches the minute-aligned ticker goroutine.
+func (w *WorkspaceActor) startCronTicker() {
 	w.cronTickStop = make(chan struct{})
 	self := w.selfPID
 	system := w.actorSystem
@@ -80,9 +107,6 @@ func (w *WorkspaceActor) startCron() {
 			}
 		}
 	}()
-	if n := len(w.cron.jobs); n > 0 {
-		slog.Info("cron: started", "jobs", n)
-	}
 }
 
 // stopCron halts the ticker goroutine (idempotent).
@@ -106,6 +130,14 @@ func (w *WorkspaceActor) handleCronTick(ctx actor.Context) {
 
 	if w.cron == nil {
 		return
+	}
+	if !w.cron.loaded {
+		if err := w.cronLoadJobs(); err != nil {
+			slog.Warn("cron: persisted jobs still unavailable — not firing, not overwriting", "err", err)
+			return
+		}
+		slog.Info("cron: persisted jobs loaded after retry", "jobs", len(w.cron.jobs))
+		w.cronRestore()
 	}
 	now := time.Now()
 	changed := false
@@ -165,22 +197,57 @@ func (w *WorkspaceActor) cronResolveTarget(target string) string {
 // Persistence
 // ---------------------------------------------------------------------------
 
-func (w *WorkspaceActor) cronLoadJobs() {
+// cronLoadJobs reads the persisted job list into w.cron and marks it loaded.
+// A missing key means "no jobs yet" and counts as loaded. Any other read or
+// decode error leaves loaded=false and the stored value untouched — the caller
+// must not persist until a later load succeeds.
+func (w *WorkspaceActor) cronLoadJobs() error {
 	if w.wKV == nil {
-		return
+		w.cron.loaded = true // no store: nothing to protect
+		return nil
 	}
 	entry, err := w.wKV.Get(cronKVKey)
+	if errors.Is(err, nats.ErrKeyNotFound) {
+		w.cron.jobs = nil
+		w.cron.loaded = true
+		return nil
+	}
 	if err != nil {
-		return // no jobs yet
+		return fmt.Errorf("read %s: %w", cronKVKey, err)
 	}
 	var jobs []*cron.Job
-	if json.Unmarshal(entry.Value(), &jobs) == nil {
-		w.cron.jobs = jobs
+	if err := json.Unmarshal(entry.Value(), &jobs); err != nil {
+		return fmt.Errorf("decode %s: %w", cronKVKey, err)
 	}
+	w.cron.jobs = jobs
+	w.cron.loaded = true
+	return nil
+}
+
+// cronReady reports whether cron state may be changed: it retries a pending
+// load and, if the stored list is still unreadable, explains why nothing was
+// changed. Every path that mutates jobs calls it first.
+func (w *WorkspaceActor) cronReady(out *strings.Builder) bool {
+	if w.cron.loaded {
+		return true
+	}
+	if err := w.cronLoadJobs(); err != nil {
+		fmt.Fprintf(out, "\n[cron] the saved job list could not be read (%v) — nothing changed; retrying every minute\n", err)
+		w.failRysh("saved cron jobs unreadable: %v", err)
+		return false
+	}
+	if w.wKV != nil { // a store-less scheduler has nothing to restore
+		w.cronRestore()
+	}
+	return true
 }
 
 func (w *WorkspaceActor) cronPersist() {
 	if w.wKV == nil || w.cron == nil {
+		return
+	}
+	if !w.cron.loaded {
+		slog.Warn("cron: refusing to persist — the stored job list has not been loaded")
 		return
 	}
 	if data, err := json.Marshal(w.cron.jobs); err == nil {
@@ -222,6 +289,10 @@ func (w *WorkspaceActor) handleCronCommand(ctx actor.Context, out *strings.Build
 		sub = fields[0]
 	}
 
+	if !w.cronReady(out) {
+		return
+	}
+
 	switch sub {
 	case "", "list":
 		w.cronList(out)
@@ -241,6 +312,13 @@ func (w *WorkspaceActor) handleCronCommand(ctx actor.Context, out *strings.Build
 			return
 		}
 		w.cronRemove(out, fields[1])
+	case "edit":
+		if len(fields) < 2 {
+			ryshWriter(out).UsageLineIn("cron", "##cron edit <name>")
+			w.failRyshUsage("usage: %s", "##cron edit <name>")
+			return
+		}
+		w.cronEdit(ctx, out, paneID, fields[1])
 	case "enable", "disable":
 		if len(fields) < 2 {
 			ryshWriter(out).UsageLineIn("cron", fmt.Sprintf("##cron %s <name>", sub))
@@ -284,6 +362,7 @@ func (w *WorkspaceActor) cronUsage(out *strings.Builder) {
 		"##cron add <name> \"<schedule>\" [--pane <id|name|active>] [--mode M] <input...>",
 		"##cron list | show <name> | next",
 		"##cron enable <name> | disable <name> | rm <name>",
+		"##cron edit <name>           open $EDITOR on the job's input; saving applies it",
 		"##cron run <name>            fire now (test without waiting)",
 		"##cron logs <name> [N]       last N run records (default 10)",
 		"schedule: 5-field cron (\"0 9 * * *\"), or @every 15m / @daily / @hourly",
@@ -411,6 +490,83 @@ func (w *WorkspaceActor) cronShow(out *strings.Builder, name string) {
 	fmt.Fprintf(out, "  last run : %s (%s)\n", fmtCronTime(j.LastRun), orDash(j.LastStatus))
 	fmt.Fprintf(out, "  runs     : %d\n", j.RunCount)
 	fmt.Fprintf(out, "%s\n", strings.Repeat("-", 50))
+}
+
+// cronEdit opens $EDITOR (default vim) on job <name>'s Input in the calling
+// pane's shell, chained with `&&` so the edit applies the moment the editor
+// exits successfully. Only Input is editable this way — schedule/target/mode
+// go through rm+add, same field split as cronShow.
+//
+// The daemon has no TTY of its own: everything a job does reaches the outside
+// world through routeInput into a PANE's PTY (fireCronJob above), never a
+// local terminal in this process. So "open vim" can only mean typing an
+// editor invocation into the pane that asked for the edit — the same
+// mechanism a firing shell-mode job already uses.
+func (w *WorkspaceActor) cronEdit(ctx actor.Context, out *strings.Builder, paneID, name string) {
+	j := w.findCronJob(name)
+	if j == nil {
+		fmt.Fprintf(out, "\n[cron] no job named %q\n", name)
+		return
+	}
+	f, err := os.CreateTemp("", fmt.Sprintf("rysh-cron-%s-*.txt", name))
+	if err != nil {
+		fmt.Fprintf(out, "\n[cron] could not create a temp file: %v\n", err)
+		w.failRysh("could not create a temp file: %v", err)
+		return
+	}
+	path := f.Name()
+	if _, err := f.WriteString(j.Input + "\n"); err != nil {
+		f.Close()
+		os.Remove(path)
+		fmt.Fprintf(out, "\n[cron] could not write the temp file: %v\n", err)
+		w.failRysh("could not write the temp file: %v", err)
+		return
+	}
+	f.Close()
+
+	tab := w.resolveOriginTab(paneID)
+	// `rysh cron apply` (cmd/rysh/cron_cmd.go) reads the saved file and sends
+	// it to this daemon over the same connect()/cliRequest() channel `rysh
+	// exec` uses. A non-zero editor exit (:cq, ^C) short-circuits the "&&", so
+	// a discarded edit never applies; the temp file is removed either way.
+	shellCmd := fmt.Sprintf("${EDITOR:-vim} %s && rysh cron apply %s %s; rm -f %s",
+		shellQuote(path), shellQuote(name), shellQuote(path), shellQuote(path))
+	w.routeInput(ctx, paneID, tab, "shell", shellCmd)
+
+	fmt.Fprintf(out, "\n[cron] editing %q — opening $EDITOR on its input; save & quit to apply\n", name)
+}
+
+// handleCLICronApply is the daemon side of `rysh cron apply <name> <file>`,
+// chained onto `##cron edit <name>`'s $EDITOR invocation. It revalidates the
+// same way ##cron add does (a job still cannot make itself run ##cron) and
+// takes no ctx: this only mutates w.cron.jobs and persists, with nothing
+// pane-facing to focus or echo — the same shape as handleCLIBoardPost.
+func (w *WorkspaceActor) handleCLICronApply(m *msg.MsgCLICronApply) *msg.MsgCLIResponse {
+	if m == nil {
+		return &msg.MsgCLIResponse{OK: false, Error: "empty cron apply"}
+	}
+	name := strings.TrimSpace(m.JobName)
+	if name == "" {
+		return &msg.MsgCLIResponse{OK: false, Error: "job name is required"}
+	}
+	if w.cron == nil {
+		return &msg.MsgCLIResponse{OK: false, Error: "cron service is not available in this workspace"}
+	}
+	var guard strings.Builder
+	if !w.cronReady(&guard) {
+		return &msg.MsgCLIResponse{OK: false, Error: strings.TrimSpace(guard.String())}
+	}
+	j := w.findCronJob(name)
+	if j == nil {
+		return &msg.MsgCLIResponse{OK: false, Error: fmt.Sprintf("no job named %q", name)}
+	}
+	input := strings.TrimRight(m.Input, "\r\n")
+	if err := cron.Validate(j.Name, j.Schedule, j.Timezone, input); err != nil {
+		return &msg.MsgCLIResponse{OK: false, Error: err.Error()}
+	}
+	j.Input = input
+	w.cronPersist()
+	return &msg.MsgCLIResponse{OK: true, Output: fmt.Sprintf("[cron] applied edit to %q\n", name)}
 }
 
 func (w *WorkspaceActor) cronRemove(out *strings.Builder, name string) {

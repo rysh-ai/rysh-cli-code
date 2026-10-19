@@ -56,3 +56,56 @@ func (s *Server) pushApprovalError(paneID, requestID, errMsg string) {
 	}
 	s.hub.sendAll(data)
 }
+
+// maxRememberedApprovalTypes bounds approvalTypes. An entry is removed when the
+// web door answers it, but a request answered elsewhere (the TUI, a timeout)
+// never comes back here, so past this size the OLDEST entries are evicted. The
+// map used to be cleared wholesale instead, which wiped a question asked a
+// moment earlier along with the stale gates (F-92). A question now loses its
+// type only if this many newer requests arrive while it is still pending; then
+// its answer is echoed with the gate labels (what ask_user hands the model is
+// unaffected).
+const maxRememberedApprovalTypes = 1024
+
+// rememberApprovalType records the type of a request being forwarded to
+// clients (F-92).
+func (s *Server) rememberApprovalType(requestID string, t msg.ApprovalType) {
+	if requestID == "" {
+		return
+	}
+	s.approvalTypesMu.Lock()
+	defer s.approvalTypesMu.Unlock()
+	if s.approvalTypes == nil {
+		s.approvalTypes = make(map[string]msg.ApprovalType)
+	}
+	if _, seen := s.approvalTypes[requestID]; !seen {
+		s.approvalOrder = append(s.approvalOrder, requestID)
+	}
+	s.approvalTypes[requestID] = t
+	// Evict oldest first. IDs already taken are still queued; skip them.
+	for len(s.approvalTypes) > maxRememberedApprovalTypes {
+		oldest := s.approvalOrder[0]
+		s.approvalOrder = s.approvalOrder[1:]
+		delete(s.approvalTypes, oldest)
+	}
+	// Taken IDs linger in the queue; compact it before it outgrows the map.
+	if len(s.approvalOrder) > 2*maxRememberedApprovalTypes {
+		live := make([]string, 0, len(s.approvalTypes))
+		for _, id := range s.approvalOrder {
+			if _, ok := s.approvalTypes[id]; ok {
+				live = append(live, id)
+			}
+		}
+		s.approvalOrder = live
+	}
+}
+
+// takeApprovalType returns and forgets the type recorded for requestID, or ""
+// when the request was never forwarded by this server.
+func (s *Server) takeApprovalType(requestID string) msg.ApprovalType {
+	s.approvalTypesMu.Lock()
+	defer s.approvalTypesMu.Unlock()
+	t := s.approvalTypes[requestID]
+	delete(s.approvalTypes, requestID)
+	return t
+}

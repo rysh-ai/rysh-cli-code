@@ -59,3 +59,17 @@ func TestLaneCommand_RenameWithNoLane(t *testing.T) {
 		t.Errorf("multi-word name should reach the rename, got:\n%s", out)
 	}
 }
+
+func TestLaneCommand_CollapseWithNoTab(t *testing.T) {
+	for _, verb := range []string{"collapse", "expand", "toggle"} {
+		if out := laneCmd(t, &WorkspaceActor{}, verb, "2"); !strings.Contains(out, "no active tab") {
+			t.Errorf("##lane %s with no tab: got\n%s", verb, out)
+		}
+	}
+	out := laneCmd(t, &WorkspaceActor{}, "wibble")
+	for _, want := range []string{"##lane collapse", "##lane expand", "##lane toggle"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("help missing %q:\n%s", want, out)
+		}
+	}
+}

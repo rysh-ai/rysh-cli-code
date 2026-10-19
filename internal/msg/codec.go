@@ -129,11 +129,12 @@ const (
 	TagLLMPickerOpen = "MsgLLMPickerOpen"
 
 	// Per-pane mode enable/disable (Workspace → Pane, direct)
-	TagPaneEnableMode    = "MsgPaneEnableMode"
-	TagPaneDisableMode   = "MsgPaneDisableMode"
-	TagPaneActivateMode  = "MsgPaneActivateMode"
-	TagPaneWebHeadless   = "MsgPaneWebHeadless"
-	TagPaneImportCookies = "MsgPaneImportCookies"
+	TagPaneEnableMode      = "MsgPaneEnableMode"
+	TagPaneDisableMode     = "MsgPaneDisableMode"
+	TagPaneReleaseHumanoid = "MsgPaneReleaseHumanoid"
+	TagPaneActivateMode    = "MsgPaneActivateMode"
+	TagPaneWebHeadless     = "MsgPaneWebHeadless"
+	TagPaneImportCookies   = "MsgPaneImportCookies"
 
 	// PaneGroupActor → PaneActor
 	TagPaneSubmitInput = "MsgPaneSubmitInput"
@@ -171,11 +172,15 @@ const (
 	// Supervision notifications
 	TagPaneTerminated     = "MsgPaneTerminated"
 	TagPaneKillForeground = "MsgPaneKillForeground"
-	TagTabTerminated  = "MsgTabTerminated"
+	TagTabTerminated      = "MsgTabTerminated"
 
 	// TabActor active-pane query
 	TagGetActivePane   = "MsgGetActivePane"
 	TagActivePaneReply = "MsgActivePaneReply"
+
+	// TabActor lane collapse (request/reply)
+	TagSetLaneCollapsed      = "MsgSetLaneCollapsed"
+	TagSetLaneCollapsedReply = "MsgSetLaneCollapsedReply"
 
 	// Pane listener (cross-pane output listening)
 	TagStartPaneListener = "MsgStartPaneListener"
@@ -199,6 +204,7 @@ const (
 	TagEqualizePanes      = "MsgEqualizePanes"
 	TagResizePaneWidth    = "MsgResizePaneWidth"
 	TagSwapPane           = "MsgSwapPane"
+	TagLaneCollapse       = "MsgLaneCollapse"
 
 	// Layout management: Workspace → Tab
 	TagTabEqualizeHorizontal = "MsgTabEqualizeHorizontal"
@@ -225,6 +231,7 @@ const (
 	TagCLIPipelineDisable           = "MsgCLIPipelineDisable"
 	TagCLIResponse                  = "MsgCLIResponse"
 	TagCLIRyshCommand               = "MsgCLIRyshCommand"
+	TagCLICronApply                 = "MsgCLICronApply"
 	TagTabDeleteLane                = "MsgTabDeleteLane"
 	TagTabCreatePaneGroupInLane     = "MsgTabCreatePaneGroupInLane"
 	TagTabCreateGrid                = "MsgTabCreateGrid"
@@ -329,6 +336,20 @@ const (
 	TagHumanoidSetFocus          = "MsgHumanoidSetFocus"
 	TagHumanoidEmailCompose      = "MsgHumanoidEmailCompose"
 	TagHumanoidEmailComposeReply = "MsgHumanoidEmailComposeReply"
+	TagHumanoidEmailSetSeen      = "MsgHumanoidEmailSetSeen"
+	TagHumanoidEmailFolders      = "MsgHumanoidEmailFolders"
+	TagHumanoidEmailFoldersReply = "MsgHumanoidEmailFoldersReply"
+
+	TagHumanoidEmailSaveAttachment      = "MsgHumanoidEmailSaveAttachment"
+	TagHumanoidEmailSaveAttachmentReply = "MsgHumanoidEmailSaveAttachmentReply"
+	TagHumanoidEmailMove                = "MsgHumanoidEmailMove"
+	TagHumanoidEmailMoveReply           = "MsgHumanoidEmailMoveReply"
+
+	// Company connect (design 037): the company follower's snapshot push,
+	// the attach-time query, and the refresh request.
+	TagCompanySnapshot = "MsgCompanySnapshot"
+	TagCompanyQuery    = "MsgCompanyQuery"
+	TagCompanyRefresh  = "MsgCompanyRefresh"
 
 	TagHumanoidWhatsAppList      = "MsgHumanoidWhatsAppList"
 	TagHumanoidWhatsAppRead      = "MsgHumanoidWhatsAppRead"
@@ -372,7 +393,10 @@ const (
 	TagBoardPost                   = "MsgBoardPost"
 	TagBoardRegister               = "MsgBoardRegister"
 	TagCLIBoardPost                = "MsgCLIBoardPost"
+	TagCLIBoardResolve             = "MsgCLIBoardResolve"
+	TagCLIPeerCommand              = "MsgCLIPeerCommand"
 	TagBoardAgentPrompt            = "MsgBoardAgentPrompt"
+	TagClipboardWrite              = "MsgClipboardWrite"
 	TagAnsaRoute                   = "MsgAnsaRoute"
 	TagAnsaRouteResult             = "MsgAnsaRouteResult"
 	TagCLIAnsaSend                 = "MsgCLIAnsaSend"
@@ -491,6 +515,7 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagPaneWebHeadless, "*msg.MsgPaneWebHeadless", jsonDecoder[MsgPaneWebHeadless]())
 	r.Register(TagPaneImportCookies, "*msg.MsgPaneImportCookies", jsonDecoder[MsgPaneImportCookies]())
 	r.Register(TagPaneDisableMode, "*msg.MsgPaneDisableMode", jsonDecoder[MsgPaneDisableMode]())
+	r.Register(TagPaneReleaseHumanoid, "*msg.MsgPaneReleaseHumanoid", jsonDecoder[MsgPaneReleaseHumanoid]())
 	r.Register(TagPaneStop, "*msg.MsgPaneStop", jsonDecoder[MsgPaneStop]())
 	r.Register(TagPaneResize, "*msg.MsgPaneResize", jsonDecoder[MsgPaneResize]())
 	r.Register(TagPaneReleaseSize, "*msg.MsgPaneReleaseSize", jsonDecoder[MsgPaneReleaseSize]())
@@ -507,8 +532,15 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagPaneRawDirty, "*msg.MsgPaneRawDirty", jsonDecoder[MsgPaneRawDirty]())
 	r.Register(TagBoardPost, "*msg.MsgBoardPost", jsonDecoder[MsgBoardPost]())
 	r.Register(TagBoardRegister, "*msg.MsgBoardRegister", jsonDecoder[MsgBoardRegister]())
+	r.Register("MsgMeetingCommand", "*msg.MsgMeetingCommand", jsonDecoder[MsgMeetingCommand]())
+	r.Register("MsgMeetingReply", "*msg.MsgMeetingReply", jsonDecoder[MsgMeetingReply]())
+	r.Register("MsgMeetingToken", "*msg.MsgMeetingToken", jsonDecoder[MsgMeetingToken]())
+	r.Register("MsgMeetingTokenReply", "*msg.MsgMeetingTokenReply", jsonDecoder[MsgMeetingTokenReply]())
+	r.Register(TagCLIPeerCommand, "*msg.MsgCLIPeerCommand", jsonDecoder[MsgCLIPeerCommand]())
 	r.Register(TagCLIBoardPost, "*msg.MsgCLIBoardPost", jsonDecoder[MsgCLIBoardPost]())
+	r.Register(TagCLIBoardResolve, "*msg.MsgCLIBoardResolve", jsonDecoder[MsgCLIBoardResolve]())
 	r.Register(TagBoardAgentPrompt, "*msg.MsgBoardAgentPrompt", jsonDecoder[MsgBoardAgentPrompt]())
+	r.Register(TagClipboardWrite, "*msg.MsgClipboardWrite", jsonDecoder[MsgClipboardWrite]())
 	r.Register(TagAnsaRoute, "*msg.MsgAnsaRoute", jsonDecoder[MsgAnsaRoute]())
 	r.Register(TagAnsaRouteResult, "*msg.MsgAnsaRouteResult", jsonDecoder[MsgAnsaRouteResult]())
 	r.Register(TagCLIAnsaSend, "*msg.MsgCLIAnsaSend", jsonDecoder[MsgCLIAnsaSend]())
@@ -543,6 +575,8 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagTabTerminated, "*msg.MsgTabTerminated", jsonDecoder[MsgTabTerminated]())
 	r.Register(TagGetActivePane, "*msg.MsgGetActivePane", jsonDecoder[MsgGetActivePane]())
 	r.Register(TagActivePaneReply, "*msg.MsgActivePaneReply", jsonDecoder[MsgActivePaneReply]())
+	r.Register(TagSetLaneCollapsed, "*msg.MsgSetLaneCollapsed", jsonDecoder[MsgSetLaneCollapsed]())
+	r.Register(TagSetLaneCollapsedReply, "*msg.MsgSetLaneCollapsedReply", jsonDecoder[MsgSetLaneCollapsedReply]())
 	r.Register(TagStartPaneListener, "*msg.MsgStartPaneListener", jsonDecoder[MsgStartPaneListener]())
 	r.Register(TagStopPaneListener, "*msg.MsgStopPaneListener", jsonDecoder[MsgStopPaneListener]())
 	r.Register(TagPaneHopContent, "*msg.MsgPaneHopContent", jsonDecoder[MsgPaneHopContent]())
@@ -558,6 +592,7 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagEqualizeVertical, "*msg.MsgEqualizeVertical", jsonDecoder[MsgEqualizeVertical]())
 	r.Register(TagEqualizeAll, "*msg.MsgEqualizeAll", jsonDecoder[MsgEqualizeAll]())
 	r.Register(TagSwapPane, "*msg.MsgSwapPane", jsonDecoder[MsgSwapPane]())
+	r.Register(TagLaneCollapse, "*msg.MsgLaneCollapse", jsonDecoder[MsgLaneCollapse]())
 	r.Register(TagTabEqualizeHorizontal, "*msg.MsgTabEqualizeHorizontal", jsonDecoder[MsgTabEqualizeHorizontal]())
 	r.Register(TagTabEqualizePanes, "*msg.MsgTabEqualizePanes", jsonDecoder[MsgTabEqualizePanes]())
 	r.Register(TagTabResizePaneWidth, "*msg.MsgTabResizePaneWidth", jsonDecoder[MsgTabResizePaneWidth]())
@@ -578,6 +613,7 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagCLIPipelineDisable, "*msg.MsgCLIPipelineDisable", jsonDecoder[MsgCLIPipelineDisable]())
 	r.Register(TagCLIResponse, "*msg.MsgCLIResponse", jsonDecoder[MsgCLIResponse]())
 	r.Register(TagCLIRyshCommand, "*msg.MsgCLIRyshCommand", jsonDecoder[MsgCLIRyshCommand]())
+	r.Register(TagCLICronApply, "*msg.MsgCLICronApply", jsonDecoder[MsgCLICronApply]())
 	r.Register(TagTabDeleteLane, "*msg.MsgTabDeleteLane", jsonDecoder[MsgTabDeleteLane]())
 	r.Register(TagTabCreatePaneGroupInLane, "*msg.MsgTabCreatePaneGroupInLane", jsonDecoder[MsgTabCreatePaneGroupInLane]())
 	r.Register(TagTabCreateGrid, "*msg.MsgTabCreateGrid", jsonDecoder[MsgTabCreateGrid]())
@@ -689,6 +725,16 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagHumanoidSetFocus, "*msg.MsgHumanoidSetFocus", jsonDecoder[MsgHumanoidSetFocus]())
 	r.Register(TagHumanoidEmailCompose, "*msg.MsgHumanoidEmailCompose", jsonDecoder[MsgHumanoidEmailCompose]())
 	r.Register(TagHumanoidEmailComposeReply, "*msg.MsgHumanoidEmailComposeReply", jsonDecoder[MsgHumanoidEmailComposeReply]())
+	r.Register(TagHumanoidEmailSetSeen, "*msg.MsgHumanoidEmailSetSeen", jsonDecoder[MsgHumanoidEmailSetSeen]())
+	r.Register(TagHumanoidEmailFolders, "*msg.MsgHumanoidEmailFolders", jsonDecoder[MsgHumanoidEmailFolders]())
+	r.Register(TagHumanoidEmailFoldersReply, "*msg.MsgHumanoidEmailFoldersReply", jsonDecoder[MsgHumanoidEmailFoldersReply]())
+	r.Register(TagHumanoidEmailSaveAttachment, "*msg.MsgHumanoidEmailSaveAttachment", jsonDecoder[MsgHumanoidEmailSaveAttachment]())
+	r.Register(TagHumanoidEmailSaveAttachmentReply, "*msg.MsgHumanoidEmailSaveAttachmentReply", jsonDecoder[MsgHumanoidEmailSaveAttachmentReply]())
+	r.Register(TagHumanoidEmailMove, "*msg.MsgHumanoidEmailMove", jsonDecoder[MsgHumanoidEmailMove]())
+	r.Register(TagHumanoidEmailMoveReply, "*msg.MsgHumanoidEmailMoveReply", jsonDecoder[MsgHumanoidEmailMoveReply]())
+	r.Register(TagCompanySnapshot, "*msg.MsgCompanySnapshot", jsonDecoder[MsgCompanySnapshot]())
+	r.Register(TagCompanyQuery, "*msg.MsgCompanyQuery", jsonDecoder[MsgCompanyQuery]())
+	r.Register(TagCompanyRefresh, "*msg.MsgCompanyRefresh", jsonDecoder[MsgCompanyRefresh]())
 	r.Register(TagHumanoidWhatsAppList, "*msg.MsgHumanoidWhatsAppList", jsonDecoder[MsgHumanoidWhatsAppList]())
 	r.Register(TagHumanoidWhatsAppRead, "*msg.MsgHumanoidWhatsAppRead", jsonDecoder[MsgHumanoidWhatsAppRead]())
 	r.Register(TagHumanoidWhatsAppListReply, "*msg.MsgHumanoidWhatsAppListReply", jsonDecoder[MsgHumanoidWhatsAppListReply]())

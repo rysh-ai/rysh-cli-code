@@ -10,7 +10,7 @@ import (
 
 	sharedtools "github.com/rysh-ai/rysh-cli-shared/tools"
 
-	"github.com/rysh-ai/rysh-cli-code/internal/forge/runtime"
+	"github.com/rysh-ai/rysh-cli-shared/forge/runtime"
 )
 
 // RunOp executes a forge-registered operation by name on the owner side of a

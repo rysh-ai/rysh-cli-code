@@ -77,13 +77,39 @@ func (t *EditTool) RequiresApproval(_ json.RawMessage) bool { return true }
 
 // Execute applies all edits in memory (rolling back on any failure) and writes
 // the result, returning a unified diff of the combined change.
+// Preview computes the edit and its unified diff without writing — the
+// approval gate shows this, and Execute runs only after the user approves.
+func (t *EditTool) Preview(ctx context.Context, params json.RawMessage) (*ToolOutput, error) {
+	out, _, err := t.compute(params)
+	return out, err
+}
+
+// Execute applies the edit to disk and returns the unified diff.
 func (t *EditTool) Execute(ctx context.Context, params json.RawMessage) (*ToolOutput, error) {
+	out, content, err := t.compute(params)
+	if err != nil || out.Error != "" {
+		return out, err
+	}
+	filePath := out.Metadata["file_path"]
+	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+		return &ToolOutput{
+			Error:     fmt.Sprintf("failed to write file: %v", err),
+			ErrorKind: ErrKindInternal,
+			Metadata:  map[string]string{"file_path": filePath},
+		}, nil
+	}
+	return out, nil
+}
+
+// compute validates the params, applies every edit in memory and returns the
+// diff output plus the new file content. It never writes.
+func (t *EditTool) compute(params json.RawMessage) (*ToolOutput, string, error) {
 	var p EditParams
 	if err := json.Unmarshal(params, &p); err != nil {
-		return nil, fmt.Errorf("invalid edit params: %w", err)
+		return nil, "", fmt.Errorf("invalid edit params: %w", err)
 	}
 	if p.FilePath == "" {
-		return ErrOutput(ErrKindValidation, "file_path is required"), nil
+		return ErrOutput(ErrKindValidation, "file_path is required"), "", nil
 	}
 
 	// Normalize to a single edits slice. The single-edit form is prepended as
@@ -93,7 +119,7 @@ func (t *EditTool) Execute(ctx context.Context, params json.RawMessage) (*ToolOu
 		edits = append([]EditPair{{OldString: p.OldString, NewString: p.NewString}}, edits...)
 	}
 	if len(edits) == 0 {
-		return ErrOutput(ErrKindValidation, "provide old_string/new_string or a non-empty edits array"), nil
+		return ErrOutput(ErrKindValidation, "provide old_string/new_string or a non-empty edits array"), "", nil
 	}
 
 	filePath := p.FilePath
@@ -111,7 +137,7 @@ func (t *EditTool) Execute(ctx context.Context, params json.RawMessage) (*ToolOu
 			Error:     fmt.Sprintf("failed to read file: %v", err),
 			ErrorKind: kind,
 			Metadata:  map[string]string{"file_path": filePath},
-		}, nil
+		}, "", nil
 	}
 
 	original := string(data)
@@ -125,7 +151,7 @@ func (t *EditTool) Execute(ctx context.Context, params json.RawMessage) (*ToolOu
 				Error:     fmt.Sprintf("edit[%d]: old_string is empty", i),
 				ErrorKind: ErrKindValidation,
 				Metadata:  map[string]string{"file_path": filePath},
-			}, nil
+			}, "", nil
 		}
 		count := strings.Count(content, e.OldString)
 		if count == 0 {
@@ -133,32 +159,24 @@ func (t *EditTool) Execute(ctx context.Context, params json.RawMessage) (*ToolOu
 				Error:     fmt.Sprintf("edit[%d]: old_string not found in %s (no changes written)", i, filePath),
 				ErrorKind: ErrKindValidation,
 				Metadata:  map[string]string{"file_path": filePath, "failed_index": fmt.Sprintf("%d", i)},
-			}, nil
+			}, "", nil
 		}
 		if count > 1 {
 			return &ToolOutput{
 				Error:     fmt.Sprintf("edit[%d]: old_string appears %d times in %s; add context to make it unique (no changes written)", i, count, filePath),
 				ErrorKind: ErrKindValidation,
 				Metadata:  map[string]string{"file_path": filePath, "failed_index": fmt.Sprintf("%d", i)},
-			}, nil
+			}, "", nil
 		}
 		content = strings.Replace(content, e.OldString, e.NewString, 1)
 	}
 
 	diff := generateUnifiedDiff(original, content, filePath)
 
-	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
-		return &ToolOutput{
-			Error:     fmt.Sprintf("failed to write file: %v", err),
-			ErrorKind: ErrKindInternal,
-			Metadata:  map[string]string{"file_path": filePath},
-		}, nil
-	}
-
 	return &ToolOutput{
 		Content:  diff,
 		Metadata: map[string]string{"file_path": filePath, "edits_count": fmt.Sprintf("%d", len(edits))},
-	}, nil
+	}, content, nil
 }
 
 // generateUnifiedDiff produces a unified diff with 3 lines of context. Moved

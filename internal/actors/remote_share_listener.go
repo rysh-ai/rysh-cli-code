@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +18,7 @@ import (
 
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
+	"github.com/rysh-ai/rysh-cli-code/internal/upstream"
 	"github.com/rysh-ai/rysh-cli-code/internal/vterm"
 )
 
@@ -361,9 +361,6 @@ func (r *RemoteShareListenerActor) connectRemote() {
 	// since share connections are lightweight and should not count as sessions.
 	proxyPath := "/workspaces/" + workspace + "/nats"
 	proxyPath += "?connection_type=share"
-	if r.config.APIKey != "" {
-		proxyPath += "&api_key=" + url.QueryEscape(r.config.APIKey)
-	}
 
 	panePrefix := r.ownerPaneID
 	if len(panePrefix) > 8 {
@@ -379,6 +376,7 @@ func (r *RemoteShareListenerActor) connectRemote() {
 	opts := []nats.Option{
 		nats.Name(fmt.Sprintf("rysh-share-listener-%s", panePrefix)),
 		nats.ProxyPath(proxyPath),
+		upstream.NATSAPIKeyHeader(r.config.APIKey), // the key rides in a header, not the URL (F-86)
 		nats.MaxReconnects(maxReconnects),
 		nats.Token(r.config.APIKey),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {

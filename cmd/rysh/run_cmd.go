@@ -43,8 +43,11 @@ package main
 // directory reaches the daemon child through RYSH_RECORD_DIR/RYSH_REPLAY_DIR
 // (same road as the --provider override).
 //
+// `rysh eval --live --update-baseline` drives this same --record road to
+// refresh a case's golden transcript (eval_cli.go).
+//
 // Future (design 009, deliberately not built here): the GitHub Action/App
-// (§3.3) and `rysh eval --update-baseline`.
+// (§3.3), which stays behind gate U-13.
 
 import (
 	"encoding/json"
@@ -838,11 +841,51 @@ func runHeadlessPrompt(rec session.Record, opts runOptions, collector *runCollec
 	timer := time.NewTimer(time.Until(deadline))
 	defer timer.Stop()
 	outcome := decideRunOutcome(events, timer.C)
-	// Final text/steps/usage can trail the terminal status by one scheduler
-	// beat even though the orchestrator flushes output first; drain briefly so
-	// the Result carries the complete answer.
-	time.Sleep(150 * time.Millisecond)
+	// The Result's streams (output, steps, usage, approvals, proxy audit) and the
+	// terminal status come from the session in publish order, so once the
+	// status is seen every earlier message is already queued client-side —
+	// but its handler may not have run yet. Drain those subscriptions (process
+	// everything pending, then unsubscribe) instead of guessing a sleep
+	// (F-105 part b; the old 150 ms sleep let a slow step miss the audit).
+	if n := drainRunStreams(nc, runDrainBound, subOutput, subSteps, subUsage, subApproval, subProxy); n > 0 {
+		collector.MarkStreamsIncomplete(n, runDrainBound)
+		fmt.Fprintf(os.Stderr, "[run] %d result stream(s) still draining after %s; the Result and audit may be incomplete\n", n, runDrainBound)
+	}
 	return outcome
+}
+
+// runDrainBound caps drainRunStreams: hang protection only. A drain normally
+// completes as soon as the already-queued messages are handled.
+const runDrainBound = 5 * time.Second
+
+// drainRunStreams drains each subscription and waits until every one is
+// closed, which nats.go (v1.51.0, checkDrained) reports only after a Flush
+// round trip and once the subscription's pending count is 0 — counted after
+// the handler for the last message has returned. It returns how many
+// subscriptions had not finished within bound (0 = every queued message was
+// handled).
+func drainRunStreams(nc *nats.Conn, bound time.Duration, subs ...*nats.Subscription) int {
+	var closed []<-chan nats.SubStatus
+	for _, s := range subs {
+		if s == nil || !s.IsValid() {
+			continue
+		}
+		ch := s.StatusChanged(nats.SubscriptionClosed) // register BEFORE Drain: no missed transition
+		if err := s.Drain(); err != nil {
+			continue // already gone: nothing left to deliver
+		}
+		closed = append(closed, ch)
+	}
+	t := time.NewTimer(bound)
+	defer t.Stop()
+	for i, ch := range closed {
+		select {
+		case <-ch:
+		case <-t.C:
+			return len(closed) - i
+		}
+	}
+	return 0
 }
 
 // waitForActivePane polls the workspace snapshot until an active pane exists,

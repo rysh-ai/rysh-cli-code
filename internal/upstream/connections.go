@@ -26,6 +26,18 @@ type ConnectionCredentials struct {
 	Secrets        map[string]string `json:"secrets"`
 }
 
+// CredentialsForbiddenError is a 403 from the credentials fetch: the server
+// refused this key, e.g. one belonging to an observer — channel credentials
+// need the member role or higher (D-10 / E31-R piece 6). It is told apart
+// from every other failure so the caller can refuse to start the channel
+// instead of starting it without its token. Message is the server's own
+// explanation (the "error" field of its JSON body, else the raw body).
+type CredentialsForbiddenError struct{ Message string }
+
+func (e *CredentialsForbiddenError) Error() string {
+	return "fetch credentials: forbidden: " + e.Message
+}
+
 // FetchConnectionCredentials retrieves the decrypted credentials for the
 // workspace's enabled connection of the given type (e.g. "slack", "whatsapp").
 // Returns an error if upstream is not configured, the request fails, or the
@@ -56,6 +68,16 @@ func FetchConnectionCredentials(cfg config.Config, connType string) (*Connection
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusForbidden {
+		var refusal struct {
+			Error string `json:"error"`
+		}
+		msg := strings.TrimSpace(string(body))
+		if json.Unmarshal(body, &refusal) == nil && refusal.Error != "" {
+			msg = refusal.Error
+		}
+		return nil, &CredentialsForbiddenError{Message: msg}
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch credentials: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}

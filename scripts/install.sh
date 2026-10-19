@@ -2,7 +2,8 @@
 # Rysh one-line installer
 # Usage: curl -fsSL https://rysh.ai/install.sh | sh
 #
-# Installs the latest Rysh binary to /usr/local/bin (or ~/.local/bin if not writable).
+# Installs the latest Rysh binary to /usr/local/bin (or ~/.local/bin if not writable),
+# and its licence files (EULA, LICENSE, NOTICE) to the matching share/doc/<binary>.
 # Supports: macOS (darwin/arm64, darwin/amd64), Linux (linux/amd64, linux/arm64)
 #
 # Artifacts are served from packages.rysh.ai (Cloudflare R2), NOT from GitHub
@@ -14,6 +15,14 @@
 #   RYSH_BASE_URL     artifact host (default: https://packages.rysh.ai)
 #   RYSH_INSTALL_DIR  install target (default: /usr/local/bin, else ~/.local/bin)
 #   RYSH_BINARY_NAME  binary/artifact name (default: ry; the open-source build is rysh)
+#
+# Company connect (design 037) — the dashboard's one-line install-and-connect:
+#   RYSH_CONNECT         "<server> <code>": after installing, run `ry connect` with
+#                        the company page's one-time code; writes ~/Rysh/<slug>/
+#                        and opens the session there when a terminal is available
+#   RYSH_CONNECT_OPEN    "auto" (default) opens the session; "0" only writes it
+#   RYSH_CONNECT_DEVICE  device label shown on the dashboard (default: user@host)
+#   RYSH_CONNECT_DIR     company workspace directory (default: ~/Rysh/<slug>)
 
 set -e
 
@@ -165,6 +174,36 @@ else
   esac
 fi
 
+# ── Licence files ────────────────────────────────────────────────────────────
+# The ry tarball ships EULA.txt, LICENSE, NOTICE and vt10x-LICENSE (the EULA,
+# Apache-2.0 §4 and the vendored vt10x MIT notice). Keep them next to the
+# binary's prefix — <parent of the bin dir used>/share/doc/<binary>, e.g.
+# /usr/local/share/doc/ry or ~/.local/share/doc/ry — instead of deleting them
+# with TMP_DIR. If that is not writable, fall back to ~/.local/share/doc/<binary>.
+# Never fails the install: an older archive without them gets one warning.
+# Test: .github/scripts/check-install-notices-test.sh
+NOTICE_FILES=""
+for f in EULA.txt LICENSE NOTICE vt10x-LICENSE; do
+  [ -f "${TMP_DIR}/${f}" ] && NOTICE_FILES="${NOTICE_FILES} ${f}"
+done
+if [ -z "$NOTICE_FILES" ]; then
+  echo "WARNING: the ${TAG} archive carries no licence files (EULA.txt, LICENSE, NOTICE); installed the binary only." >&2
+else
+  DOC_DIR="$(dirname "$(dirname "$INSTALLED_PATH")")/share/doc/${BINARY_NAME}"
+  if ! { mkdir -p "$DOC_DIR" 2>/dev/null && [ -w "$DOC_DIR" ]; }; then
+    DOC_DIR="${HOME}/.local/share/doc/${BINARY_NAME}"
+    mkdir -p "$DOC_DIR" 2>/dev/null || DOC_DIR=""
+  fi
+  if [ -n "$DOC_DIR" ]; then
+    for f in $NOTICE_FILES; do
+      cp "${TMP_DIR}/${f}" "${DOC_DIR}/${f}" 2>/dev/null || echo "WARNING: could not copy ${f} to ${DOC_DIR}." >&2
+    done
+    echo "Licence files (EULA, LICENSE, NOTICE): ${DOC_DIR}"
+  else
+    echo "WARNING: no writable place for the licence files; they are in the archive ${ARCHIVE}." >&2
+  fi
+fi
+
 # ── macOS quarantine fix ─────────────────────────────────────────────────────
 if [ "$OS" = "darwin" ]; then
   xattr -d com.apple.quarantine "$INSTALLED_PATH" 2>/dev/null || true
@@ -175,6 +214,42 @@ echo ""
 "$INSTALLED_PATH" --version 2>&1 || true
 echo ""
 echo "✓ Rysh ${TAG} installed at ${INSTALLED_PATH}"
+
+# ── Company connect (design 037) ─────────────────────────────────────────────
+# RYSH_CONNECT="<server> <code>" is what the company page's install line sets.
+# Installing is done; hand over to `ry connect`, which claims the code, writes
+# ~/Rysh/<slug>/rysh.config.yaml and opens the session on the company view.
+# `curl | sh` leaves stdin on the pipe, so the session is opened with stdin
+# re-attached to the terminal; with no terminal (CI, a script) or with
+# RYSH_CONNECT_OPEN=0 the workspace is written and not opened.
+if [ -n "${RYSH_CONNECT:-}" ]; then
+  set -- $RYSH_CONNECT
+  CONNECT_SERVER="${1:-}"
+  CONNECT_CODE="${2:-}"
+  [ -n "$CONNECT_SERVER" ] && [ -n "$CONNECT_CODE" ] || fail \
+    "RYSH_CONNECT must be \"<server> <code>\", e.g. RYSH_CONNECT=\"https://letchat.ai rysh_ct_...\"" \
+    "Copy the whole install line from the company page on the dashboard."
+  set --
+  [ -n "${RYSH_CONNECT_DEVICE:-}" ] && set -- "$@" --device "$RYSH_CONNECT_DEVICE"
+  [ -n "${RYSH_CONNECT_DIR:-}" ] && set -- "$@" --dir "$RYSH_CONNECT_DIR"
+  echo ""
+  echo "Connecting this machine to your company..."
+  rm -rf "$TMP_DIR"
+  case "${RYSH_CONNECT_OPEN:-auto}" in
+    0|no|false)
+      exec "$INSTALLED_PATH" connect "$CONNECT_SERVER" "$CONNECT_CODE" --no-open "$@"
+      ;;
+  esac
+  # Open /dev/tty for real: its permission bits say nothing about whether this
+  # process has a controlling terminal (a CI job or a subprocess has none, and
+  # the redirect would fail after the install already succeeded).
+  if ( : < /dev/tty ) 2>/dev/null; then
+    exec "$INSTALLED_PATH" connect "$CONNECT_SERVER" "$CONNECT_CODE" "$@" < /dev/tty
+  fi
+  echo "No terminal here: the company workspace is written and not opened."
+  exec "$INSTALLED_PATH" connect "$CONNECT_SERVER" "$CONNECT_CODE" --no-open "$@"
+fi
+
 echo ""
 echo "Quick start:"
 echo "  ${BINARY_NAME}                         # start the default session"

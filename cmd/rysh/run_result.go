@@ -61,6 +61,18 @@ type runCollector struct {
 	cacheRead    int64
 	cacheWrite   int64
 	usageRecords int
+
+	// streamsIncomplete is set when draining the result streams hit its bound
+	// (drainRunStreams): the artifact then says so instead of looking complete.
+	streamsIncomplete string
+}
+
+// MarkStreamsIncomplete records that n result stream(s) had not finished
+// draining within bound.
+func (c *runCollector) MarkStreamsIncomplete(n int, bound time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.streamsIncomplete = fmt.Sprintf("%d result stream(s) were still draining after %s when the run ended: tool calls, output or usage observed after that are missing from this artifact (incomplete)", n, bound)
 }
 
 func newRunCollector(budget runBudget) *runCollector {

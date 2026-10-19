@@ -5,11 +5,15 @@
 package actors
 
 import (
+	"bufio"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,6 +60,7 @@ import (
 //     the version. The stop still happens, because nothing in the detection path
 //     consults the CLI profile table; see TestStrictStopsAnUnknownLongRunningProgram
 //     and F-13.
+//     (Both fixed 2026-10-03 — see the end of this header.)
 //
 // # Re-measured 2026-08-12 against `claude` 2.1.228 (E8/T8)
 //
@@ -63,7 +68,7 @@ import (
 // 2.1.228, so they were re-run rather than trusted. Command, from a rysh-cli
 // worktree:
 //
-//	RYSH_TEST_REAL_CLI=/Users/halilagin/.local/bin/claude GOWORK=off \
+//	RYSH_TEST_REAL_CLI=$HOME/.local/bin/claude GOWORK=off \
 //	  go test ./internal/actors/ -run '^TestStrict…$' -v -count=1 -timeout 15m
 //
 // Six runs, three of each test, on an 8-core host carrying eight concurrent
@@ -81,16 +86,35 @@ import (
 // 13× the load. That is not the same as F-14 being closed. This test measures
 // exec → first request against an in-process httptest upstream; the 23.1s and
 // 24.3s samples that made F-14 a coin flip were taken against a SEPARATE
-// upstream process, a condition nothing here exercises. F-14's worst case is
-// untested today, not refuted.
+// upstream process, a condition nothing here exercised until E8/T4 (below).
+//
+// # Separate upstream process, 2026-10-03, `claude` 2.1.288 (E8/T4)
+//
+// RYSH_TEST_SEPARATE_UPSTREAM=1 runs the governed upstream as a separate OS
+// process (startSeparateUpstream). Six runs: 6/6 PASS, proxy-side governed at
+// 0.40–0.81s, load 49–203 on an 18-core host; in-process controls 0.41/0.50s.
+// F-14 did NOT reproduce under its own original condition, and it is still not
+// fixed. Note internal/proxy records governance BEFORE the upstream call, so the
+// upstream's location cannot delay strict's evidence directly. Record:
+// docs/evidence/f14-separate-upstream-claude-2.1.288-2026-10-03.md.
 //
 // F-15 reproduced exactly, with the version moved on: strict named the CLI
 // "2.1.228" in all six runs (`cli=2.1.228` in the log line, `name="2.1.228"`
 // from processName). Every literal `2.1.224` in the F-15 backlog row is stale.
 //
-// F-13 also still reproduces on 2.1.228 — run with RYSH_TEST_KNOWN_FAILING=1 it
-// stopped `sleep 120`, a program with no profile, and told the user to run
-// `##proxy check sleep`.
+// F-13 also reproduced on 2.1.228 (2026-08-12) — run with the since-removed
+// RYSH_TEST_KNOWN_FAILING=1 gate, it stopped `sleep 120`, a program with no
+// profile, and told the user to run `##proxy check sleep`. Both F-13 and F-15
+// are fixed as of 2026-10-03; see below.
+//
+// # Fixed 2026-10-03 (E25 T2): F-13 and F-15, together
+//
+// The pane now names its foreground program by the CLI's real identity —
+// argv[0], the exec path as invoked, or the `<cli>/versions/<v>` install
+// layout (foregroundCLI → proxy.IdentifyCLI) — and govWatch watches only a
+// program with a CLI profile. So strict names the native-installer `claude`
+// "claude" again, and no longer stops `sleep`. Measured on this host before the
+// fix: p_comm="2.1.288", exec path=~/.local/bin/claude, argv[0]="claude".
 
 // realCLIPath returns the binary under test, or skips.
 func realCLIPath(t *testing.T) string {
@@ -132,9 +156,7 @@ type strictRig struct {
 func newStrictRig(t *testing.T) *strictRig {
 	t.Helper()
 
-	body := `{"id":"msg_strict","type":"message","role":"assistant",` +
-		`"content":[{"type":"text","text":"ok"}],"model":"claude-opus-5",` +
-		`"stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":2}}`
+	body := strictReplyBody
 
 	var governed, escaped int64
 	var hold atomic.Int64 // nanoseconds the escape upstream sits on a response
@@ -176,8 +198,18 @@ func newStrictRig(t *testing.T) *strictRig {
 	t.Cleanup(func() { close(teardown) })
 	// The upstream behind rysh's proxy. Always prompt: the governed case is
 	// about the CLI producing evidence, not about how long a turn takes.
-	upstream := httptest.NewServer(reply(&governed, nil))
-	t.Cleanup(upstream.Close)
+	//
+	// With RYSH_TEST_SEPARATE_UPSTREAM=1 it is a separate OS process instead
+	// (E8/T4): the 23.1s / 24.3s F-14 samples were taken that way, and every
+	// green re-run since used this in-process server.
+	var upstreamURL string
+	if os.Getenv("RYSH_TEST_SEPARATE_UPSTREAM") != "" {
+		upstreamURL = startSeparateUpstream(t, &governed)
+	} else {
+		upstream := httptest.NewServer(reply(&governed, nil))
+		t.Cleanup(upstream.Close)
+		upstreamURL = upstream.URL
+	}
 
 	ns, err := natsserver.NewServer(&natsserver.Options{
 		Host: "127.0.0.1", Port: -1, NoLog: true, NoSigs: true,
@@ -219,7 +251,7 @@ func newStrictRig(t *testing.T) *strictRig {
 	}
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-	srv := proxy.New(pub, nil, nil, map[string]string{"anthropic": upstream.URL}, false)
+	srv := proxy.New(pub, nil, nil, map[string]string{"anthropic": upstreamURL}, false)
 	base, err := srv.Start("")
 	if err != nil {
 		t.Fatalf("start proxy: %v", err)
@@ -271,6 +303,99 @@ func newStrictRig(t *testing.T) *strictRig {
 			return seen.String()
 		},
 	}
+}
+
+// strictReplyBody is the provider reply every stub upstream returns, in-process
+// or not.
+const strictReplyBody = `{"id":"msg_strict","type":"message","role":"assistant",` +
+	`"content":[{"type":"text","text":"ok"}],"model":"claude-opus-5",` +
+	`"stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":2}}`
+
+// startSeparateUpstream runs the governed upstream as a separate OS process —
+// this test binary re-executed into TestStrictUpstreamHelperProcess — and
+// returns its URL. The child writes one "REQ" line to stdout per request, as
+// the request arrives and before it replies; counter is incremented as each
+// line is read, so the counter keeps the in-process server's meaning (a request
+// reached the upstream) at the cost of one pipe hop.
+func startSeparateUpstream(t *testing.T, counter *int64) string {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestStrictUpstreamHelperProcess$", "-test.count=1")
+	cmd.Env = append(os.Environ(), "RYSH_STRICT_UPSTREAM_HELPER=1")
+	stdin, err := cmd.StdinPipe() // closing it tells the child to exit
+	if err != nil {
+		t.Fatalf("upstream stdin: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("upstream stdout: %v", err)
+	}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start separate upstream: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = stdin.Close()
+		done := make(chan struct{})
+		go func() { _ = cmd.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			<-done
+		}
+	})
+	addr := make(chan string, 1)
+	go func() {
+		sc := bufio.NewScanner(stdout)
+		for sc.Scan() {
+			line := sc.Text()
+			switch {
+			case strings.HasPrefix(line, "LISTEN "):
+				addr <- strings.TrimPrefix(line, "LISTEN ")
+			case line == "REQ":
+				atomic.AddInt64(counter, 1)
+			}
+		}
+	}()
+	select {
+	case a := <-addr:
+		t.Logf("governed upstream is a separate process: pid %d (test pid %d) at %s",
+			cmd.Process.Pid, os.Getpid(), a)
+		return "http://" + a
+	case <-time.After(30 * time.Second):
+		t.Fatal("separate upstream never reported its address")
+		return ""
+	}
+}
+
+// TestStrictUpstreamHelperProcess is not a test: it is the body of the
+// separate upstream process startSeparateUpstream launches. It skips unless
+// launched that way.
+func TestStrictUpstreamHelperProcess(t *testing.T) {
+	if os.Getenv("RYSH_STRICT_UPSTREAM_HELPER") == "" {
+		t.Skip("helper process for RYSH_TEST_SEPARATE_UPSTREAM; not a test")
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "upstream helper: listen: %v\n", err)
+		os.Exit(1)
+	}
+	var out sync.Mutex
+	say := func(s string) {
+		out.Lock()
+		defer out.Unlock()
+		fmt.Fprintln(os.Stdout, s)
+	}
+	say("LISTEN " + ln.Addr().String())
+	go func() {
+		_ = http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			say("REQ")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(strictReplyBody))
+		}))
+	}()
+	_, _ = io.Copy(io.Discard, os.Stdin) // parent closed stdin, or died
+	os.Exit(0)
 }
 
 // launch types a one-shot run of the CLI into the pane's shell, pointed at
@@ -382,8 +507,9 @@ func TestStrictStopsARealUngovernedClaude(t *testing.T) {
 		rig.tick(&lastFg)
 		if el := time.Since(started); el >= nextLog {
 			nextLog = el + 5*time.Second
-			t.Logf("t=%3.0fs fg=%d name=%q state=%s alive=%v governed=%d escaped=%d",
-				el.Seconds(), foregroundPgrp(rig.pty), processName(foregroundPgrp(rig.pty)),
+			fg := foregroundPgrp(rig.pty)
+			t.Logf("t=%3.0fs fg=%d comm=%q cli=%q state=%s alive=%v governed=%d escaped=%d",
+				el.Seconds(), fg, processName(fg), foregroundCLI(fg),
 				rig.srv.PaneGovernanceState(rig.paneID), processGroupAlive(cliPgid),
 				atomic.LoadInt64(rig.governedReqs), atomic.LoadInt64(rig.escapedReqs))
 		}
@@ -409,6 +535,14 @@ func TestStrictStopsARealUngovernedClaude(t *testing.T) {
 	}
 	if processGroupAlive(cliPgid) {
 		t.Fatalf("process group %d survived strict mode: %s", cliPgid, groupMembers(cliPgid))
+	}
+	// F-15: the notices name the CLI the way `##proxy check` takes it, not by
+	// the native installer's version-named executable.
+	for _, want := range []string{"'claude' has been running", "ANTHROPIC_BASE_URL",
+		"`##proxy check claude`"} {
+		if !strings.Contains(notices, want) {
+			t.Errorf("F-15: notice missing %q; pane saw:\n%s", want, notices)
+		}
 	}
 	if n := atomic.LoadInt64(rig.governedReqs); n != 0 {
 		t.Fatalf("this run was supposed to be UNGOVERNED but %d request(s) "+
@@ -447,13 +581,18 @@ func TestStrictSparesARealGovernedClaude(t *testing.T) {
 
 	started := time.Now()
 	lastFg := -1
-	var firstGoverned, stoppedAt time.Duration
+	var firstGoverned, proxyGoverned, stoppedAt time.Duration
 	// Long enough to outlast a cold start on a loaded host AND to leave the
 	// grace window well behind, so "not stopped" means it survived the verdict
 	// rather than that the verdict had not been reached yet.
 	deadline := started.Add(3 * time.Minute)
 	for time.Now().Before(deadline) {
 		rig.tick(&lastFg)
+		if proxyGoverned == 0 && rig.srv.PaneGovernanceState(rig.paneID) == "governed" {
+			proxyGoverned = time.Since(started)
+			t.Logf("proxy recorded the pane as governed at %s (GraceWindow=%s)",
+				proxyGoverned.Round(time.Millisecond), proxy.GraceWindow)
+		}
 		if firstGoverned == 0 && atomic.LoadInt64(rig.governedReqs) > 0 {
 			firstGoverned = time.Since(started)
 			t.Logf("first governed request reached the proxy at %s (GraceWindow=%s)",
@@ -500,20 +639,19 @@ func (r *strictRig) launchRaw(t *testing.T, line string) {
 }
 
 // TestStrictStopsAnUnknownLongRunningProgram is finding F-13 written as an
-// executable statement of what SHOULD happen.
+// executable statement of what SHOULD happen — and, since the fix, does.
 //
 // Design 022 §4.4 scopes the detector to a *known agent CLI*: "When a known
 // agent CLI is the pane's foreground process and no governed request arrives
 // within a grace window, warn once." internal/proxy/compat.go maintains the
-// profile table that defines "known", and internal/proxy/wirecheck consults it.
-// The detection path does not. PaneActor.noteForegroundProgram passes whatever
-// processName returned straight to Server.NoteForeground, govWatch stores any
-// non-empty string, and emitUnproxiedWarning acts on it — so under
-// `[proxy] strict` the SIGTERM lands on any foreground program that runs longer
-// than GraceWindow without producing governed traffic. A build, a test run, an
-// ssh session, an editor.
+// profile table that defines "known". The detection path used not to consult
+// it: PaneActor.noteForegroundProgram passed whatever processName returned
+// straight to Server.NoteForeground, govWatch stored any non-empty string, and
+// emitUnproxiedWarning acted on it — so under `[proxy] strict` the SIGTERM
+// landed on any foreground program that ran longer than GraceWindow without
+// producing governed traffic. A build, a test run, an ssh session, an editor.
 //
-// Observed, with `sleep 120` as the pane's foreground program:
+// Observed before the fix, with `sleep 120` as the pane's foreground program:
 //
 //	sleep pgid=46191 processName="sleep" profileKnown=false
 //	t= 20s state=unproxied?
@@ -522,28 +660,23 @@ func (r *strictRig) launchRaw(t *testing.T, line string) {
 //	[proxy] warning: 'sleep' has been running with no governed request …
 //	Confirm with `##proxy check sleep`
 //
-// Skipped by default: it asserts the fixed behaviour and therefore fails until
-// the gate lands, and a permanently red test in the default suite trains people
-// to ignore red. Run it with RYSH_TEST_KNOWN_FAILING=1.
+// The fix is not the one-line ProfileFor gate it looks like: keyed on
+// processName alone, that gate would also stop rysh detecting the real
+// `claude`, whose process name on a native install is its version (F-15). So
+// the pane now reports the CLI's real identity (foregroundCLI →
+// proxy.IdentifyCLI) and govWatch watches only a known CLI. The other half is
+// pinned by TestStrictNamesAVersionNamedClaudeByItsRealName.
 //
-// The fix is not the one-line gate it looks like, which is why this is filed
-// rather than patched here: adding `if _, ok := proxy.ProfileFor(binary); !ok`
-// would ALSO stop rysh detecting the real `claude`, whose process name on a
-// native install is "2.1.224" and not "claude" (F-15). The two have to be fixed
-// together.
+// This test used to be skipped behind RYSH_TEST_KNOWN_FAILING; it is not a
+// known failure any more and runs by default.
 func TestStrictStopsAnUnknownLongRunningProgram(t *testing.T) {
-	if os.Getenv("RYSH_TEST_KNOWN_FAILING") == "" {
-		t.Skip("F-13 is open — strict stops any long-running foreground program, " +
-			"not only a known agent CLI. Set RYSH_TEST_KNOWN_FAILING=1 to run this " +
-			"regression target; it fails until the known-CLI gate lands.")
-	}
 	rig := newStrictRig(t)
 
 	rig.launchRaw(t, "sleep 120")
 	pgid := rig.waitForCLI(t, 30*time.Second)
-	name := processName(pgid)
+	name := foregroundCLI(pgid)
 	if _, known := proxy.ProfileFor(name); known {
-		t.Fatalf("processName(%d)=%q is a known CLI — pick a program rysh has no "+
+		t.Fatalf("foregroundCLI(%d)=%q is a known CLI — pick a program rysh has no "+
 			"profile for, or this test asserts nothing", pgid, name)
 	}
 	t.Logf("foreground program pgid=%d name=%q knownCLI=false: %s",
@@ -567,5 +700,105 @@ func TestStrictStopsAnUnknownLongRunningProgram(t *testing.T) {
 		t.Fatalf("F-13: strict warned about %q, a program rysh has no profile for; "+
 			"the notice even tells the user to run `##proxy check %s`.\npane saw:\n%s",
 			name, name, notices)
+	}
+}
+
+// TestStrictNamesAVersionNamedClaudeByItsRealName is finding F-15 written as an
+// executable statement, without needing the real vendor binary.
+//
+// The native installer lays `claude` out as
+//
+//	~/.local/bin/claude -> ~/.local/share/claude/versions/<version>
+//
+// so the executable's own basename IS the version. Both darwin's p_comm and
+// Linux's /proc/<pid>/comm report that basename, which is why strict named the
+// real CLI "2.1.224", "2.1.228" and — measured 2026-10-03 on this host —
+// "2.1.287" / "2.1.288", while argv[0] and the exec path as invoked both say
+// "claude". This rebuilds that layout around a stand-in binary and runs it
+// through a `claude` on PATH, exactly as a user's shell would.
+//
+// It is also the half of the F-13 fix that keeps strict ON: a known-CLI gate
+// keyed on p_comm alone would see "9.9.999", find no profile, and stop watching
+// the one program strict exists for. So this test requires that the version-
+// named binary is still stopped, AND that every notice names it `claude`, names
+// ANTHROPIC_BASE_URL, and offers a `##proxy check` that resolves.
+func TestStrictNamesAVersionNamedClaudeByItsRealName(t *testing.T) {
+	const version = "9.9.999"
+	root := t.TempDir()
+	versions := filepath.Join(root, "share", "claude", "versions")
+	binDir := filepath.Join(root, "bin")
+	for _, d := range []string{versions, binDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	real := filepath.Join(versions, version)
+	buildSleeper(t, real)
+	if err := os.Symlink(real, filepath.Join(binDir, "claude")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	rig := newStrictRig(t)
+	rig.launchRaw(t, "PATH="+binDir+":$PATH claude 120")
+	pgid := rig.waitForCLI(t, 30*time.Second)
+	t.Logf("foreground pgid=%d processName=%q: %s", pgid, processName(pgid), groupMembers(pgid))
+
+	started := time.Now()
+	lastFg := -1
+	for time.Since(started) < proxy.GraceWindow+15*time.Second {
+		rig.tick(&lastFg)
+		if !processGroupAlive(pgid) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	notices := rig.notices()
+	if !strings.Contains(notices, "strict: stopping") || processGroupAlive(pgid) {
+		t.Fatalf("F-15: a native-installer claude (p_comm %q) ran past %s "+
+			"ungoverned and strict did not stop it — the detector has lost the "+
+			"one CLI strict exists for.\ngroup now: %s\npane saw:\n%s",
+			version, proxy.GraceWindow, groupMembers(pgid), notices)
+	}
+	for _, want := range []string{
+		"'claude' has been running with no governed request",
+		"ignoring ANTHROPIC_BASE_URL",
+		"strict: stopping 'claude'",
+		"`##proxy check claude`",
+	} {
+		if !strings.Contains(notices, want) {
+			t.Errorf("F-15: notice missing %q.\npane saw:\n%s", want, notices)
+		}
+	}
+	if strings.Contains(notices, version) {
+		t.Errorf("F-15: a notice names the CLI by its version %q, so the "+
+			"`##proxy check` it offers does not resolve.\npane saw:\n%s", version, notices)
+	}
+}
+
+// buildSleeper compiles a program that sleeps for argv[1] seconds to dst.
+//
+// It is built rather than copied from /bin/sleep because a copied platform
+// binary is not a dependable fixture: on darwin 27 (observed 2026-10-03) a copy
+// of /bin/sleep — by `cp` or by a byte-for-byte write, under any name — is
+// SIGKILLed at exec, so the pane never sees it in the foreground.
+func buildSleeper(t *testing.T, dst string) {
+	t.Helper()
+	dir := t.TempDir()
+	files := map[string]string{
+		"go.mod": "module sleeper\n\ngo 1.21\n",
+		"main.go": "package main\n\nimport (\n\t\"os\"\n\t\"strconv\"\n\t\"time\"\n)\n\n" +
+			"func main() {\n\tn, _ := strconv.Atoi(os.Args[1])\n\ttime.Sleep(time.Duration(n) * time.Second)\n}\n",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	cmd := exec.Command("go", "build", "-o", dst, ".")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GOWORK=off", "GOFLAGS=")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("cannot build the stand-in binary: %v\n%s", err, out)
 	}
 }

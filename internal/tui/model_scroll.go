@@ -109,5 +109,13 @@ func (m Model) paneRowCount(paneID string) int {
 	if output == "" {
 		return 0
 	}
-	return len(wrapRows(output, m.paneContentWidth(paneID)))
+	width := m.paneContentWidth(paneID)
+	if width <= 0 {
+		// No rect yet: measure without caching, so a width-0 entry does not
+		// evict the renderer's.
+		return len(wrapRows(output, width))
+	}
+	// Cached: this runs on every wheel event and PgUp, and wrapping the whole
+	// buffer each time was what made scrolling a full pane stutter (F-70).
+	return len(m.wrapRowsCached(paneID, output, width))
 }

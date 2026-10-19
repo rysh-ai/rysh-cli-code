@@ -77,8 +77,13 @@ type PaneActor struct {
 	inheritedScope    string
 	nc                *nats.Conn
 	br                *bridge.NATSBridge
-	kvStore           nats.KeyValue   // rysh-panes bucket
-	secrets           *secretResolver // workspace-scoped ##secret lookup for provider overrides
+	kvStore           nats.KeyValue // rysh-panes bucket
+	// removed is set when the pane is being closed for good (DeleteKV,
+	// MarkRemoved), as opposed to stopped for a daemon shutdown. It gates every
+	// persist and turns the stop into a delete. Atomic: the parent sets it from
+	// its own goroutine.
+	removed atomic.Bool
+	secrets *secretResolver // workspace-scoped ##secret lookup for provider overrides
 
 	// Unguarded — sequential mailbox.
 	title     string
@@ -180,6 +185,23 @@ type PaneActor struct {
 	vtermEmu     *vterm.VTerm
 	rawMode      bool // true when alt screen is active (vim, htop, less)
 	cursorHidden bool // true when cursor is hidden (Bubble Tea TUIs like Claude Code)
+
+	// redrawFrames is a capped history of full-screen snapshots for a
+	// foreground program that redraws in place instead of scrolling (e.g.
+	// codex): see the fgRedrew detection and captureRedrawFrame call in
+	// rawReadLoop (pane_shell.go). vt10x's own scrollback capture only fires
+	// on a genuine scroll-region operation and is skipped entirely in
+	// alt-screen mode (third_party/vt10x/state.go captureScrollback), so a
+	// program that repaints via cursor addressing on the primary screen never
+	// populates it — without this, "scroll up" (enterRawScroll) over such a
+	// pane shows nothing earlier than the current live screen. Rows are ANSI,
+	// oldest first, each captured frame preceded by a timestamp divider row.
+	// Written only from the rawReadLoop goroutine; buildScrollbackRows reads
+	// it cross-actor with no extra lock, the same accepted best-effort
+	// pattern as the PrivateOutput/ChatOutput buffer reads below.
+	redrawFrames      []string
+	lastRedrawFrameAt time.Time
+	lastRedrawFrame   string // joined rows of the most recently captured frame, for de-dup
 	// shellPgid is the process-group id of the pane's shell, recorded at start.
 	// Used to tell the shell prompt apart from a running foreground program.
 	shellPgid int
@@ -195,13 +217,18 @@ type PaneActor struct {
 	// consumers fall back to lsof/proc resolution then. Holds a string.
 	shellCwdAtomic atomic.Value
 
-	// programAtomic is the pane's live foreground executable name, "" at the
-	// shell prompt. Read by buildSnapshot on the mailbox goroutine; written by
+	// programAtomic is the pane's live foreground program name, "" at the
+	// shell prompt: a known agent CLI's own name (foregroundCLI), else the
+	// kernel's name for the executable. Read by buildSnapshot on the mailbox goroutine; written by
 	// two others — the read loop (fast path, on output) and the foreground
 	// poller (for programs that print nothing) — hence programMu guarding the
 	// compare-and-set that decides whether a transition is announced.
 	programAtomic atomic.Value
 	programMu     sync.Mutex
+	programPGID   atomic.Int64 // foreground pgid of programAtomic; 0 when none
+	// programIdent caches the last identification, so the 500ms poll does not
+	// re-read a process's argv while nothing changed. Guarded by programMu.
+	programIdent programIdent
 
 	// nativeMode: ##native pass-through — the pane is permanently
 	// interactive (VT-rendered, raw keys to the PTY); bash owns the line.
@@ -553,13 +580,21 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 			p.br = nil
 		}
 		p.stopShell()
-		p.flushKV()
+		p.flushKV() // no-op once removed
 		// Announce the close so the workspace can release per-pane resources
 		// it holds — a dedicated replay pane's playback stops when its pane
 		// closes (design 006 v2). Published for every pane; the workspace
 		// ignores IDs it doesn't track.
 		if p.pub != nil {
 			_ = p.pub.Send(msg.T("ws", "inbox"), &msg.MsgPaneStopped{PaneID: p.id})
+		}
+
+	case *actor.Stopped:
+		// Children (LLM execution, memory manager) have terminated by now, so
+		// nothing can persist for this pane any more: a removed pane's delete
+		// done here is final (F-69). A pane stopped for shutdown is untouched.
+		if p.removed.Load() {
+			p.deleteKVKeys()
 		}
 
 	// paneRehomeRequest lands after ##move has re-parented this pane's
@@ -626,32 +661,32 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 	// snapshot-driven clients (desktop app, TUI) re-fetch the layout snapshot
 	// that carries command history — otherwise up/down-arrow recall goes stale.
 	case *msg.MsgPaneHistoryAppend:
-		p.mergedHistory = append(p.mergedHistory, m.Entry)
+		p.mergedHistory = appendBounded(p.mergedHistory, m.Entry, p.historyLimit())
 		p.kvDirty = true
 		p.notifyLayoutDirty()
 
 	case *msg.MsgPaneShellHistoryAppend:
-		p.shellHistory = append(p.shellHistory, m.Entry)
+		p.shellHistory = appendBounded(p.shellHistory, m.Entry, p.historyLimit())
 		p.kvDirty = true
 		p.notifyLayoutDirty()
 
 	case *msg.MsgPaneAIHistoryAppend:
-		p.promptHistory = append(p.promptHistory, m.Entry)
+		p.promptHistory = appendBounded(p.promptHistory, m.Entry, p.historyLimit())
 		p.kvDirty = true
 		p.notifyLayoutDirty()
 
 	case *msg.MsgPaneChatHistoryAppend:
-		p.chatHistory = append(p.chatHistory, m.Entry)
+		p.chatHistory = appendBounded(p.chatHistory, m.Entry, p.historyLimit())
 		p.kvDirty = true
 		p.notifyLayoutDirty()
 
 	case *msg.MsgPaneExternalHistoryAppend:
-		p.externalHistory = append(p.externalHistory, m.Entry)
+		p.externalHistory = appendBounded(p.externalHistory, m.Entry, p.historyLimit())
 		p.kvDirty = true
 		p.notifyLayoutDirty()
 
 	case *msg.MsgPaneRyshHistoryAppend:
-		p.ryshHistory = append(p.ryshHistory, m.Entry)
+		p.ryshHistory = appendBounded(p.ryshHistory, m.Entry, p.historyLimit())
 		p.kvDirty = true
 		p.notifyLayoutDirty()
 
@@ -698,21 +733,7 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 		p.notifyLayoutDirty()
 
 	case *msg.MsgPaneSetMeta:
-		if m.Key != "" {
-			if m.Value == "" {
-				delete(p.meta, m.Key)
-			} else {
-				if p.meta == nil {
-					p.meta = make(map[string]string)
-				}
-				p.meta[m.Key] = m.Value
-			}
-			p.kvDirty = true
-			// Synchronous sidecar write (F-54): meta is the addressing layer
-			// fleet selectors and boards resolve against; it gets its own tiny
-			// KV record so a restart cannot wipe it with the big snapshot.
-			p.persistDurableMeta()
-		}
+		p.setMeta(m.Key, m.Value)
 
 	case *msg.MsgPaneStop:
 		ctx.Stop(ctx.Self())
@@ -1003,6 +1024,9 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 				fmt.Sprintf("[rysh] remote share restrictions: modes disabled: %v\n", m.Restrictions.DisabledModes))
 		}
 
+	case *msg.MsgPaneReleaseHumanoid:
+		p.releaseHumanoid(m)
+
 	case *msg.MsgPaneSetHumanoid:
 		p.registeredHumanoid = m.HumanoidName
 		slog.Info("pane: registered to humanoid", "pane", p.id, "humanoid", m.HumanoidName)
@@ -1052,7 +1076,7 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 			// streams it per-pane. A direct backfill/reconcile fetch leaves it
 			// false to pull full content in one hop. Conversation buffers are never
 			// needed on the reply path (only the 2s-gated persist path builds them).
-			snap := p.buildSnapshot(!inner.LayoutOnly, false, !inner.NoHistories)
+			snap := p.buildSnapshot(!inner.LayoutOnly, false, snapshotWantsHistories(inner, p.id))
 			_ = m.Reply(&msg.MsgPaneSnapshotReply{Snapshot: snap})
 			p.maybePersist()
 		case *msg.MsgGetPaneVT:
@@ -1134,4 +1158,33 @@ func (p *PaneActor) registerForgedProxies(m *msg.MsgPaneRegisterForgedProxies) {
 
 func (w terminalResponseWriter) Write(p []byte) (int, error) {
 	return w.w.Write(p)
+}
+
+// setMeta writes one meta entry (MsgPaneSetMeta); an empty value deletes it.
+func (p *PaneActor) setMeta(key, value string) {
+	if key == "" {
+		return
+	}
+	if value == "" {
+		delete(p.meta, key)
+	} else {
+		if p.meta == nil {
+			p.meta = make(map[string]string)
+		}
+		p.meta[key] = value
+	}
+	p.kvDirty = true
+	// Synchronous sidecar write (F-54): meta is the addressing layer
+	// fleet selectors and boards resolve against; it gets its own tiny
+	// KV record so a restart cannot wipe it with the big snapshot.
+	p.persistDurableMeta()
+	// web.sync decides whether web clients receive this pane's repaint stream
+	// (web/pane_sync.go), and the web server learns that from the structural
+	// snapshot it re-reads on layoutDirty. Without the signal a toggle would
+	// wait for the next periodic resync to take effect, and the renderer's
+	// "sync off" badge would lag with it. Other keys stay silent: fleet tooling
+	// writes several per pane at launch, and none of them changes a frontend.
+	if key == domain.PaneMetaWebSync {
+		p.notifyLayoutDirty()
+	}
 }

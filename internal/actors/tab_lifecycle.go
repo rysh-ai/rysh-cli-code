@@ -222,6 +222,7 @@ func (t *TabActor) closeActiveLane(ctx actor.Context) {
 	} else {
 		t.activeLane = idx
 	}
+	t.settleCollapsedLanes()
 
 	t.updateActivePaneFromLane()
 	t.normalizeFlex()
@@ -266,6 +267,7 @@ func (t *TabActor) deleteLaneByID(ctx actor.Context, laneID string) {
 	if t.activeLane >= len(t.laneRefs) {
 		t.activeLane = len(t.laneRefs) - 1
 	}
+	t.settleCollapsedLanes()
 
 	t.updateActivePaneFromLane()
 	t.normalizeFlex()

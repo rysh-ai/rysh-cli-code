@@ -11,6 +11,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
+	msgpkg "github.com/rysh-ai/rysh-cli-code/internal/msg"
+	"github.com/rysh-ai/rysh-cli-code/internal/replay"
 )
 
 func (m Model) View() string {
@@ -309,6 +311,10 @@ func (m Model) renderBody() string {
 	renderedCols := make([]string, len(lanes))
 	for c, lane := range lanes {
 		colWidth := colWidths[c]
+		if colWidth == collapsedLaneWidth && lane.Collapsed {
+			renderedCols[c] = m.renderCollapsedLane(lane, c, totalHeight)
+			continue
+		}
 		col := lane.VisiblePanes
 		if len(col) == 0 {
 			renderedCols[c] = ""
@@ -409,7 +415,7 @@ func (m Model) keyHelp() string {
 		return "mode: raw (interactive) | esc esc→switch mode  ctrl+o prefix (escape hatch)"
 	}
 	if m.mode == modePrefix {
-		return "mode: prefix (ctrl+o) | d detach  any-key cancel"
+		return "mode: prefix (ctrl+o) | f FaceTime  d detach  any-key cancel"
 	}
 	if m.mode == modeAltPPrefix {
 		return "mode: alt+p prefix | f fullscreen-toggle  any-key cancel"
@@ -442,16 +448,19 @@ func (m Model) keyHelp() string {
 		return "mode: move-pane (ctrl+y) | up/k move-up  down/j move-down (reorders within stack, else the group)  any-key exit"
 	}
 	if m.mode == modeLayout {
-		return "mode: layout | e equalize-all  h/= equalize-width  v equalize-height  arrows resize  m maximize  s swap-lane  esc|. exit"
+		return "mode: layout | e equalize-all  h/= equalize-width  v equalize-height  arrows resize  m maximize  s swap-lane  c collapse-lane  o open-lane|all  esc|. exit"
+	}
+	if m.mode == modeCompany {
+		return "mode: company | j/k move  tab/1-6 section  enter detail  g refresh  esc shell  ctrl+o prefix"
 	}
 	if m.mode == modeEmail {
 		// The email client owns its keys (see updateEmailMode); the footer reflects
 		// them instead of the generic input-mode hint, and switches to the compose
 		// sub-view's keys while a manual reply is being typed.
 		if ev := m.emailViews[m.snapshot.ActivePaneID]; ev != nil && ev.answer == answerCompose {
-			return "mode: email compose | type reply  ctrl+d send  esc cancel"
+			return "mode: email compose | tab next field  arrows/home/end move  ctrl+d send  esc cancel"
 		}
-		return "mode: email | j/k move  tab switch column  enter open  r answer  c compose  g refresh  esc back  ctrl+o prefix"
+		return "mode: email | j/k move  tab switch column  enter open  r answer  c reply  n new  g refresh  esc back  ctrl+o prefix"
 	}
 	if m.mode == modeLLMPicker {
 		return m.llmPickerFooter()
@@ -460,6 +469,10 @@ func (m Model) keyHelp() string {
 		desc := ""
 		if m.pendingApproval != nil {
 			desc = m.pendingApproval.Description
+			if m.pendingApproval.Type == msgpkg.ApprovalTypeQuestion {
+				// ask_user's question is not a gate (F-92).
+				return fmt.Sprintf("QUESTION: %s | y yes  n decline  N type an answer  esc decline", desc)
+			}
 		}
 		return fmt.Sprintf("APPROVAL: %s | y approve  Y approve-always  n reject  N reject+reason  esc reject", desc)
 	}
@@ -534,6 +547,17 @@ func (m Model) renderFooter() string {
 	if m.mode == modeRejectReason {
 		// Show the rejection reason input.
 		return lipgloss.NewStyle().Padding(0, 1, 1, 1).Render(m.rejectInput.View())
+	}
+	if m.mode == modeQuestion {
+		// ask_user's question: the question, its numbered options, the answer field (F-92).
+		head := "QUESTION"
+		if m.pendingApproval != nil {
+			head += ": " + m.pendingApproval.Description
+			for i, c := range m.pendingApproval.Choices {
+				head += fmt.Sprintf("  [%d] %s", i+1, c.Label)
+			}
+		}
+		return lipgloss.NewStyle().Padding(0, 1, 1, 1).Render(metaStyle.Render(head) + "\n" + m.rejectInput.View())
 	}
 	help := metaStyle.Render(m.keyHelp())
 	if m.flashMsg != "" && time.Now().Before(m.flashExpires) {
@@ -856,6 +880,38 @@ func paneMetaText(pane domain.PaneSnapshot) string {
 	return metaText
 }
 
+// paneMetaFit is paneMetaText for a pane whose meta line must fit width
+// columns. Only replay panes are reshaped: their REPLAY badge would otherwise
+// wrap onto 2–3 lines and push the replay down. The degrade order is the bar,
+// then the meta suffix (" | flex:1" etc.), then the wall-clock time — position,
+// speed and pause always stay. It is done here, at render time, because only
+// the TUI knows the pane width; the daemon keeps publishing the full badge,
+// so replayBadgeFeed's one-publish-per-text-change throttle is untouched.
+// Other panes return paneMetaText unchanged.
+func paneMetaFit(pane domain.PaneSnapshot, width int) string {
+	full := paneMetaText(pane)
+	if pane.PaneType != "replay" || width <= 0 || ansi.StringWidth(full) <= width {
+		return full
+	}
+	suffix := strings.TrimPrefix(full, pane.Status)
+	variants := replay.BadgeVariants(pane.Status)
+	// Bar first (keep the suffix while it fits), then the suffix, then the clock.
+	var tries []string
+	for _, v := range variants[1:min(2, len(variants))] {
+		tries = append(tries, v+suffix)
+	}
+	for _, v := range variants[min(1, len(variants)-1):] {
+		tries = append(tries, v)
+	}
+	for _, t := range tries {
+		if ansi.StringWidth(t) <= width {
+			return t
+		}
+	}
+	// Narrower than even the shortest badge: cut it rather than wrap.
+	return ansi.Truncate(variants[len(variants)-1], width, "")
+}
+
 // wrapRows splits an output string into logical lines and wraps each one to the
 // given content width, returning the resulting on-screen display rows. Wrapping
 // is ANSI-aware (colour escapes are preserved across wraps). A leading
@@ -867,81 +923,51 @@ func paneMetaText(pane domain.PaneSnapshot) string {
 // on screen; both the renderer and the scroll clamps measure rows through it so
 // they can never disagree (which is what made wrapped output scroll/overflow
 // incorrectly before).
-// wrapCacheEntry memoizes the result of wrapRows for one pane.
-type wrapCacheEntry struct {
-	output string
-	width  int
-	rows   []string
-}
-
-// wrapRowsCached returns wrapRows(output, width) for a pane, reusing the
-// previous result when neither the output nor the width changed since the last
-// frame. wrapRows is O(output size) ANSI parsing; for an idle pane this turns a
-// per-frame re-wrap of the full buffer into a cheap string comparison. The
-// returned slice is never mutated by callers (they copy into styledLines), so
-// sharing the cached slice is safe.
-func (m Model) wrapRowsCached(paneID, output string, width int) []string {
-	if m.paneWrapCache != nil {
-		if e, ok := m.paneWrapCache[paneID]; ok && e.width == width && e.output == output {
-			return e.rows
-		}
-	}
-	rows := wrapRows(output, width)
-	if m.paneWrapCache != nil {
-		m.paneWrapCache[paneID] = wrapCacheEntry{output: output, width: width, rows: rows}
-	}
-	return rows
-}
-
-func wrapRows(output string, width int) []string {
-	lines := strings.Split(output, "\n")
-	if width <= 0 {
-		return lines
-	}
-	rows := make([]string, 0, len(lines))
-	for _, line := range lines {
-		sentinel := ""
-		body := line
-		if strings.HasPrefix(line, "\x02") {
-			sentinel = "\x02"
-			body = line[len("\x02"):]
-		}
-		wrapped := strings.Split(ansi.Wrap(body, width, ""), "\n")
-		for i, wl := range wrapped {
-			if i == 0 {
-				rows = append(rows, sentinel+wl)
-			} else {
-				rows = append(rows, wl)
-			}
-		}
-	}
-	return rows
-}
-
 // visibleRowWindow returns the slice of rows visible given a row budget
 // (maxLines) and a scroll offset measured from the bottom (0 = tail). It mirrors
 // the clamping in the scroll helpers so the rendered window and the scroll math
 // always line up.
 func visibleRowWindow(rows []string, maxLines, scrollOffset int) []string {
-	if maxLines <= 0 || len(rows) <= maxLines {
-		return rows
+	start, end := visibleRowRange(len(rows), maxLines, scrollOffset)
+	return rows[start:end]
+}
+
+// visibleRowRange is visibleRowWindow's index arithmetic, for callers that
+// need to know WHERE the window sits in the stream (the board pane maps
+// selected rows back to the posts they render).
+func visibleRowRange(n, maxLines, scrollOffset int) (int, int) {
+	if maxLines <= 0 || n <= maxLines {
+		return 0, n
 	}
-	endIdx := len(rows) - scrollOffset
-	if endIdx > len(rows) {
-		endIdx = len(rows)
+	endIdx := n - scrollOffset
+	if endIdx > n {
+		endIdx = n
 	}
 	startIdx := endIdx - maxLines
 	if startIdx < 0 {
 		startIdx = 0
-		endIdx = min(maxLines, len(rows))
+		endIdx = min(maxLines, n)
 	}
-	return rows[startIdx:endIdx]
+	return startIdx, endIdx
 }
 
 // buildDisplayLines constructs the plain-text lines that correspond exactly to
 // what lipgloss renders on screen for a pane's text area.
 func buildDisplayLines(pane domain.PaneSnapshot, tab domain.TabSnapshot, textWidth, height int, inputValue string, scrollOffset int, inputMode string) []string {
-	metaText := paneMetaText(pane)
+	return buildDisplayLinesWith(wrapRows, pane, tab, textWidth, height, inputValue, scrollOffset, inputMode)
+}
+
+// Model.buildDisplayLines is buildDisplayLines through the model's per-pane wrap
+// cache. It runs every frame while a selection is active, and on every
+// selection mouse event, so an uncached wrap re-wrapped the whole buffer each
+// time (F-70).
+func (m Model) buildDisplayLines(pane domain.PaneSnapshot, tab domain.TabSnapshot, textWidth, height int, inputValue string, scrollOffset int, inputMode string) []string {
+	wrap := func(output string, width int) []string { return m.wrapRowsCached(pane.ID, output, width) }
+	return buildDisplayLinesWith(wrap, pane, tab, textWidth, height, inputValue, scrollOffset, inputMode)
+}
+
+func buildDisplayLinesWith(wrap func(output string, width int) []string, pane domain.PaneSnapshot, tab domain.TabSnapshot, textWidth, height int, inputValue string, scrollOffset int, inputMode string) []string {
+	metaText := paneMetaFit(pane, textWidth)
 
 	// One selector for every render path (see paneModeOutput) — these lines must
 	// match what the live view draws, or selection and copy would return text
@@ -953,7 +979,7 @@ func buildDisplayLines(pane domain.PaneSnapshot, tab domain.TabSnapshot, textWid
 	if maxLines < 0 {
 		maxLines = 0
 	}
-	outputLines := visibleRowWindow(wrapRows(output, textWidth), maxLines, scrollOffset)
+	outputLines := visibleRowWindow(wrap(output, textWidth), maxLines, scrollOffset)
 
 	// Build raw content lines with ANSI and right-align sentinel (\x02) stripped.
 	rawLines := []string{metaText, ""}
@@ -989,6 +1015,76 @@ func buildDisplayLines(pane domain.PaneSnapshot, tab domain.TabSnapshot, textWid
 	return displayLines
 }
 
+// rawScrollWindow returns the scrollback (copy) mode title line and the
+// current visible window of frozen history rows (ANSI intact, truncated to
+// renderWidth) for the active raw-scroll pane. The one place this windowing
+// math lives — buildPanePanel's non-selection render and
+// rawScrollDisplayLines (the plain-text counterpart used for selection
+// highlighting and copy) both call it, so what's drawn and what's copied can
+// never disagree about which rows are on screen.
+func (m Model) rawScrollWindow(pane domain.PaneSnapshot, renderWidth, height int) (title string, win []string) {
+	maxLines := height - 1
+	if maxLines < 0 {
+		maxLines = 0
+	}
+	rows := m.rawScrollRows
+	end := len(rows) - m.rawScrollOffset
+	if end > len(rows) {
+		end = len(rows)
+	}
+	if end < 0 {
+		end = 0
+	}
+	start := end - maxLines
+	if start < 0 {
+		start = 0
+	}
+	win = make([]string, 0, maxLines)
+	for _, r := range rows[start:end] {
+		win = append(win, ansi.Truncate(r, renderWidth, ""))
+	}
+	for len(win) < maxLines {
+		win = append(win, "")
+	}
+	title = fmt.Sprintf("%s | SCROLLBACK ↑%d/%d  j/k PgUp/PgDn Home/End  q=exit",
+		paneMetaText(pane), m.rawScrollOffset, m.rawScrollMaxOffset())
+	return title, win
+}
+
+// rawScrollDisplayLines is buildDisplayLines' counterpart for scrollback
+// (copy) mode: ANSI-stripped, width-padded lines in the exact title+content
+// row layout rawScrollWindow renders, so selection column math lines up with
+// what the user clicked and copy returns exactly what was highlighted (same
+// requirement buildDisplayLines documents for the normal-pane path).
+func (m Model) rawScrollDisplayLines(pane domain.PaneSnapshot, textWidth, height int) []string {
+	title, win := m.rawScrollWindow(pane, textWidth, height)
+
+	rawLines := make([]string, 0, len(win)+1)
+	rawLines = append(rawLines, ansi.Strip(title))
+	for _, line := range win {
+		rawLines = append(rawLines, ansi.Strip(line))
+	}
+
+	if textWidth <= 0 {
+		return rawLines
+	}
+	displayLines := make([]string, 0, len(rawLines))
+	for _, line := range rawLines {
+		visW := ansi.StringWidth(line)
+		switch {
+		case visW < textWidth:
+			line += strings.Repeat(" ", textWidth-visW)
+		case visW > textWidth:
+			line = ansi.Truncate(line, textWidth, "")
+		}
+		displayLines = append(displayLines, line)
+	}
+	for len(displayLines) < height {
+		displayLines = append(displayLines, strings.Repeat(" ", textWidth))
+	}
+	return displayLines
+}
+
 // buildPanePanel builds the displayable content string for a single pane.
 // stampEdgeCursor renders a remote VT line truncated to contentCols but reserves
 // the last column for a reverse-video cursor marker. Used when an interactive
@@ -1008,7 +1104,7 @@ func stampEdgeCursor(line string, contentCols int) string {
 }
 
 func (m Model) buildPanePanel(pane domain.PaneSnapshot, tab domain.TabSnapshot, paneWidth, height int) string {
-	metaText := paneMetaText(pane)
+	metaText := paneMetaFit(pane, max(8, paneWidth-4))
 
 	renderWidth := max(8, paneWidth-4)
 
@@ -1019,36 +1115,33 @@ func (m Model) buildPanePanel(pane domain.PaneSnapshot, tab domain.TabSnapshot, 
 	if pane.PaneType == domain.PaneTypeAgentsBoard {
 		return m.buildBoardPanel(pane, paneWidth, height)
 	}
+	// Meeting pane (design 043): shell-less; the desktop app renders the
+	// meeting, the terminal a placeholder.
+	if pane.PaneType == domain.PaneTypeMeeting {
+		return m.buildMeetingPanelWithControls(pane, paneWidth, height)
+	}
 
 	// Scrollback (copy) mode: render the frozen history window for the active
 	// interactive pane instead of its live VT screen. Rows are truncated to the
 	// content width (ANSI-aware) in case the pane was resized since capture.
 	if pane.ID == m.snapshot.ActivePaneID && m.mode == modeRawScroll && m.rawScrollPaneID == pane.ID && len(m.rawScrollRows) > 0 {
-		maxLines := height - 1
-		if maxLines < 0 {
-			maxLines = 0
+		if hasSelection := m.selection.active && m.selection.paneID == pane.ID; hasSelection {
+			// Selection-aware render: same plain-text lines extractRawScrollSelectedText
+			// copies from, so the highlight matches what copy actually grabs (mirrors
+			// the normal-mode selection path below).
+			lines := m.rawScrollDisplayLines(pane, renderWidth, height)
+			startRow, startCol, endRow, endCol := m.selection.normalized()
+			styled := make([]string, len(lines))
+			for i, line := range lines {
+				if i >= startRow && i <= endRow {
+					styled[i] = applyLineSelection(line, i, startRow, startCol, endRow, endCol)
+				} else {
+					styled[i] = line
+				}
+			}
+			return strings.Join(styled, "\n")
 		}
-		rows := m.rawScrollRows
-		end := len(rows) - m.rawScrollOffset
-		if end > len(rows) {
-			end = len(rows)
-		}
-		if end < 0 {
-			end = 0
-		}
-		start := end - maxLines
-		if start < 0 {
-			start = 0
-		}
-		win := make([]string, 0, maxLines)
-		for _, r := range rows[start:end] {
-			win = append(win, ansi.Truncate(r, renderWidth, ""))
-		}
-		for len(win) < maxLines {
-			win = append(win, "")
-		}
-		title := fmt.Sprintf("%s | SCROLLBACK ↑%d/%d  j/k PgUp/PgDn Home/End  q=exit",
-			paneMetaText(pane), m.rawScrollOffset, m.rawScrollMaxOffset())
+		title, win := m.rawScrollWindow(pane, renderWidth, height)
 		return fmt.Sprintf("%s\n%s", metaStyle.Render(title), strings.Join(win, "\n"))
 	}
 
@@ -1125,6 +1218,9 @@ func (m Model) buildPanePanel(pane domain.PaneSnapshot, tab domain.TabSnapshot, 
 	if m.paneInputModeFor(pane.ID) == "email" {
 		return m.buildEmailPanel(pane, paneWidth, height)
 	}
+	if m.paneInputModeFor(pane.ID) == "company" {
+		return m.buildCompanyPanel(pane, paneWidth, height)
+	}
 
 	// Switch output based on THIS pane's own input mode (not the active pane's),
 	// so a chat/prompt/rysh pane keeps showing its own buffer when another pane
@@ -1199,7 +1295,7 @@ func (m Model) buildPanePanel(pane domain.PaneSnapshot, tab domain.TabSnapshot, 
 	// --- Selection-aware rendering ---
 	textWidth := max(1, paneWidth-2)
 	paneMode := m.paneInputModeFor(pane.ID)
-	displayLines := buildDisplayLines(pane, tab, textWidth, height, m.inputValueFor(pane.ID), m.scrollOffset(pane.ID), paneMode)
+	displayLines := m.buildDisplayLines(pane, tab, textWidth, height, m.inputValueFor(pane.ID), m.scrollOffset(pane.ID), paneMode)
 
 	startRow, startCol, endRow, endCol := m.selection.normalized()
 

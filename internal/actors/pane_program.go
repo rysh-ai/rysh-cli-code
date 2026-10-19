@@ -65,12 +65,21 @@ func (p *PaneActor) noteForegroundChange(pgid int) {
 // between the load and the store and publish the same transition twice, or drop
 // one entirely.
 func (p *PaneActor) syncForegroundProgram(pgid int) {
-	program := ""
+	comm := ""
 	if pgid > 0 && (p.shellPgid <= 0 || pgid != p.shellPgid) {
-		program = processName(pgid)
+		comm = processName(pgid)
 	}
 
 	p.programMu.Lock()
+	program := p.programNameLocked(pgid, comm)
+	// The pgid is refreshed even when the NAME is unchanged: a claude that
+	// restarts in place keeps its name and gets a new pid, and a stale pgid
+	// points the courier at a dead inbox socket.
+	if program == "" {
+		p.programPGID.Store(0)
+	} else {
+		p.programPGID.Store(int64(pgid))
+	}
 	prev, _ := p.programAtomic.Load().(string)
 	if program == prev {
 		p.programMu.Unlock()
@@ -83,6 +92,33 @@ func (p *PaneActor) syncForegroundProgram(pgid int) {
 	for _, ev := range events {
 		p.publishProcessEvent(ev.event, ev.program, pgid)
 	}
+}
+
+// programIdent is one identification: the program at pgid whose kernel name
+// was comm is called name.
+type programIdent struct {
+	pgid       int
+	comm, name string
+}
+
+// programNameLocked names the foreground program the way strict mode does
+// (foregroundCLI), so the native-installer claude, whose kernel name is its
+// version (F-15), is "claude" in `##pane list` and in MsgPaneProcess too. A
+// program that is not a known agent CLI keeps its kernel name.
+//
+// The argv read happens only when the pgid or the kernel name changed: the
+// poller calls this twice a second per pane, and a claude that runs for hours
+// is the same program for all of it. Callers hold programMu.
+func (p *PaneActor) programNameLocked(pgid int, comm string) string {
+	if comm == "" {
+		return ""
+	}
+	if c := p.programIdent; c.pgid == pgid && c.comm == comm {
+		return c.name
+	}
+	name := identifyCLI(pgid, comm)
+	p.programIdent = programIdent{pgid: pgid, comm: comm, name: name}
+	return name
 }
 
 // processEvent is one announcement: what happened, and to which program.
@@ -126,8 +162,9 @@ func (p *PaneActor) publishProcessEvent(event, program string, pgid int) {
 	})
 }
 
-// Program returns the pane's live foreground executable name, "" at the shell
-// prompt or where the platform cannot resolve it.
+// Program returns the pane's live foreground program name, "" at the shell
+// prompt or where the platform cannot resolve it. A known agent CLI is named
+// as the CLI ("claude"), not by its executable's file name ("2.1.296").
 func (p *PaneActor) Program() string {
 	s, _ := p.programAtomic.Load().(string)
 	return s

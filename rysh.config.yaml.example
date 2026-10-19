@@ -34,6 +34,25 @@ provider:
   api_url: ""                          # empty = https://api.anthropic.com
   max_tokens: 4096
 
+# Session-wide email transport. Both providers remain supported; switch with
+# `##email use imap-smtp` or `##email use mailgun`. Keep only references here —
+# store their values with `##secret set NAME` or in the process environment.
+email:
+  provider: "imap-smtp"               # imap-smtp | mailgun
+  address: "${EMAIL_ADDRESS}"
+  imap_host: "imap.example.com"
+  imap_port: 993
+  smtp_host: "smtp.example.com"
+  smtp_port: 587
+  username: "${EMAIL_USERNAME}"
+  password: "${EMAIL_PASSWORD}"
+  mailgun_domain: "${MAILGUN_SANDBOX_DOMAIN}"
+  mailgun_base_url: "${MAILGUN_BASE_URL}"
+  mailgun_api_key: "${MAILGUN_API_KEY}"
+  mailgun_webhook_signing_key: "${MAILGUN_WEBHOOK_SIGNING_KEY}"
+  # attachment_dir: "~/mail-files"    # where the email client saves attachments
+                                      # (daemon's machine); must exist. Default ~/Downloads, else home
+
 ui:
   shell: ""                            # empty = $SHELL or /bin/bash
   interactive_shell: true              # true (default): launch the shell with -i so it

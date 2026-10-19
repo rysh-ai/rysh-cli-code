@@ -124,6 +124,18 @@ func ryshCommandIsReadOnly(command string) bool {
 		return false
 	}
 	fields := strings.Fields(strings.ToLower(body))
+	if len(fields) >= 2 && fields[0] == "peer" {
+		switch fields[1] {
+		case "tail", "state", "members", "agents", "events", "help":
+			return true
+		}
+		if len(fields) >= 3 {
+			switch fields[1] + " " + fields[2] {
+			case "task list", "task show", "listen status", "project list", "board show":
+				return true
+			}
+		}
+	}
 	switch len(fields) {
 	case 0:
 		return false
@@ -177,6 +189,33 @@ func (t *RyshCommandTool) Execute(ctx context.Context, params json.RawMessage) (
 	}
 	if t.nc == nil {
 		return ErrOutput(ErrKindMissing, "NATS connection not available"), nil
+	}
+
+	// A peer request can take longer than the generic 600 ms output collector.
+	// Use the same acknowledged, silent request as native agents: a timeout
+	// must never be reported as "the command was accepted" for a remote post.
+	fields := strings.Fields(body)
+	if len(fields) > 0 && fields[0] == "peer" {
+		timeout := ryshCmdMaxWindow
+		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < timeout {
+			timeout = time.Until(deadline)
+		}
+		if timeout <= 0 || ctx.Err() != nil {
+			return ErrOutput(ErrKindTransient, "peer command cancelled"), nil
+		}
+		pub := msg.NewNATSPublisher(t.nc, msg.DefaultCodecRegistry())
+		reply, err := pub.Request(msg.T("ws", "inbox"), &msg.MsgCLIPeerCommand{AsPaneID: paneID, Args: fields[1:]}, timeout)
+		if err != nil {
+			return ErrOutputf(ErrKindTransient, "peer command delivery unconfirmed: %v", err), nil
+		}
+		response, ok := reply.(*msg.MsgCLIResponse)
+		if !ok {
+			return ErrOutput(ErrKindInternal, "invalid peer command response"), nil
+		}
+		if !response.OK {
+			return ErrOutput(ErrKindValidation, response.Error), nil
+		}
+		return &ToolOutput{Content: response.Output, Metadata: map[string]string{"command": "##" + body, "pane_id": paneID}}, nil
 	}
 
 	// Subscribe BEFORE publishing so fast commands cannot answer into the void.

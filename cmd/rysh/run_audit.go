@@ -100,6 +100,10 @@ type auditToolCall struct {
 	EndedAtMs     int64  `json:"ended_at_ms,omitempty"`
 	DurationMs    int64  `json:"duration_ms,omitempty"`
 	ResultSummary string `json:"result_summary,omitempty"`
+	// Incomplete is true when no tool_end was observed for this call (the run
+	// ended mid-call, or the end never reached the run client): the call is
+	// recorded, but its outcome is unknown.
+	Incomplete bool `json:"incomplete,omitempty"`
 	Iteration     int    `json:"iteration,omitempty"`
 	// Depth is the sub-agent depth (0 = top-level orchestrator).
 	Depth int `json:"depth,omitempty"`
@@ -279,6 +283,11 @@ func assembleRunAudit(c *runCollector, opts runOptions, providerName, sessionNam
 	if !diff.GitAvailable {
 		a.Limits = append(a.Limits, "run directory is not a git repository — file diffs cannot be derived")
 	}
+	c.mu.Lock()
+	if c.streamsIncomplete != "" {
+		a.Limits = append(a.Limits, c.streamsIncomplete)
+	}
+	c.mu.Unlock()
 	return a
 }
 
@@ -319,6 +328,9 @@ func pairToolCalls(steps []msg.MsgAgenticStep) []auditToolCall {
 			}
 			calls[i].ResultSummary = extractResultSummary(st.Title)
 		}
+	}
+	for i := range calls {
+		calls[i].Incomplete = calls[i].EndedAtMs == 0
 	}
 	return calls
 }

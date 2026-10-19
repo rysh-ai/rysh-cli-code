@@ -199,57 +199,80 @@ func flexPaneHeights(panes []domain.PaneSnapshot, totalHeight int) []int {
 }
 
 // laneWidths computes the lipgloss Width() values for lanes based on their flex
-// weights. totalWidth is the available content-width budget. The last lane
-// absorbs any rounding remainder.
+// weights. totalWidth is the available content-width budget. The last open
+// lane absorbs any rounding remainder.
+//
+// A collapsed lane takes collapsedLaneWidth and nothing else; the open lanes
+// share the rest by flex, exactly as if the folded lane were not there — three
+// equal lanes with the middle one folded split the width in two halves (less
+// the strip). If every lane is folded (no current daemon allows it; an old
+// snapshot might) they are all laid out open, so nothing vanishes.
 func laneWidths(lanes []domain.LaneRenderInfo, totalWidth int) []int {
 	if len(lanes) == 0 {
 		return nil
 	}
 
-	if totalWidth < len(lanes)*12 {
-		totalWidth = len(lanes) * 12
+	open := 0
+	for _, lane := range lanes {
+		if !lane.Collapsed {
+			open++
+		}
+	}
+	allOpen := open == 0
+	if allOpen {
+		open = len(lanes)
+	}
+	folded := func(lane domain.LaneRenderInfo) bool { return lane.Collapsed && !allOpen }
+	strips := (len(lanes) - open) * collapsedLaneWidth
+
+	if totalWidth < open*12+strips {
+		totalWidth = open*12 + strips
 	}
 
 	// Sum flex with a floor of 1 per lane so a zero-flex lane still counts and
 	// remainingFlex stays consistent with the per-iteration decrement below.
 	totalFlex := 0
-	for _, lane := range lanes {
-		flex := lane.Flex
-		if flex < 1 {
-			flex = 1
+	lastOpen := -1
+	for i, lane := range lanes {
+		if folded(lane) {
+			continue
 		}
-		totalFlex += flex
+		totalFlex += max(1, lane.Flex)
+		lastOpen = i
 	}
 
 	widths := make([]int, len(lanes))
-	remainingWidth := totalWidth
+	remainingWidth := totalWidth - strips
 	remainingFlex := totalFlex
+	remainingOpen := open
 	for i, lane := range lanes {
-		flex := lane.Flex
-		if flex < 1 {
-			flex = 1
+		if folded(lane) {
+			widths[i] = collapsedLaneWidth
+			continue
 		}
+		flex := max(1, lane.Flex)
 		var width int
 		switch {
-		case i == len(lanes)-1:
-			width = remainingWidth // last lane absorbs the rounding remainder
+		case i == lastOpen:
+			width = remainingWidth // last open lane absorbs the rounding remainder
 		case remainingFlex > 0:
 			width = remainingWidth * flex / remainingFlex
 		default:
-			width = remainingWidth / max(1, len(lanes)-i)
+			width = remainingWidth / max(1, remainingOpen)
 		}
-		// Floor EVERY lane to the 12-col minimum — the last lane and zero-flex
-		// lanes included. Earlier lanes can be clamped up past their proportional
-		// share, leaving the remainder short (even negative under lopsided flex);
-		// without a uniform floor the last lane, or a zero-flex middle lane,
-		// collapsed to <=0 and corrupted the render plus the mouse rects derived
-		// from it. Family-B of the layout-drift bug.
+		// Floor EVERY open lane to the 12-col minimum — the last lane and
+		// zero-flex lanes included. Earlier lanes can be clamped up past their
+		// proportional share, leaving the remainder short (even negative under
+		// lopsided flex); without a uniform floor the last lane, or a zero-flex
+		// middle lane, collapsed to <=0 and corrupted the render plus the mouse
+		// rects derived from it. Family-B of the layout-drift bug.
 		if width < 12 {
 			width = 12
 		}
 		widths[i] = width
 		remainingWidth -= width
 		remainingFlex -= flex
+		remainingOpen--
 	}
 
 	return widths

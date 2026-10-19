@@ -99,6 +99,11 @@ type MsgLaneEqualizeGroups struct{}
 type MsgGetLaneSnapshot struct {
 	LayoutOnly  bool `json:"layout_only,omitempty"`
 	NoHistories bool `json:"no_histories,omitempty"`
+	// HistoryPaneID narrows the histories NoHistories would otherwise keep to
+	// the one pane with this id; every other pane in the cascade omits them.
+	// Empty means all panes (the prior behaviour). See
+	// MsgGetWorkspaceSnapshot.ActiveHistoryOnly.
+	HistoryPaneID string `json:"history_pane_id,omitempty"`
 }
 
 // MsgLaneSnapshotReply carries the lane snapshot reply.
@@ -169,6 +174,11 @@ type MsgPaneGroupStackedPaneMove struct {
 type MsgGetPaneGroupSnapshot struct {
 	LayoutOnly  bool `json:"layout_only,omitempty"`
 	NoHistories bool `json:"no_histories,omitempty"`
+	// HistoryPaneID narrows the histories NoHistories would otherwise keep to
+	// the one pane with this id; every other pane in the cascade omits them.
+	// Empty means all panes (the prior behaviour). See
+	// MsgGetWorkspaceSnapshot.ActiveHistoryOnly.
+	HistoryPaneID string `json:"history_pane_id,omitempty"`
 }
 
 // MsgPaneGroupSnapshotReply carries the pane group snapshot reply.

@@ -107,7 +107,7 @@ func TestAnUnverifiableKillIsNotReportedDead(t *testing.T) {
 // pane 2026-08-11 — resumed, the essay prompt showing, esc-to-interrupt absent.
 // So resume must launch WITH the nudge, or it is a stop with extra steps.
 func TestResumeCommandCarriesTheNudgeInOneLaunch(t *testing.T) {
-	cmd := ansaResumeCommand("claude", "981c1920-pane-id", "--dangerously-skip-permissions")
+	cmd := agentCommandOf(ansaResumeCommand("claude", "981c1920-pane-id", "--dangerously-skip-permissions"))
 	if !strings.HasPrefix(cmd, "claude --resume 981c1920-pane-id") {
 		t.Errorf("resume must target the pinned session id: %q", cmd)
 	}
@@ -126,7 +126,7 @@ func TestResumeCommandCarriesTheNudgeInOneLaunch(t *testing.T) {
 // The args are optional (a pane with no stashed agent.args), but the nudge
 // never is.
 func TestResumeNudgesEvenWithNoStashedArgs(t *testing.T) {
-	cmd := ansaResumeCommand("claude", "pane-x", "")
+	cmd := agentCommandOf(ansaResumeCommand("claude", "pane-x", ""))
 	if cmd != "claude --resume pane-x "+shellQuote(ansaResumeNudge) {
 		t.Errorf("unexpected resume command with no args: %q", cmd)
 	}
@@ -143,7 +143,7 @@ func TestResumeNudgesEvenWithNoStashedArgs(t *testing.T) {
 // in a codex pane is not a wrong permission mode, it is the wrong PROGRAM
 // against an id that never existed.
 func TestACodexPaneResumesWithCodex(t *testing.T) {
-	cmd := ansaResumeCommand("codex", "", "--dangerously-bypass-approvals-and-sandbox")
+	cmd := agentCommandOf(ansaResumeCommand("codex", "", "--dangerously-bypass-approvals-and-sandbox"))
 	if !strings.HasPrefix(cmd, "codex resume --last") {
 		t.Errorf("a codex agent must be resumed by codex: %q", cmd)
 	}
@@ -186,7 +186,7 @@ func TestCodexSessionIdIsNeverThePaneId(t *testing.T) {
 	if got := nativeAgentSessionID("claude", "981c1920-pane-id", meta); got != "981c1920-pane-id" {
 		t.Errorf("claude's invariant is that the pane id IS the session id, got %q", got)
 	}
-	if cmd := ansaResumeCommand("codex", "", ""); !strings.HasPrefix(cmd, "codex resume --last") {
+	if cmd := agentCommandOf(ansaResumeCommand("codex", "", "")); !strings.HasPrefix(cmd, "codex resume --last") {
 		t.Errorf("no id means --last: %q", cmd)
 	}
 }
@@ -214,7 +214,9 @@ func TestCodexResumesByIdWhenOneIsKnown(t *testing.T) {
 // Falling back to claude is a wrong guess that fails visibly at the pane;
 // inventing `<unknown> resume` would be a receipt for a launch that cannot run.
 func TestAnUnknownAgentFallsBackToClaude(t *testing.T) {
-	if !strings.HasPrefix(ansaResumeCommand("gemini", "pane-x", ""), "claude --resume pane-x") {
+	// The line now runs through the agentenv scrub (exec-clean); the claude
+	// shape is the agent command inside it.
+	if !strings.Contains(ansaResumeCommand("gemini", "pane-x", ""), " exec-clean --agent claude -- claude --resume pane-x") {
 		t.Errorf("unknown agent must fall back to the known command shape")
 	}
 }
@@ -451,10 +453,10 @@ func TestARyshAgentWithNoCheckpointIsReportedIdle(t *testing.T) {
 // The claude/codex resume path is untouched: it still builds a CLI command
 // line. The native branch must not swallow the agents that DO have a process.
 func TestTheCLIResumePathStillBuildsACommand(t *testing.T) {
-	if cmd := ansaResumeCommand("claude", "pane-x", ""); !strings.HasPrefix(cmd, "claude --resume pane-x") {
+	if cmd := agentCommandOf(ansaResumeCommand("claude", "pane-x", "")); !strings.HasPrefix(cmd, "claude --resume pane-x") {
 		t.Errorf("claude resume changed: %q", cmd)
 	}
-	if cmd := ansaResumeCommand("codex", "", ""); !strings.HasPrefix(cmd, "codex resume --last") {
+	if cmd := agentCommandOf(ansaResumeCommand("codex", "", "")); !strings.HasPrefix(cmd, "codex resume --last") {
 		t.Errorf("codex resume changed: %q", cmd)
 	}
 }
@@ -541,4 +543,108 @@ func TestAPromptToAClaudePaneArmsNothing(t *testing.T) {
 	if a := tr.armedPanes(); len(a) != 0 {
 		t.Errorf("a pane owned by a program was sent a run-budget arm: %v", a)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// R12 (2026-10-07): a STOPPED agent stays stopped across a restart
+// ---------------------------------------------------------------------------
+
+// stampedFleetPane is a fleet pane fleetctl has stamped for the restart sweep.
+func stampedFleetPane(id string) ansaPane {
+	p := fleetPane(id)
+	p.Meta["agent.native"] = "1"
+	p.Meta["agent.kind"] = "claude"
+	p.Meta["fleet.agent"] = "claude"
+	return p
+}
+
+// A kill is a deliberate stop. The restart sweep resumes every pane that still
+// carries `agent.native`, so a kill that left it would bring a stopped fleet
+// back on the next session start — the double-drive R12 rules out.
+func TestAVerifiedKillDisarmsTheRestartSweep(t *testing.T) {
+	withFastKill(t)
+	tr := &fakeAnsaTransport{panes: []ansaPane{stampedFleetPane("pane-a")}, program: "claude"}
+	r := &ansaRouter{tr: tr}
+	out, refusal := r.KillFleet("")
+	if refusal != nil || !out[0].Dead {
+		t.Fatalf("precondition: want a verified kill, got %+v %v", out, refusal)
+	}
+	if !containsStr(tr.metaSet, "pane-a agent.native=") {
+		t.Errorf("a killed agent kept its resume stamp: %v", tr.metaSet)
+	}
+}
+
+// An agent that had already exited is just as stopped.
+func TestKillingAnAlreadyIdlePaneAlsoDisarms(t *testing.T) {
+	withFastKill(t)
+	tr := &fakeAnsaTransport{panes: []ansaPane{stampedFleetPane("pane-a")}, program: ""}
+	r := &ansaRouter{tr: tr}
+	r.KillFleet("")
+	if !containsStr(tr.metaSet, "pane-a agent.native=") {
+		t.Errorf("an idle stamped pane kept its resume stamp after a kill: %v", tr.metaSet)
+	}
+}
+
+// UNVERIFIED IS NOT STOPPED: an agent that may still be running keeps its
+// stamp, so the record never says "stopped" about a process that survived.
+func TestAnUnverifiedKillKeepsTheStamp(t *testing.T) {
+	withFastKill(t)
+	tr := &fakeAnsaTransport{panes: []ansaPane{stampedFleetPane("pane-a")}, program: "claude",
+		killSurvives: true, probeErrAfter: 1}
+	r := &ansaRouter{tr: tr}
+	out, _ := r.KillFleet("")
+	if out[0].Dead {
+		t.Fatalf("precondition: want an unverified kill, got %+v", out[0])
+	}
+	if len(tr.metaSet) != 0 {
+		t.Errorf("an unverified kill disarmed the stamp: %v", tr.metaSet)
+	}
+}
+
+// A pane the sweep would never resume is not written to at all.
+func TestKillLeavesAnUnstampedPaneAlone(t *testing.T) {
+	withFastKill(t)
+	tr := &fakeAnsaTransport{panes: []ansaPane{fleetPane("pane-a")}, program: "claude"}
+	r := &ansaRouter{tr: tr}
+	r.KillFleet("")
+	if len(tr.metaSet) != 0 {
+		t.Errorf("an unstamped pane got meta writes: %v", tr.metaSet)
+	}
+}
+
+// And the sweep, given the disarmed pane, delivers nothing to it.
+func TestADisarmedPaneIsNotResumedByTheSweep(t *testing.T) {
+	p := stampedFleetPane("pane-a")
+	delete(p.Meta, "agent.native")
+	deliveries, _, _ := nativeResumePlan([]ansaPane{p},
+		func(string) (string, error) { return "", nil },
+		func(string) bool { return true }, nil)
+	if len(deliveries) != 0 {
+		t.Errorf("a disarmed pane was resumed: %+v", deliveries)
+	}
+}
+
+// `##ansa resume` relaunches the agent, so the stamp comes back with it — or a
+// resumed fleet would silently stop being restart-safe. Only a pane that was
+// stamped before (it carries agent.kind) is re-armed: inventing kind and cwd
+// for a pane that never had them would resume it somewhere it never ran.
+func TestResumeReArmsAStampedPaneOnly(t *testing.T) {
+	stamped := stampedFleetPane("pane-a")
+	delete(stamped.Meta, "agent.native")
+	bare := fleetPane("pane-b")
+	tr := &fakeAnsaTransport{}
+	ansaRearmRestartSweep(tr, stamped)
+	ansaRearmRestartSweep(tr, bare)
+	if len(tr.metaSet) != 1 || tr.metaSet[0] != "pane-a agent.native=1" {
+		t.Errorf("want exactly pane-a re-armed, got %v", tr.metaSet)
+	}
+}
+
+func containsStr(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
 }

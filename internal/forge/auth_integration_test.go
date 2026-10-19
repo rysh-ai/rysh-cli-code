@@ -14,7 +14,7 @@ import (
 
 	sharedtools "github.com/rysh-ai/rysh-cli-shared/tools"
 
-	"github.com/rysh-ai/rysh-cli-code/internal/forge/runtime"
+	"github.com/rysh-ai/rysh-cli-shared/forge/runtime"
 )
 
 func secureSpec(baseURL string) []byte {

@@ -20,6 +20,10 @@ type MsgAgentCreate struct {
 	// the default, TRUE: an agent runs autonomously with no terminal, so a
 	// gated tool call would block on a dialog nobody can answer.
 	AutoApprove *bool `json:"auto_approve,omitempty"`
+	// SkillPath is the absolute skill file the agent was spawned from; ""
+	// for an inline agent. A meeting (MTG-12) re-reads the role from it
+	// without ${VAR} expansion, wherever the file lives.
+	SkillPath string `json:"skill_path,omitempty"`
 }
 
 // MsgAgentDelete deletes an agent by name.
@@ -70,6 +74,8 @@ type AgentInfo struct {
 	// agent runs on the shared checkout. Surfaced so the worktree lifecycle can
 	// refuse to auto-remove a worktree a live agent still claims.
 	WorktreePath string `json:"worktree_path,omitempty"`
+	// SkillPath is the skill file the agent was spawned from ("" = inline).
+	SkillPath string `json:"skill_path,omitempty"`
 }
 
 // MsgAgentPrompt sends a prompt to a named agent.

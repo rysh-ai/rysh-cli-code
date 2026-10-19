@@ -249,8 +249,34 @@ func (m *MemoryManagerActor) pushAllMemoryStates() {
 // JetStream KV persistence
 // ---------------------------------------------------------------------------
 
+// memoryModes are the conversation types that keep a memory summary.
+var memoryModes = []msg.ConversationType{msg.ConvAI, msg.ConvEmail, msg.ConvSlack, msg.ConvChatbot}
+
 func (m *MemoryManagerActor) kvKey(mode msg.ConversationType) string {
-	return fmt.Sprintf("%s/%s", m.paneID, string(mode))
+	return memoryKVKey(m.paneID, mode)
+}
+
+func memoryKVKey(paneID string, mode msg.ConversationType) string {
+	return fmt.Sprintf("%s/%s", paneID, string(mode))
+}
+
+// deleteMemoryKV removes a closed pane's memory summaries. They were never
+// deleted, so the bucket kept one per mode for every pane that ever ran (F-69).
+func deleteMemoryKV(nc *nats.Conn, paneID string) {
+	if nc == nil {
+		return
+	}
+	js, err := nc.JetStream()
+	if err != nil {
+		return
+	}
+	kv, err := js.KeyValue(memoryKVBucket)
+	if err != nil {
+		return // no bucket: nothing was ever summarized
+	}
+	for _, mode := range memoryModes {
+		_ = kv.Delete(memoryKVKey(paneID, mode))
+	}
 }
 
 func (m *MemoryManagerActor) getOrCreateBucket() (nats.KeyValue, error) {
@@ -293,8 +319,7 @@ func (m *MemoryManagerActor) restoreFromKV() {
 	}
 
 	// Try to restore each memory-capable mode.
-	modes := []msg.ConversationType{msg.ConvAI, msg.ConvEmail, msg.ConvSlack, msg.ConvChatbot}
-	for _, mode := range modes {
+	for _, mode := range memoryModes {
 		entry, err := kv.Get(m.kvKey(mode))
 		if err != nil {
 			continue // not found — normal for first run

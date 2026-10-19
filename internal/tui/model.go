@@ -115,9 +115,11 @@ const (
 	modeLayout       inputMode = "layout"       // ctrl+l: layout management mode
 	modeApproval     inputMode = "approval"     // waiting for user to approve/reject a tool action
 	modeRejectReason inputMode = "rejectreason" // typing rejection reason after pressing N
+	modeQuestion     inputMode = "question"     // typing an answer to ask_user's question (F-92)
 	modeRaw          inputMode = "raw"          // raw terminal mode: all keys forwarded to PTY
 	modeRawScroll    inputMode = "rawscroll"    // frozen scrollback view over an interactive (raw) pane
 	modeEmail        inputMode = "email"        // three-column email client over a pane in "email" content mode
+	modeCompany      inputMode = "company"      // the bound AI-native company over a pane in "company" content mode (design 037)
 	modeLLMPicker    inputMode = "llmpicker"    // interactive `##llm select`: model → scope → (optional) API key
 )
 
@@ -159,9 +161,13 @@ type Model struct {
 	width    int
 	height   int
 
-	paneRects []paneRect     // screen geometry for each visible pane
-	selection mouseSelection // current mouse text selection
-	detached  bool           // true when user detached via ctrl+o d
+	paneRects  []paneRect     // screen geometry for each visible pane
+	laneStrips []laneStrip    // screen geometry for each folded lane (lane_collapse_view.go)
+	selection  mouseSelection // current mouse text selection
+	detached   bool           // true when user detached via ctrl+o d
+	// restartRequested is set by `##rysh restart`: the TUI quits and main
+	// re-execs the binary to restart the session (see rysh_restart.go).
+	restartRequested bool
 
 	// dual-mode input state
 	paneInputModes map[string]string // pane ID → "shell" | "prompt"
@@ -257,6 +263,10 @@ type Model struct {
 	pipelineCh      chan pipelineOutputMsg // shared channel for pipeline output subscription
 	pipelineOutputs map[string]string      // tabID → accumulated live pipeline output
 
+	// clipboardFlashCh carries daemon-requested copies (`##board copy`,
+	// board_copy.go) into the status bar.
+	clipboardFlashCh chan clipboardFlashMsg
+
 	// Attention mechanism state.
 	attentionCh       chan attentionEventMsg
 	attentionState    map[string]*attentionInfo
@@ -328,6 +338,11 @@ type Model struct {
 	emailViews     map[string]*emailViewState
 	emailEventCh   chan emailEvent
 	activateModeCh chan activateModeItem
+	// Company view (design 037): per-pane cursor state, the latest snapshot
+	// the daemon's follower pushed, and the push channel.
+	companyViews   map[string]*companyViewState
+	companySnap    *msgpkg.CompanySnapshot
+	companyEventCh chan companyEvent
 
 	// agents-board (board_view.go, design 025): the session-wide threaded store,
 	// its live feed, and per-pane scroll state. The board is a PaneType, not a
@@ -349,6 +364,12 @@ type Model struct {
 	// whose target mode is not yet enabled in this snapshot; syncPaneInputs
 	// applies it as soon as the mode-enable propagates. Keyed by pane ID.
 	pendingActivate map[string]string
+
+	// meetingControls is each meeting pane's lifecycle-control panel state
+	// (MTG-6, meeting_controls.go); meetingPolling is true while a poll chain
+	// for the focused meeting pane is running.
+	meetingControls map[string]*meetingCtl
+	meetingPolling  bool
 
 	// lastWorkspaceHash is the FNV-1a hash of the raw bytes of the last applied
 	// workspace snapshot reply. A refresh whose reply bytes are identical is
@@ -541,11 +562,15 @@ func NewModel(cfg config.Config, logger *slog.Logger, b *bus.Bus) (Model, error)
 	// Structured email-client streams (email_view.go): inbox/detail/compose/changed
 	// pushes plus the activate-mode push.
 	emailEventCh, activateModeCh := setupEmailSubscriptions(b)
+	companyEventCh := setupCompanySubscriptions(b)
 	llmPickerCh := setupLLMPickerSubscription(b)
 
 	// Agents-board (design 025): restores KV history, then subscribes to the
 	// live feed. Returns a usable store on every failure path.
 	boardStores, boardKV, boardEventCh, boardSub := setupBoardSubscriptions(b)
+
+	// `##board copy`: the daemon hands the finished text here for OSC 52.
+	clipboardFlashCh := setupClipboardWriteSubscription(b)
 
 	m := Model{
 		cfg:                cfg,
@@ -571,6 +596,7 @@ func NewModel(cfg config.Config, logger *slog.Logger, b *bus.Bus) (Model, error)
 		pipelineCh:         pipelineCh,
 		pipelineOutputs:    make(map[string]string),
 		attentionCh:        attentionCh,
+		clipboardFlashCh:   clipboardFlashCh,
 		remoteFullscreenCh: remoteFullscreenCh,
 		attentionState:     make(map[string]*attentionInfo),
 		attentionLastBell:  make(map[string]time.Time),
@@ -590,6 +616,8 @@ func NewModel(cfg config.Config, logger *slog.Logger, b *bus.Bus) (Model, error)
 		emailViews:         make(map[string]*emailViewState),
 		emailEventCh:       emailEventCh,
 		activateModeCh:     activateModeCh,
+		companyViews:       make(map[string]*companyViewState),
+		companyEventCh:     companyEventCh,
 		boards:             boardStores,
 		boardKV:            boardKV,
 		boardConn:          boardNATSConn(b),
@@ -688,7 +716,7 @@ func (m Model) activePaneIsAgenticInFlight() bool {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.refreshCmd(), tickCmd(), m.reconcileWorkspacesCmd(), m.listenApprovalRequests(), m.listenPipelineOutput(), m.listenAttentionEvents(), m.listenMirrorDirty(), m.listenRemoteFullscreen(), m.listenContentCmd(), m.listenLayoutDirty(), m.listenRawDirtyCmd(), m.listenVTFrameCmd(), m.listenMCPStatusCmd(), m.listenEmailEventCmd(), m.listenActivateModeCmd(), m.listenLLMPickerCmd(), m.listenBoardEventCmd(), m.askRecorderCmd(), reconcileTickCmd())
+	return tea.Batch(m.refreshCmd(), tickCmd(), m.reconcileWorkspacesCmd(), m.listenApprovalRequests(), m.listenPipelineOutput(), m.listenAttentionEvents(), m.listenMirrorDirty(), m.listenRemoteFullscreen(), m.listenContentCmd(), m.listenLayoutDirty(), m.listenRawDirtyCmd(), m.listenVTFrameCmd(), m.listenMCPStatusCmd(), m.listenEmailEventCmd(), m.listenActivateModeCmd(), m.listenCompanyEventCmd(), m.companyQueryCmd(), m.listenLLMPickerCmd(), m.listenBoardEventCmd(), m.askRecorderCmd(), m.listenClipboardFlashCmd(), reconcileTickCmd())
 }
 
 // reconcileWorkspacesCmd asks the daemon (once, at startup/attach) to reconcile
@@ -796,7 +824,9 @@ func (m Model) refreshSnapshotCmd(fresh bool) tea.Cmd {
 		// We use nc.Request directly so the NATS reply-to is set automatically.
 		// LayoutOnly: the recurring refresh fetches the content-free layout tree;
 		// per-pane content is streamed and accumulated separately.
-		payload, _ := json.Marshal(&msgpkg.MsgGetWorkspaceSnapshot{LayoutOnly: true, Fresh: fresh})
+		// ActiveHistoryOnly: activeHistory() reads only the active pane's
+		// history, so the daemon leaves every other pane's off the cascade.
+		payload, _ := json.Marshal(&msgpkg.MsgGetWorkspaceSnapshot{LayoutOnly: true, Fresh: fresh, ActiveHistoryOnly: true})
 		envData, _ := json.Marshal(msgpkg.NATSEnvelope{
 			TypeTag: msgpkg.TagGetWorkspaceSnapshot,
 			Payload: payload,

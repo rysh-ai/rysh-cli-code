@@ -38,8 +38,12 @@ func (w *WorkspaceActor) cmdLaneList(out *strings.Builder) {
 		if lane.ActivePaneID == w.activePaneID {
 			marker = "> "
 		}
-		fmt.Fprintf(out, "%s[%d] %-16s id=%.8s  flex=%d  groups=%d  panes=%d\n",
-			marker, li+1, lane.Name, lane.ID, lane.Flex, len(lane.PaneGroups), totalPanes)
+		folded := ""
+		if lane.Collapsed {
+			folded = "  collapsed"
+		}
+		fmt.Fprintf(out, "%s[%d] %-16s id=%.8s  flex=%d  groups=%d  panes=%d%s\n",
+			marker, li+1, lane.Name, lane.ID, lane.Flex, len(lane.PaneGroups), totalPanes, folded)
 	}
 	ryshWriter(out).Rule()
 }
@@ -171,7 +175,7 @@ func (w *WorkspaceActor) cmdSnap(out *strings.Builder, paneID, target string) {
 		w.failRysh("unknown snap target: %q", target)
 		fmt.Fprintf(out, "  ##snap             copy private buffer to clipboard (default)\n")
 		fmt.Fprintf(out, "  ##snap private     copy private buffer to clipboard\n")
-		fmt.Fprintf(out, "  ##snap public      copy public (redacted) buffer to clipboard\n\n")
+		fmt.Fprintf(out, "  ##snap public      copy public output buffer to clipboard (as shown, not filtered)\n\n")
 		return
 	}
 

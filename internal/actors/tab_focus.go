@@ -3,6 +3,7 @@
 package actors
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
@@ -70,20 +71,105 @@ func (t *TabActor) ActiveLaneName() string {
 // Focus navigation
 // ---------------------------------------------------------------------------
 
+// focusLaneLeft and focusLaneRight step one lane at a time and DO land on a
+// folded lane: its strip takes the focus colour, and layout mode `o` opens it.
+// Skipping strips made a folded lane unreachable from the keyboard.
 func (t *TabActor) focusLaneLeft() {
-	if len(t.laneRefs) < 2 || t.activeLane <= 0 {
-		return
+	if i := t.activeLane - 1; i >= 0 {
+		t.activeLane = i
+		t.updateActivePaneFromLane()
 	}
-	t.activeLane--
-	t.updateActivePaneFromLane()
 }
 
 func (t *TabActor) focusLaneRight() {
-	if len(t.laneRefs) < 2 || t.activeLane >= len(t.laneRefs)-1 {
+	if i := t.activeLane + 1; i < len(t.laneRefs) {
+		t.activeLane = i
+		t.updateActivePaneFromLane()
+	}
+}
+
+// setLaneCollapsed folds lane laneID to a strip, or opens it. The open lanes
+// share the width (the TUI does that from the snapshot's Collapsed flag); here
+// only the rules live:
+//
+//   - the last open lane cannot fold — something must stay on screen;
+//   - folding the focused lane moves focus to the nearest open lane, right
+//     first, so typing never goes into a pane nothing draws.
+//
+// Returns an error text for the caller to report, "" on success. Folding a
+// folded lane, or opening an open one, succeeds and changes nothing.
+func (t *TabActor) setLaneCollapsed(laneID string, collapsed bool) string {
+	idx := -1
+	for i, lr := range t.laneRefs {
+		if lr.id == laneID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return fmt.Sprintf("lane %q not found", laneID)
+	}
+	lr := t.laneRefs[idx]
+	if collapsed == lr.collapsed {
+		return ""
+	}
+	if collapsed {
+		open := 0
+		for _, o := range t.laneRefs {
+			if !o.collapsed {
+				open++
+			}
+		}
+		if open <= 1 {
+			return "cannot collapse the last open lane"
+		}
+	}
+	lr.collapsed = collapsed
+	if collapsed && idx == t.activeLane {
+		if j := t.nearestOpenLane(idx); j >= 0 {
+			t.activeLane = j
+			t.updateActivePaneFromLane()
+		}
+	}
+	return ""
+}
+
+// settleCollapsedLanes restores the two invariants after a lane is removed:
+// at least one lane is open (deleting the last open lane opens the folded
+// ones rather than leaving a screen of strips), and focus is not on a folded
+// lane when an open one exists.
+func (t *TabActor) settleCollapsedLanes() {
+	open := false
+	for _, lr := range t.laneRefs {
+		if !lr.collapsed {
+			open = true
+			break
+		}
+	}
+	if !open {
+		for _, lr := range t.laneRefs {
+			lr.collapsed = false
+		}
 		return
 	}
-	t.activeLane++
-	t.updateActivePaneFromLane()
+	if t.activeLane >= 0 && t.activeLane < len(t.laneRefs) && t.laneRefs[t.activeLane].collapsed {
+		if j := t.nearestOpenLane(t.activeLane); j >= 0 {
+			t.activeLane = j
+		}
+	}
+}
+
+// nearestOpenLane returns the index of the open lane closest to idx, looking
+// right before left at each distance, or -1 when every other lane is folded.
+func (t *TabActor) nearestOpenLane(idx int) int {
+	for d := 1; d < len(t.laneRefs); d++ {
+		for _, j := range []int{idx + d, idx - d} {
+			if j >= 0 && j < len(t.laneRefs) && !t.laneRefs[j].collapsed {
+				return j
+			}
+		}
+	}
+	return -1
 }
 
 func (t *TabActor) focusLaneUp() {
@@ -263,7 +349,7 @@ func (t *TabActor) refreshAllLanePaneCounts() {
 
 // updateActivePaneFromLane queries the active lane via NATS request/reply.
 func (t *TabActor) updateActivePaneFromLane() {
-	if len(t.laneRefs) == 0 || t.activeLane < 0 || t.activeLane >= len(t.laneRefs) {
+	if t.pub == nil || len(t.laneRefs) == 0 || t.activeLane < 0 || t.activeLane >= len(t.laneRefs) {
 		return
 	}
 	lr := t.laneRefs[t.activeLane]

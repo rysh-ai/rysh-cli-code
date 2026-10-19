@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/asynkron/protoactor-go/actor"
@@ -26,7 +28,27 @@ type Config struct {
 	URL         string // NATS URL, used when Mode == "external"
 	DataDir     string // JetStream storage directory (empty = auto)
 	SessionName string // used to isolate data dirs per session
-	Port        int    // TCP port for embedded NATS server (0 = auto)
+	// Port is the TCP port for the embedded NATS server. 0 means
+	// kernel-assigned: a private server on a free port, never a probe of an
+	// existing one. The 24242 default belongs to config, not to this package —
+	// defaulting here is what once sent `port: 0` test daemons into the
+	// developer's live NATS.
+	Port int
+	// Attach marks a client of a session some other process owns — the TUI of
+	// `rysh attach`. The owning daemon has already declared every bucket, so an
+	// attaching Bus looks them up instead: one StreamInfo per bucket rather than
+	// an AccountInfo plus a stream create. A slow shared server used to fail
+	// attach outright at "create rysh-workspace-<session> KV: context deadline
+	// exceeded" while the daemon itself was fine.
+	Attach bool
+	// Workspace is this daemon's project root (the session record's Path). A
+	// guest compares it with the host's; an owner answers it on
+	// HostIdentitySubject. Design 028 §9 limit 7.
+	Workspace string
+	// HostQueryTimeout bounds a guest's question to the host daemon (0 = 300ms).
+	HostQueryTimeout time.Duration
+	// Logger receives the guest/host identity lines (nil = slog.Default()).
+	Logger *slog.Logger
 }
 
 // Bus wraps either an embedded NATS server or an external connection.
@@ -55,15 +77,24 @@ type Bus struct {
 	// rather than starting its own. A guest outlives its server, so it is the
 	// only case that has to survive that server going away and coming back.
 	guest bool
+	// attach mirrors Config.Attach: look buckets up, declare only if missing.
+	attach bool
 	// kvConfigs are the bucket declarations this Bus depends on, recorded as
 	// they are created so redeclareBuckets can re-declare them. See ensureKV.
 	kvConfigs []*nats.KeyValueConfig
 	objConfig *nats.ObjectStoreConfig
+
+	// guestOf is what a guest knows about the server it joined (guest_of in
+	// /health and ##rysh status). Filled by the background host query, hence
+	// the mutex. See guest_of.go.
+	guestMu sync.Mutex
+	guestOf GuestOf
+	log     *slog.Logger
 }
 
 // New creates and starts a Bus according to cfg.
 func New(cfg Config) (*Bus, error) {
-	b := &Bus{}
+	b := &Bus{attach: cfg.Attach, log: cfg.Logger}
 
 	switch cfg.Mode {
 	case "external":
@@ -77,9 +108,12 @@ func New(cfg Config) (*Bus, error) {
 		b.nc = nc
 
 	default: // "embedded"
+		// A kernel-assigned port has no existing server to join, so it skips
+		// the probe below and always starts its own.
 		cliPort := cfg.Port
-		if cliPort <= 0 {
-			cliPort = 24242
+		private := cliPort <= 0
+		if private {
+			cliPort = server.RANDOM_PORT
 		}
 
 		// Try connecting to an existing NATS server on the configured port.
@@ -100,17 +134,21 @@ func New(cfg Config) (*Bus, error) {
 		// web viewer and keeps writing "state": "running" to its session file,
 		// while every ## command against it times out on <session>.ws.inbox
 		// forever. Alive, addressable-looking, and off the bus.
-		existingURL := fmt.Sprintf("nats://127.0.0.1:%d", cliPort)
-		nc, err := nats.Connect(existingURL,
-			nats.MaxReconnects(-1),
-			nats.ReconnectWait(500*time.Millisecond),
-			nats.Timeout(1*time.Second),
-		)
+		var nc *nats.Conn
+		err := errors.New("private server requested")
+		if !private {
+			nc, err = nats.Connect(fmt.Sprintf("nats://127.0.0.1:%d", cliPort),
+				nats.MaxReconnects(-1),
+				nats.ReconnectWait(500*time.Millisecond),
+				nats.Timeout(1*time.Second),
+			)
+		}
 		if err == nil {
 			// An existing NATS server is running — reuse it.
 			b.nc = nc
 			b.clientPort = cliPort
 			b.guest = true
+			b.joinedAsGuest(cfg)
 		} else {
 			// No server running — start an embedded one. rysh state is always
 			// project-local: when no data dir was configured, fall back to
@@ -151,6 +189,9 @@ func New(cfg Config) (*Bus, error) {
 			}
 			b.ns = ns
 			b.clientPort = cliPort
+			if addr, ok := ns.Addr().(*net.TCPAddr); ok {
+				b.clientPort = addr.Port // the real port when kernel-assigned
+			}
 
 			nc, err := nats.Connect(nats.DefaultURL, nats.InProcessServer(ns))
 			if err != nil {
@@ -158,11 +199,20 @@ func New(cfg Config) (*Bus, error) {
 				return nil, fmt.Errorf("connect to embedded NATS: %w", err)
 			}
 			b.nc = nc
+			b.answerHostIdentity(cfg)
 		}
 	}
 
 	// Obtain JetStream context.
-	js, err := b.nc.JetStream()
+	//
+	// An attaching client gets a longer API wait than the 5s default: the
+	// server is shared by every session on the machine, and waiting beats
+	// refusing to open a session whose daemon is healthy.
+	var jsOpts []nats.JSOpt
+	if cfg.Attach {
+		jsOpts = append(jsOpts, nats.MaxWait(attachAPIWait))
+	}
+	js, err := b.nc.JetStream(jsOpts...)
 	if err != nil {
 		b.nc.Close()
 		if b.ns != nil {
@@ -380,16 +430,34 @@ func (b *Bus) ClientPort() int { return b.clientPort }
 //
 // Any bucket added to New must go through here, or it silently becomes the one
 // bucket that does not come back.
+//
+// An attaching Bus (Config.Attach) looks the bucket up first and declares it
+// only when it is missing, e.g. against a daemon older than the bucket.
 func (b *Bus) ensureKV(cfg *nats.KeyValueConfig) (nats.KeyValue, error) {
 	b.kvConfigs = append(b.kvConfigs, cfg)
+	if b.attach {
+		kv, err := b.js.KeyValue(cfg.Bucket)
+		if !errors.Is(err, nats.ErrBucketNotFound) {
+			return kv, err
+		}
+	}
 	return b.js.CreateKeyValue(cfg)
 }
 
 // ensureObjectStore is ensureKV's counterpart for the images object store.
 func (b *Bus) ensureObjectStore(cfg *nats.ObjectStoreConfig) (nats.ObjectStore, error) {
 	b.objConfig = cfg
+	if b.attach {
+		store, err := b.js.ObjectStore(cfg.Bucket)
+		if !errors.Is(err, nats.ErrStreamNotFound) && !errors.Is(err, nats.ErrBucketNotFound) {
+			return store, err
+		}
+	}
 	return b.js.CreateObjectStore(cfg)
 }
+
+// attachAPIWait is the JetStream API timeout for an attaching Bus.
+const attachAPIWait = 20 * time.Second
 
 // watchConnection wires the connection callbacks for a guest Bus — one that
 // borrowed another process's NATS server and therefore has to outlive it.

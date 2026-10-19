@@ -230,6 +230,15 @@ type MsgEqualizeAll struct{}
 // MsgSwapPane swaps the active lane position with the next one.
 type MsgSwapPane struct{}
 
+// MsgLaneCollapse folds a lane of the active tab to a strip, or opens it
+// (TUI → WorkspaceActor; the key and mouse twin of `##lane collapse|expand|
+// toggle`). Verb is "collapse", "expand" or "toggle"; Lane is a lane id,
+// 1-based index or name, "" for the active lane, or "all" with "expand".
+type MsgLaneCollapse struct {
+	Verb string `json:"verb"`
+	Lane string `json:"lane,omitempty"`
+}
+
 // ---------------------------------------------------------------------------
 // CLI → WorkspaceActor (rysh.ws.{session}.inbox, request/reply)
 // ---------------------------------------------------------------------------
@@ -316,4 +325,19 @@ type MsgCLIRyshCommand struct {
 	TabID   string `json:"tab_id"`  // empty = active tab
 	PaneID  string `json:"pane_id"` // empty = active (or TabID's active) pane
 	Command string `json:"command"` // rysh command body WITHOUT leading "##"
+}
+
+// MsgCLICronApply carries an edited cron job Input back from `rysh cron apply
+// <name> <file>` — the non-interactive half of `##cron edit <name>`, which
+// opens $EDITOR on a temp file in the job's pane and chains this command onto
+// its exit so the edit takes effect the moment the editor quits.
+//
+// It is its own CLI message rather than a `##cron edit-apply ...` run through
+// MsgCLIRyshCommand for the same reason MsgCLIBoardPost and MsgCLIAnsaSend
+// are: the file content is arbitrary text (quotes, newlines, embedded "##"
+// lines), and smuggling that through a token-parsed command line is unsafe as
+// well as lossy. Sending it as a typed field sidesteps parsing entirely.
+type MsgCLICronApply struct {
+	JobName string `json:"job_name"`
+	Input   string `json:"input"` // new Input, read verbatim from the edited file
 }

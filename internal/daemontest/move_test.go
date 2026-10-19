@@ -66,6 +66,31 @@ func layout(t *testing.T, s *daemontest.Session) (lanes, stacks int) {
 // The command is re-sent rather than waited on once: it is typed into a pane's
 // shell, and a shell still starting up drops what it never read (the same
 // reason readPaneIdentity retries).
+// shellDir is the directory pane shells write their pids into. shellPID asks
+// every pane in the workspace to write and re-asks while it waits, so a late
+// shell can still write after the test body returns. t.TempDir taken after
+// daemontest.Fresh is removed BEFORE the session stops (cleanups run last in,
+// first out), and that late write failed CI with "TempDir RemoveAll cleanup:
+// directory not empty". Registered before Fresh, this cleanup runs after the
+// session is stopped, and retries in case a shell was killed mid-write.
+func shellDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "rysh-move-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for i := 0; i < 50; i++ {
+			if err = os.RemoveAll(dir); err == nil {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Errorf("remove %s: %v", dir, err)
+	})
+	return dir
+}
+
 func shellPID(t *testing.T, s *daemontest.Session, paneID, dir string) string {
 	t.Helper()
 	dump := filepath.Join(dir, "pid-"+paneID)
@@ -97,8 +122,8 @@ func shellPID(t *testing.T, s *daemontest.Session, paneID, dir string) string {
 // lane (which drops the lane, the case that would have killed a pane spawned as
 // its group's child) and one that creates a fresh lane for it.
 func TestMovePaneKeepsItsShellAlive(t *testing.T) {
+	dir := shellDir(t) // before Fresh: removed only after the daemon stops
 	s := daemontest.Fresh(t)
-	dir := t.TempDir()
 
 	s.MustSucceed(t, "##new lane")
 	ids := paneIDs(t, s)
@@ -140,8 +165,8 @@ func TestMovePaneKeepsItsShellAlive(t *testing.T) {
 // TestMoveOutUnstacksWithoutRestarting covers the reverse of stacking: a pane
 // leaves the stack it shares and takes a stack of its own in the same lane.
 func TestMoveOutUnstacksWithoutRestarting(t *testing.T) {
+	dir := shellDir(t) // before Fresh: removed only after the daemon stops
 	s := daemontest.Fresh(t)
-	dir := t.TempDir()
 
 	s.MustSucceed(t, "##new stack 1") // second pane in the active stack
 	ids := paneIDs(t, s)
@@ -172,8 +197,8 @@ func TestMoveOutUnstacksWithoutRestarting(t *testing.T) {
 // wrong is the panes arriving as separate stacks (each pane creating its own)
 // rather than as the one stack they were.
 func TestMoveStackMovesEveryPaneAsOne(t *testing.T) {
+	dir := shellDir(t) // before Fresh: removed only after the daemon stops
 	s := daemontest.Fresh(t)
-	dir := t.TempDir()
 
 	s.MustSucceed(t, "##new stack 2") // three panes in one stack
 	s.MustSucceed(t, "##new lane")    // a second lane to move it into
@@ -208,8 +233,8 @@ func TestMoveStackMovesEveryPaneAsOne(t *testing.T) {
 // move is one stack move per stack, and every pane has to end up in ONE lane in
 // the destination tab rather than one lane each.
 func TestMoveLaneToNewTabCarriesItsPanes(t *testing.T) {
+	dir := shellDir(t) // before Fresh: removed only after the daemon stops
 	s := daemontest.Fresh(t)
-	dir := t.TempDir()
 
 	s.MustSucceed(t, "##new lane")            // lane 2, so lane 1 can leave
 	s.MustSucceed(t, "##lane name departing") // the name must travel with it

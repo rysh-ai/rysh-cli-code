@@ -241,42 +241,8 @@ func TestStateRejectsAnUnknownValue(t *testing.T) {
 	}
 }
 
-// TestTheCapRefusesTheFourthFleetUp is founder gate `D-14`, ruled at 3.
-//
-// ENFORCED IN THE REGISTRY, NOT IN THE DRIVER, and this test is what makes that
-// meaningful: a cap the driver respects holds until somebody runs `fleetctl up`
-// twice by hand, or a second driver starts, or a script loops.
-func TestTheCapRefusesTheFourthFleetUp(t *testing.T) {
-	r := New()
-	for _, n := range []string{"epic-01", "epic-02", "epic-03", "epic-04"} {
-		mustRegister(t, r, Fleet{Name: n})
-	}
-
-	for _, n := range []string{"epic-01", "epic-02", "epic-03"} {
-		if err := r.SetState(n, StateUp); err != nil {
-			t.Fatalf("SetState(%s, up): %v", n, err)
-		}
-	}
-
-	err := r.SetState("epic-04", StateUp)
-	if err == nil {
-		t.Fatal("a fourth fleet came up; the cap is not enforced")
-	}
-	// The refusal must NAME what is already up, or the operator cannot tell
-	// which fleet to take down first.
-	for _, want := range []string{"epic-01", "epic-02", "epic-03"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the refusal does not name %q: %v", want, err)
-		}
-	}
-	if got := r.Get("epic-04").State; got != StateRegistered {
-		t.Fatalf("the refused fleet is now %q; a refusal must change nothing", got)
-	}
-}
-
-// TestRegisteringIsFreeUnderTheCap — registered fleets cost a row and nothing
-// else, which is what lets a driver register twenty-five and promote three.
-func TestRegisteringIsFreeUnderTheCap(t *testing.T) {
+// TestRegisteringIsFree — registered fleets cost a row and nothing else.
+func TestRegisteringIsFree(t *testing.T) {
 	r := New()
 	for i := 0; i < 25; i++ {
 		name := "epic-" + string(rune('a'+i%26))
@@ -289,30 +255,8 @@ func TestRegisteringIsFreeUnderTheCap(t *testing.T) {
 	}
 }
 
-// TestASlotFreesWhenAFleetGoesDown — the promote-the-next loop the driver runs.
-func TestASlotFreesWhenAFleetGoesDown(t *testing.T) {
-	r := New()
-	for _, n := range []string{"a", "b", "c", "d"} {
-		mustRegister(t, r, Fleet{Name: n})
-		if n != "d" {
-			if err := r.SetState(n, StateUp); err != nil {
-				t.Fatalf("SetState(%s, up): %v", n, err)
-			}
-		}
-	}
-	if err := r.SetState("d", StateUp); err == nil {
-		t.Fatal("the cap did not hold")
-	}
-	if err := r.SetState("a", StateDown); err != nil {
-		t.Fatalf("SetState(a, down): %v", err)
-	}
-	if err := r.SetState("d", StateUp); err != nil {
-		t.Fatalf("a slot freed but the next fleet was still refused: %v", err)
-	}
-}
-
 // TestAFleetAlreadyUpCanBeReAffirmed: a driver that re-registers and re-marks
-// its own fleet up must not be refused by the cap for a slot it already holds.
+// its own fleet up must not be refused.
 func TestAFleetAlreadyUpCanBeReAffirmed(t *testing.T) {
 	r := New()
 	for _, n := range []string{"a", "b", "c"} {
@@ -323,5 +267,62 @@ func TestAFleetAlreadyUpCanBeReAffirmed(t *testing.T) {
 	}
 	if err := r.SetState("b", StateUp); err != nil {
 		t.Fatalf("re-affirming a fleet that is already up was refused: %v", err)
+	}
+}
+
+// TestR11AnyNumberOfFleetsCanBeUp — founder ruling R11 (2026-10-07) retired
+// D-14's three-fleet cap. The registry records state; it no longer rations it.
+// The limit on spend is the session token-ceiling check fleetctl makes before
+// it launches anything, not a count of rows here.
+func TestR11AnyNumberOfFleetsCanBeUp(t *testing.T) {
+	r := New()
+	names := []string{"epic-01", "epic-02", "epic-03", "epic-04", "epic-05"}
+	for _, n := range names {
+		mustRegister(t, r, Fleet{Name: n})
+	}
+	for _, n := range names {
+		if err := r.SetState(n, StateUp); err != nil {
+			t.Fatalf("SetState(%s, up) refused with no cap in force: %v", n, err)
+		}
+	}
+	for _, n := range names {
+		if got := r.Get(n).State; got != StateUp {
+			t.Fatalf("%s is %q, want %q", n, got, StateUp)
+		}
+	}
+
+	// down and back up are both plain transitions.
+	if err := r.SetState("epic-04", StateDown); err != nil {
+		t.Fatalf("SetState(down): %v", err)
+	}
+	if got := r.Get("epic-04").State; got != StateDown {
+		t.Fatalf("epic-04 is %q, want %q", got, StateDown)
+	}
+	if err := r.SetState("epic-04", StateUp); err != nil {
+		t.Fatalf("SetState(up) after down: %v", err)
+	}
+}
+
+// TestR11StateNamesStillValidate — retiring the cap retires nothing else:
+// an unknown state and an unknown fleet are still refused, and a refusal
+// changes nothing.
+func TestR11StateNamesStillValidate(t *testing.T) {
+	r := New()
+	mustRegister(t, r, Fleet{Name: "a"})
+	for _, bad := range []string{"failed", "UP", "", "running"} {
+		if err := r.SetState("a", bad); err == nil {
+			t.Errorf("SetState(%q) was accepted; only registered, up and down are states", bad)
+		}
+	}
+	if got := r.Get("a").State; got != StateRegistered {
+		t.Fatalf("a refused transition changed the state to %q", got)
+	}
+	if err := r.SetState("nosuch", StateUp); err == nil {
+		t.Error("SetState on an unregistered fleet was accepted")
+	}
+	for _, ok := range []string{StateRegistered, StateUp, StateDown} {
+		if err := r.SetState("a", ok); err != nil {
+			t.Errorf("SetState(%q): %v", ok, err)
+		}
 	}
 }

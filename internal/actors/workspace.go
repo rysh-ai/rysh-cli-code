@@ -5,6 +5,7 @@ package actors
 import (
 	"fmt"
 	"log/slog"
+	"github.com/rysh-ai/rysh-cli-code/internal/bus"
 	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"strings"
 	"sync/atomic"
@@ -20,7 +21,9 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 	"github.com/rysh-ai/rysh-cli-code/internal/gateway"
 	"github.com/rysh-ai/rysh-cli-code/internal/limits"
+	"github.com/rysh-ai/rysh-cli-code/internal/meeting"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
+	coord "github.com/rysh-ai/rysh-cli-code/internal/peercoord"
 	"github.com/rysh-ai/rysh-cli-code/internal/policy"
 	"github.com/rysh-ai/rysh-cli-code/internal/proxy"
 	"github.com/rysh-ai/rysh-cli-code/internal/replay"
@@ -44,6 +47,7 @@ type tabInfo struct {
 //
 // All fields are unguarded -- the proto.actor mailbox guarantees sequential Receive().
 type WorkspaceActor struct {
+	peerRuntime *coord.Runtime
 	// ryshFail is the failure recorded by the ## command currently in flight,
 	// or nil. Set by failRysh, drained by handleRyshCommand — see the failure
 	// section of workspace_out.go for why it lives here and why that is safe.
@@ -62,6 +66,13 @@ type WorkspaceActor struct {
 	cfg                config.Config
 	pub                *msg.NATSPublisher
 	agSetup            *agentic.Setup
+	meeting            *meeting.Manager
+	// Meeting panes (design 043, workspace_meeting_cmd.go): pane id → its
+	// registry id; meetingSend is a test seam; meetingRestored closes once
+	// restored meeting panes are re-registered.
+	meetingPanes    map[string]meetingPaneInfo
+	meetingSend     func(any)
+	meetingRestored chan struct{}
 	nc                 *nats.Conn
 	wKV                nats.KeyValue // rysh-workspace bucket
 	paneKV             nats.KeyValue // rysh-panes bucket
@@ -200,6 +211,14 @@ type WorkspaceActor struct {
 	snapStructCacheTime  time.Time
 	snapStructCacheValid bool
 
+	// Active-pane-history snapshot cache: the layout snapshot with command
+	// history for one pane only — the TUI's fetch (ActiveHistoryOnly). The pane
+	// it was built for is part of the key.
+	snapActiveHistCache      domain.WorkspaceSnapshot
+	snapActiveHistCachePane  string
+	snapActiveHistCacheTime  time.Time
+	snapActiveHistCacheValid bool
+
 	// Workspace-wide unique alias registry.
 	usedAliases map[string]struct{}
 
@@ -216,6 +235,9 @@ type WorkspaceActor struct {
 
 	// Web UI server (started via ##rysh web start).
 	webServer *web.Server
+	// guestOf is the daemon Bus's GuestOf (design 028 §9 limit 7), shown by
+	// `##rysh status` and /health. nil in tests and attach-only builds.
+	guestOf func() (bus.GuestOf, bool)
 
 	// webSettings is how THIS session is served — bind address, shared door and
 	// tunnel — loaded once from .rysh/web/<session>.json (falling back to the
@@ -292,17 +314,17 @@ type WorkspaceActor struct {
 	// asciicast export. nil unless [replay] enabled.
 	replay *replay.Capture
 
-	// Active ##replay play run (design 006 §3.2). Written only from the actor
-	// goroutine; the Player's own methods are goroutine-safe. nil or finished
-	// when no playback is running.
-	replayPlayer *replay.Player
+	// replayPanes maps each dedicated read-only replay pane (design 006 v2)
+	// to the controlled playback rendering into it. Playbacks are independent
+	// (E-15): TUI controls (MsgReplayControl) address one by its pane ID, and
+	// closing a pane (MsgPaneStopped) stops only that pane's playback. Written
+	// only from the actor goroutine; the Player's own methods are
+	// goroutine-safe.
+	replayPanes map[string]*replay.Player
 
-	// replayPaneID is the dedicated read-only replay pane the active playback
-	// renders into (design 006 v2). "" for an in-pane (--here) playback.
-	// Closing this pane stops the playback (MsgPaneStopped), and TUI playback
-	// controls (MsgReplayControl) are honoured only for this pane. One replay
-	// pane at a time — matching the single replayPlayer field.
-	replayPaneID string
+	// replayHere is the v1 in-pane (##replay play --here) playback, if any.
+	// One at a time: it writes into the invoking pane's own output.
+	replayHere *replay.Player
 
 	// boardPanes maps a BOARD ID to the agents-board pane rendering it (design
 	// 025, made plural by 028). One pane per board rather than one per
@@ -327,6 +349,9 @@ type WorkspaceActor struct {
 	// subscribers can subscribe to but that never publish a layout. On startup
 	// reshareActiveShares re-establishes them, reusing the original shareID.
 	shareRecords map[string]shareKV
+	// shareMisses counts consecutive reconcile ticks on which a shared entity
+	// was absent from the workspace (see reapOrphanedShares).
+	shareMisses map[string]int
 
 	// Remote share listener actor (one at a time per workspace).
 	remoteListenerPID     *actor.PID
@@ -455,6 +480,8 @@ func (w *WorkspaceActor) hasRichRenderer() bool {
 // Receive implements actor.Actor.
 func (w *WorkspaceActor) Receive(ctx actor.Context) {
 	switch m := ctx.Message().(type) {
+	case *peerHostRequest:
+		ctx.Respond(w.peerHost(m.Request))
 	case *autoRunDoneMsg:
 		// Supervised ##auto run ended — advance the --each queue or fire the
 		// on_success chain (workspace_auto_chain.go). In-process only.
@@ -502,6 +529,10 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 		// restores; a failed or unreadable read restores nothing, which leaves
 		// the close path on its fail-safe "keep".
 		w.restoreGroupWorktreesFromKV()
+
+		// Meeting panes (design 043 D7) and replay panes (E-15) come back once
+		// the tabs have their panes.
+		w.scheduleStartupRestores()
 
 		// Worktree hygiene (design 008 orphan sweep): drop stale git
 		// administrative entries for worktrees whose directory vanished
@@ -563,6 +594,14 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 		// been shared before) and only for the primary workspace.
 		if w.cfg.ShareFirstTab && bootstrapped && w.spawnRegistries {
 			w.autoShareFirstTab()
+		}
+
+		// Company connect (design 037): a session bound to an AI-native company
+		// opens on it. Fresh bootstrap and KV restore alike — enabling the mode
+		// is idempotent, and the activate push is what an attaching front-end
+		// needs to show the view without cycling modes by hand.
+		if w.cfg.Company.Enabled() && w.spawnRegistries {
+			w.autoOpenCompanyPane()
 		}
 
 		// Native agent panes (design 029): a stop/start kills every pane's
@@ -739,6 +778,9 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 
 	case *cronTickMsg:
 		w.handleCronTick(ctx)
+		// Shares live on the primary workspace, as the cron ticker does, so
+		// its minute tick doubles as the share reconciler.
+		w.reapOrphanedShares()
 
 	case *centralPolicyMsg:
 		// A central policy document arrived (design 023 §4.7). Handed to the
@@ -748,6 +790,9 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 
 	case *actor.Stopping:
 		w.shuttingDown = true
+		if w.meeting != nil {
+			w.meeting.Close()
+		}
 		w.persistToKVNow()
 		w.stopCron()
 		w.stopProxy()
@@ -755,10 +800,7 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 		// spend that never reached the server is spend the org-wide ceiling
 		// silently forgives.
 		w.stopLedgerClient()
-		if w.replayPlayer != nil {
-			w.replayPlayer.Stop()
-			w.replayPlayer = nil
-		}
+		w.stopAllReplays()
 		if w.replay != nil {
 			w.replay.Stop()
 			w.replay = nil
@@ -924,6 +966,18 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 		// Every close path lands here (keyboard close, group/lane/tab cascade,
 		// CLI delete): closing the dedicated replay pane stops its playback.
 		w.stopReplayIfPaneClosed(m.PaneID)
+		w.meetingPaneStopped(m.PaneID)
+
+	case *msgMeetingPaneCreate:
+		w.handleMeetingPaneCreate(m)
+	case *msgMeetingPaneGone:
+		w.handleMeetingPaneGone(m)
+	case *msgMeetingClosePane:
+		w.closeMeetingPane(m.paneID, m.origin)
+	case *msgMeetingRestore:
+		w.restoreMeetingPanes()
+	case *msgReplayRestore:
+		w.restoreReplayPanes()
 
 	case *MsgMirrorTabUpdate:
 		w.applyMirrorTabUpdate(m)
@@ -1080,6 +1134,11 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 		w.forwardToActiveTab(&msg.MsgTabResizePaneWidth{Delta: m.Delta})
 		w.persistToKVDeferred()
 
+	case *msg.MsgLaneCollapse:
+		// The TUI has no output pane to report into; a refusal (the last
+		// open lane) simply leaves the layout as it was.
+		_, _ = w.laneCollapse(m.Verb, m.Lane)
+
 	case *msg.MsgSwapPane:
 		w.forwardToActiveTab(&msg.MsgTabSwapPane{})
 		w.syncActivePane()
@@ -1203,7 +1262,7 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 		// (possibly background) workspace's own panes (shared and pipeline panes
 		// excluded). No anchor pane: the originating pane lives in the sending
 		// workspace, so the active-entity default resolves against this one.
-		_, _, _, _, _ = w.broadcastCmd(m.scope, m.sel, m.command, "")
+		_, _, _, _ = w.broadcastCmd(m.scope, m.sel, m.command, "")
 
 	case *limitsFetchErrorMsg:
 		w.reportUpstreamError("subscription limits unavailable: " + m.err)
@@ -1215,6 +1274,10 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 
 	case *msg.RequestEnvelope:
 		switch inner := m.Inner.(type) {
+		case *msg.MsgMeetingCommand:
+			w.handleMeeting(ctx, inner.Command, m)
+		case *msg.MsgMeetingToken:
+			w.handleMeetingToken(inner, m)
 		case *msg.MsgGetWorkspaceSnapshot:
 			// LayoutOnly is the TUI's event-driven layout fetch (per-pane content
 			// is streamed separately). Internal callers (sharing/CLI/web) leave it
@@ -1230,6 +1293,8 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 			switch {
 			case inner.LayoutOnly && inner.NoHistories:
 				snap = w.cachedStructuralSnapshot()
+			case inner.LayoutOnly && inner.ActiveHistoryOnly:
+				snap = w.cachedActiveHistorySnapshot()
 			case inner.LayoutOnly:
 				snap = w.cachedLayoutSnapshot()
 			default:
@@ -1257,7 +1322,7 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 			// subscribed and ready).
 			target, ok := w.resolveSwitchTarget(inner)
 			if !ok || target == w.workspaceIdx {
-				_ = m.Reply(&msg.MsgWorkspaceSnapshotReply{Snapshot: w.collectSnapshot(false, false)})
+				_ = m.Reply(&msg.MsgWorkspaceSnapshotReply{Snapshot: w.collectSnapshot(false, false, "")})
 			} else {
 				ctx.Send(ctx.Parent(), &switchWorkspaceMsg{index: target, replyTo: m.ReplyTo})
 			}
@@ -1339,14 +1404,32 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 				_ = m.Reply(resp)
 			}
 
+		// `rysh cron apply` — the non-interactive half of `##cron edit`. Its own
+		// CLI message rather than MsgCLIRyshCommand for the same reason board
+		// posts are: the payload is a file's raw text, unsafe and lossy to
+		// smuggle through a token-parsed "##" command line.
+		case *msg.MsgCLICronApply:
+			resp := w.handleCLICronApply(inner)
+			_ = m.Reply(resp)
+
 		// The agents-board post is its OWN CLI message rather than a ##board
 		// run through MsgCLIRyshCommand above, because that path focuses the
 		// target pane and echoes the command line into its buffers before
 		// dispatching. See workspace_board.go for the three hazards; the point
 		// of this case is that it does not reach runRyshCommand at all.
+		case *msg.MsgCLIPeerCommand:
+			if coord.IsCommand(inner.Args) {
+				w.coordinationCommand(inner, m.Reply)
+			} else {
+				_ = m.Reply(w.handleCLIPeerCommand(inner))
+			}
+
 		case *msg.MsgCLIBoardPost:
 			resp := w.handleCLIBoardPost(inner)
 			_ = m.Reply(resp)
+
+		case *msg.MsgCLIBoardResolve:
+			_ = m.Reply(w.handleCLIBoardResolve(inner))
 
 		// Likewise its own CLI message rather than a ##ansa through
 		// MsgCLIRyshCommand: a control channel used by dozens of agents must

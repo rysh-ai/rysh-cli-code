@@ -1,0 +1,17 @@
+Rysh
+Copyright 2026 Rysh AI
+
+This product includes software developed at Rysh AI (https://rysh.ai).
+
+Licensed under the Apache License, Version 2.0. See the LICENSE file for the
+full license text.
+
+--------------------------------------------------------------------------------
+Third-party components
+--------------------------------------------------------------------------------
+
+internal/vterm/vt10x
+    A fork of github.com/hinshun/vt10x, adding a scrollback ring so that lines
+    evicted from the top of the main screen remain available.
+    Copyright (C) 2013 James Gray. Licensed under the MIT License; the full text
+    is retained at internal/vterm/vt10x/LICENSE.

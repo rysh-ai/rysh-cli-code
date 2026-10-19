@@ -35,7 +35,7 @@ func (w *WorkspaceActor) cachedSnapshot() domain.WorkspaceSnapshot {
 	if w.snapCacheValid && time.Since(w.snapCacheTime) < snapshotCacheTTL {
 		return w.snapCache
 	}
-	snap := w.collectSnapshot(false, false)
+	snap := w.collectSnapshot(false, false, "")
 	w.snapCache = snap
 	w.snapCacheTime = time.Now()
 	w.snapCacheValid = true
@@ -51,7 +51,7 @@ func (w *WorkspaceActor) cachedLayoutSnapshot() domain.WorkspaceSnapshot {
 	if w.snapLayoutCacheValid && time.Since(w.snapLayoutCacheTime) < snapshotCacheTTL {
 		return w.snapLayoutCache
 	}
-	snap := w.collectSnapshot(true, false)
+	snap := w.collectSnapshot(true, false, "")
 	w.snapLayoutCache = snap
 	w.snapLayoutCacheTime = time.Now()
 	w.snapLayoutCacheValid = true
@@ -73,10 +73,33 @@ func (w *WorkspaceActor) cachedStructuralSnapshot() domain.WorkspaceSnapshot {
 	if w.snapStructCacheValid && time.Since(w.snapStructCacheTime) < snapshotCacheTTL {
 		return w.snapStructCache
 	}
-	snap := w.collectSnapshot(true, true)
+	snap := w.collectSnapshot(true, true, "")
 	w.snapStructCache = snap
 	w.snapStructCacheTime = time.Now()
 	w.snapStructCacheValid = true
+	return snap
+}
+
+// cachedActiveHistorySnapshot serves the TUI's layout fetch
+// (MsgGetWorkspaceSnapshot.ActiveHistoryOnly): the layout snapshot with
+// command history for the active pane only. The TUI reads no other pane's
+// history, and carrying all of them made the reply grow with pane count times
+// session age. Keyed on the active pane as well as the TTL, since a focus move
+// changes which pane's history belongs in it.
+func (w *WorkspaceActor) cachedActiveHistorySnapshot() domain.WorkspaceSnapshot {
+	if w.activePaneID == "" {
+		return w.cachedStructuralSnapshot()
+	}
+	if w.snapActiveHistCacheValid && w.snapActiveHistCachePane == w.activePaneID &&
+		time.Since(w.snapActiveHistCacheTime) < snapshotCacheTTL {
+		return w.snapActiveHistCache
+	}
+	pane := w.activePaneID
+	snap := w.collectSnapshot(true, false, pane)
+	w.snapActiveHistCache = snap
+	w.snapActiveHistCachePane = pane
+	w.snapActiveHistCacheTime = time.Now()
+	w.snapActiveHistCacheValid = true
 	return snap
 }
 
@@ -88,7 +111,7 @@ func (w *WorkspaceActor) cachedStructuralSnapshot() domain.WorkspaceSnapshot {
 // tabs. layoutOnly is propagated through Tab→Lane→Group→Pane so per-pane content
 // buffers are omitted (the layout fetch); mirror tabs are always rendered fully
 // since their content is assembled locally (no per-pane cascade).
-func (w *WorkspaceActor) collectSnapshot(layoutOnly, noHistories bool) domain.WorkspaceSnapshot {
+func (w *WorkspaceActor) collectSnapshot(layoutOnly, noHistories bool, historyPane string) domain.WorkspaceSnapshot {
 	snap := domain.WorkspaceSnapshot{
 		Tabs:            make([]domain.TabSnapshot, 0, len(w.tabs)),
 		ActivePaneID:    w.activePaneID,
@@ -106,7 +129,7 @@ func (w *WorkspaceActor) collectSnapshot(layoutOnly, noHistories bool) domain.Wo
 	fetch := func(i int, id, title string) {
 		reply, err := w.pub.Request(
 			msg.T("tab", id, "snapshot"),
-			&msg.MsgGetTabSnapshot{LayoutOnly: layoutOnly, NoHistories: noHistories},
+			&msg.MsgGetTabSnapshot{LayoutOnly: layoutOnly, NoHistories: noHistories, HistoryPaneID: historyPane},
 			2*snapshotTimeout,
 		)
 		if err != nil {
@@ -318,6 +341,7 @@ func (w *WorkspaceActor) invalidateSnapshotCaches() {
 	w.snapCacheValid = false
 	w.snapLayoutCacheValid = false
 	w.snapStructCacheValid = false
+	w.snapActiveHistCacheValid = false
 }
 
 // notifyLayoutDirty publishes a lightweight signal that the workspace layout

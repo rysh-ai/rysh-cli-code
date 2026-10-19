@@ -149,3 +149,123 @@ func TestApprovalResponseFailuresAreVisible(t *testing.T) {
 		})
 	}
 }
+
+// F-47: a choice must travel as choice_idx and be echoed as the choice it is.
+// The web door used to drop choice_idx (the overlay smuggled the index through
+// reason instead) and echo every non-rejection as "[approved]" — so picking
+// option 3 of an ask_user question printed [approved] in the pane.
+func TestApprovalResponseChoiceSelectedCarriesTheIndexAndEchoesIt(t *testing.T) {
+	port, nc := newApprovalTestServer(t)
+
+	respSub, err := nc.SubscribeSync(msg.T("pane", "pane-1", "approval", "response"))
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	echoSub, err := nc.SubscribeSync(msg.T("pane", "pane-1", "output", string(msg.ConvAI)))
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	conn := dialWS(t, port, "")
+	sendWSCommand(t, conn, "approval_response", map[string]any{
+		"pane_id":    "pane-1",
+		"request_id": "req-7",
+		"decision":   "choice_selected",
+		"choice_idx": 2,
+		"reason":     "blue",
+	})
+
+	m, err := respSub.NextMsg(5 * time.Second)
+	if err != nil {
+		t.Fatalf("nothing published to pane.pane-1.approval.response: %v", err)
+	}
+	var env msg.NATSEnvelope
+	if err := json.Unmarshal(m.Data, &env); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	var resp msg.MsgApprovalResponse
+	if err := json.Unmarshal(env.Payload, &resp); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if resp.ChoiceIdx != 2 {
+		t.Errorf("choice_idx = %d, want 2 (dropped at the door)", resp.ChoiceIdx)
+	}
+
+	em, err := echoSub.NextMsg(5 * time.Second)
+	if err != nil {
+		t.Fatalf("no echo on the pane: %v", err)
+	}
+	var echoEnv msg.NATSEnvelope
+	if err := json.Unmarshal(em.Data, &echoEnv); err != nil {
+		t.Fatalf("decode echo envelope: %v", err)
+	}
+	var echo msg.MsgConversationAppend
+	if err := json.Unmarshal(echoEnv.Payload, &echo); err != nil || echo.Message == nil {
+		t.Fatalf("decode echo: %v", err)
+	}
+	got := echo.Message.Content
+	if strings.Contains(got, "approved") {
+		t.Errorf("a choice was echoed as approval: %q", got)
+	}
+	if !strings.Contains(got, "option 3") || !strings.Contains(got, "blue") {
+		t.Errorf("echo %q does not name the choice (option 3: blue)", got)
+	}
+}
+
+// F-92: a question (ask_user, type "question") is not a gate, so its answer must
+// not be echoed as one. The door now knows the type of every request it
+// forwarded, so a yes is "[answered: yes]", a typed answer "[answered: <text>]"
+// and a no "[declined]" — never "[approved]" / "[rejected]". A gate's echo is
+// unchanged.
+func TestApprovalResponseQuestionEchoesAnAnswer(t *testing.T) {
+	cases := []struct {
+		reqType  msg.ApprovalType
+		decision string
+		reason   string
+		want     string
+	}{
+		{msg.ApprovalTypeQuestion, "yes", "", "[answered: yes]\n"},
+		{msg.ApprovalTypeQuestion, "yes", "use postgres", "[answered: use postgres]\n"},
+		{msg.ApprovalTypeQuestion, "yes_always", "", "[answered: yes]\n"},
+		{msg.ApprovalTypeQuestion, "no", "", "[declined]\n"},
+		{msg.ApprovalTypeQuestion, "no_with_explanation", "use sqlite", "[answered: use sqlite]\n"},
+		{msg.ApprovalTypeDestructive, "yes", "", "[approved]\n"},
+		{msg.ApprovalTypeDestructive, "no", "", "[rejected]\n"},
+	}
+	for _, c := range cases {
+		t.Run(string(c.reqType)+"/"+c.decision+"/"+c.reason, func(t *testing.T) {
+			port, nc := newApprovalTestServer(t)
+			pub := msg.NewNATSPublisher(nc, msg.DefaultCodecRegistry())
+			echoSub, err := nc.SubscribeSync(msg.T("pane", "pane-1", "output", string(msg.ConvAI)))
+			if err != nil {
+				t.Fatalf("subscribe: %v", err)
+			}
+			conn := dialWS(t, port, "")
+
+			// The request reaches the client first, exactly as in production.
+			if err := pub.Send(msg.T("pane", "pane-1", "approval", "request"), &msg.MsgApprovalRequest{
+				RequestID: "req-q", Type: c.reqType, Description: "Which database?",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			readWSType(t, conn, "approval_request", 5*time.Second)
+
+			sendWSCommand(t, conn, "approval_response", map[string]any{
+				"pane_id": "pane-1", "request_id": "req-q", "decision": c.decision, "reason": c.reason,
+			})
+
+			em, err := echoSub.NextMsg(5 * time.Second)
+			if err != nil {
+				t.Fatalf("no echo on the pane: %v", err)
+			}
+			var env msg.NATSEnvelope
+			var echo msg.MsgConversationAppend
+			if json.Unmarshal(em.Data, &env) != nil || json.Unmarshal(env.Payload, &echo) != nil || echo.Message == nil {
+				t.Fatalf("decode echo")
+			}
+			if echo.Message.Content != c.want {
+				t.Errorf("echo = %q, want %q", echo.Message.Content, c.want)
+			}
+		})
+	}
+}

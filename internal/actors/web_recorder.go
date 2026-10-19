@@ -431,8 +431,18 @@ func (r *WebRecorderActor) encode() error {
 	// probe-able video. Same directory keeps the rename atomic; same extension
 	// keeps ffmpeg's extension-based muxer selection.
 	tmpPath := filepath.Join(filepath.Dir(r.outPath), ".part-"+filepath.Base(r.outPath))
-	cmd := exec.Command(bin, ffmpegArgs(concatPath, tmpPath)...)
-	out, err := cmd.CombinedOutput()
+	args := ffmpegArgs(concatPath, tmpPath)
+	out, err := exec.Command(bin, args...).CombinedOutput()
+	if err != nil && strings.Contains(string(out), "Unrecognized option 'fps_mode'") {
+		// ffmpeg < 5.1 (Ubuntu 22.04 ships 4.4) has no -fps_mode: retry once
+		// with its predecessor, -vsync. No version probe on the happy path.
+		_ = os.Remove(tmpPath)
+		out, err = exec.Command(bin, vsyncFallbackArgs(args)...).CombinedOutput()
+		if err != nil {
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("ffmpeg (tried -fps_mode, then -vsync): %w: %s", err, lastLines(string(out), 3))
+		}
+	}
 	if err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("ffmpeg: %w: %s", err, lastLines(string(out), 3))
@@ -474,10 +484,13 @@ func buildConcatFile(frames []recFrame, interval time.Duration) string {
 // ffmpegArgs builds the encode command. The scale filter rounds odd dimensions
 // down to even numbers because yuv420p (needed for broad player support)
 // cannot represent odd sizes, and browser viewports are frequently odd.
-// -vsync vfr keeps the concat list's per-frame durations as real output
-// timestamps: without it, ffmpeg 4.x resamples concat input to constant
+// -fps_mode vfr keeps the concat list's per-frame durations as real output
+// timestamps: without vfr, ffmpeg 4.x resamples concat input to constant
 // 25fps, duplicating every captured frame several times over (newer ffmpeg
-// preserves timestamps by default — this pins the one behavior everywhere).
+// preserves timestamps by default). -fps_mode exists from ffmpeg 5.1, and
+// current ffmpeg no longer accepts its predecessor -vsync ("Unrecognized
+// option 'vsync'" on 9.0.2, F-82). 4.x is reached through encode()'s one-shot
+// retry with -vsync vfr (vsyncFallbackArgs).
 func ffmpegArgs(concatPath, outPath string) []string {
 	return []string{
 		"-y",
@@ -485,13 +498,26 @@ func ffmpegArgs(concatPath, outPath string) []string {
 		"-safe", "0",
 		"-i", concatPath,
 		"-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-		"-vsync", "vfr",
+		"-fps_mode", "vfr",
 		"-c:v", "libx264",
 		"-preset", "veryfast",
 		"-pix_fmt", "yuv420p",
 		"-movflags", "+faststart",
 		outPath,
 	}
+}
+
+// vsyncFallbackArgs is args with -fps_mode spelled -vsync, for ffmpeg < 5.1.
+// The input is not modified.
+func vsyncFallbackArgs(args []string) []string {
+	out := make([]string, len(args))
+	for i, a := range args {
+		if a == "-fps_mode" {
+			a = "-vsync"
+		}
+		out[i] = a
+	}
+	return out
 }
 
 // frameExt identifies the image format from its magic bytes, falling back to

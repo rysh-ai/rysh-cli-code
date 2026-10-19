@@ -110,6 +110,15 @@ type MsgLaunchClaudeInPane struct {
 	// asking a human to approve each action — and its pane is hidden, so there
 	// is nobody there to ask.
 	ExtraArgs string `json:"extra_args,omitempty"`
+
+	// Native stamps the pane with the design-029 agent metadata (agent.native,
+	// agent.kind, agent.cwd, agent.args) so the post-restore sweep resumes this
+	// claude after a daemon stop/start. The BOARD CLAUDE sets it: its pane is
+	// hidden, so a claude that died with the daemon leaves a pane with the
+	// right name and nothing listening, and nobody is looking at it to notice.
+	// `##pane new --claude` leaves it off — that pane's claude stays the
+	// human's to bring back.
+	Native bool `json:"native,omitempty"`
 }
 
 // MsgDiscoverCodexSession is the workspace's note to itself to find out which

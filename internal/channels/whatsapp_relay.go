@@ -5,17 +5,22 @@ package channels
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
+
+	"github.com/rysh-ai/rysh-cli-code/internal/upstream"
 )
 
 // Relay mode runs the WhatsApp channel through rysh-server instead of talking to
@@ -145,62 +150,29 @@ func (w *WhatsAppAdapter) startRelay(ctx context.Context) error {
 	if workspacePath == "" {
 		workspacePath = cfg.RelayWorkspaceID
 	}
-	proxyPath := "/workspaces/" + workspacePath + "/nats?connection_type=channel" +
-		"&api_key=" + url.QueryEscape(cfg.RelayAPIKey)
+	holder := w.relayHolder()
+	proxyPath := relayProxyPath(workspacePath, holder)
 
-	nc, err := nats.Connect(wsURL,
+	opts := append([]nats.Option{
 		nats.Name("rysh-whatsapp-relay"),
 		nats.ProxyPath(proxyPath),
+		upstream.NATSAPIKeyHeader(cfg.RelayAPIKey), // the key rides in a header, not the URL (F-86)
 		nats.Token(cfg.RelayAPIKey),
 		nats.MaxReconnects(-1),
-		nats.ReconnectWait(2*time.Second),
-		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
-			slog.Warn("whatsapp relay: disconnected from upstream", "err", err)
-			w.mu.Lock()
-			w.connected = false
-			w.mu.Unlock()
-		}),
-		nats.ReconnectHandler(func(_ *nats.Conn) {
-			slog.Info("whatsapp relay: reconnected to upstream")
-			w.mu.Lock()
-			w.connected = true
-			w.mu.Unlock()
-			// Messages published while we were away were persisted server-side
-			// but never delivered — core NATS has no replay. Ask for them.
-			go w.replayMissed()
-		}),
-	)
+		nats.ReconnectWait(2 * time.Second),
+	}, w.relayEventHandlers()...)
+	nc, err := nats.Connect(wsURL, opts...)
 	if err != nil {
 		return fmt.Errorf("whatsapp relay: connect upstream: %w", err)
 	}
-
-	inSubj := w.relaySubject("inbound")
-	if _, err := nc.QueueSubscribe(inSubj, relayQueueGroup, func(m *nats.Msg) {
-		w.handleRelayInbound(m.Data, false) // live delivery
-	}); err != nil {
+	if err := w.attachRelay(nc); err != nil {
 		nc.Close()
-		return fmt.Errorf("whatsapp relay: subscribe %s: %w", inSubj, err)
+		return err
 	}
-
-	stSubj := w.relaySubject("status")
-	if _, err := nc.Subscribe(stSubj, func(m *nats.Msg) {
-		w.handleRelayStatus(m.Data)
-	}); err != nil {
-		nc.Close()
-		return fmt.Errorf("whatsapp relay: subscribe %s: %w", stSubj, err)
-	}
-
-	w.mu.Lock()
-	w.relayConn = nc
-	w.connected = true
-	w.err = ""
-	w.mu.Unlock()
 
 	slog.Info("whatsapp relay: ready",
-		"upstream", cfg.RelayURL, "inbound", inSubj, "queue", relayQueueGroup)
-
-	// Catch up on anything that arrived before this session existed.
-	go w.replayMissed()
+		"upstream", cfg.RelayURL, "inbound", w.relaySubject("inbound"), "queue", relayQueueGroup,
+		"holder", holder)
 
 	go func() {
 		<-ctx.Done()
@@ -214,6 +186,171 @@ func (w *WhatsAppAdapter) startRelay(ctx context.Context) error {
 		}
 	}()
 	return nil
+}
+
+// relayEventHandlers are the connection callbacks of a relay session. They are
+// separate from the dial options so tests can attach them to a plain TCP
+// connection to an embedded nats-server.
+func (w *WhatsAppAdapter) relayEventHandlers() []nats.Option {
+	return []nats.Option{
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+			slog.Warn("whatsapp relay: disconnected from upstream", "err", err)
+			w.mu.Lock()
+			w.connected = false
+			w.mu.Unlock()
+		}),
+		nats.ReconnectHandler(func(_ *nats.Conn) {
+			slog.Info("whatsapp relay: reconnected to upstream")
+			w.mu.Lock()
+			w.connected = true
+			w.mu.Unlock()
+			// Messages published while we were away were persisted server-side
+			// but never delivered — core NATS has no replay. Ask for them; this
+			// also retries a connection another session held (D-21).
+			go w.retryRelayHold()
+		}),
+		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
+			w.handleRelayAsyncError(err)
+		}),
+	}
+}
+
+// attachRelay subscribes a connected session to its relay subjects, makes it
+// the adapter's relay connection and starts the catch-up replay.
+func (w *WhatsAppAdapter) attachRelay(nc *nats.Conn) error {
+	// Reset before subscribing: a refusal of these subscriptions arrives
+	// asynchronously and must not be wiped by this reset.
+	w.mu.Lock()
+	w.connected = true
+	w.err = ""
+	w.relayRefused = false
+	w.mu.Unlock()
+
+	inSubj := w.relaySubject("inbound")
+	if _, err := nc.QueueSubscribe(inSubj, relayQueueGroup, func(m *nats.Msg) {
+		w.handleRelayInbound(m.Data, false) // live delivery
+	}); err != nil {
+		return fmt.Errorf("whatsapp relay: subscribe %s: %w", inSubj, err)
+	}
+
+	stSubj := w.relaySubject("status")
+	if _, err := nc.Subscribe(stSubj, func(m *nats.Msg) {
+		w.handleRelayStatus(m.Data)
+	}); err != nil {
+		return fmt.Errorf("whatsapp relay: subscribe %s: %w", stSubj, err)
+	}
+
+	w.mu.Lock()
+	w.relayConn = nc
+	w.mu.Unlock()
+
+	// Catch up on anything that arrived before this session existed.
+	go w.replayMissed()
+	return nil
+}
+
+// One rysh session serves a channel connection (D-21 / E-11.2). rysh-server's
+// WS proxy keeps a single-holder lease per connection, keyed by the holder id
+// this session sends on the proxy URL. A second holder's SUB to …inbound or
+// PUB to …replay is refused with a NATS permissions violation, which reaches
+// handleRelayAsyncError; the lease frees when the holder's socket closes, or
+// within 90 s of it dying.
+
+// relayHolderInUseError is the adapter's status error while another session
+// holds the connection.
+const relayHolderInUseError = "This WhatsApp connection is already being served by another rysh session (another directory or machine). Stop that session, or wait up to 90 s after it exits, then restart this channel."
+
+// relayHolderState is the persisted holder id, kept next to the watermark.
+type relayHolderState struct {
+	Holder string `json:"holder"`
+}
+
+// relayHolderID identifies one session's state directory for one workspace:
+// sha256(absolute dir + "\x00" + workspace id), hex, first 16 characters. The
+// same directory keeps the same id across restarts — and the same directory
+// is the same watermark and handled-set, the state that keeps one customer
+// message from being answered twice. The raw path never leaves this process.
+func relayHolderID(dir, workspaceID string) string {
+	sum := sha256.Sum256([]byte(dir + "\x00" + workspaceID))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// relayHolder returns this session's holder id, derived from the working
+// directory (where .rysh/channel-state lives) and persisted beside the
+// watermark as .rysh/channel-state/whatsapp-relay/<conn>.holder.json. It is
+// recomputed on every start, so a copied state directory cannot carry another
+// directory's id.
+func (w *WhatsAppAdapter) relayHolder() string {
+	dir, err := os.Getwd()
+	if err == nil {
+		dir, err = filepath.Abs(dir)
+	}
+	if err != nil {
+		slog.Warn("whatsapp relay: working directory unknown; the proxy assigns an anonymous holder", "err", err)
+		return ""
+	}
+	id := relayHolderID(dir, w.config.RelayWorkspaceID)
+	key := w.config.RelayConnectionID + ".holder"
+	var st relayHolderState
+	if !loadChannelState("whatsapp-relay", key, &st) || st.Holder != id {
+		if err := saveChannelState("whatsapp-relay", key, relayHolderState{Holder: id}); err != nil {
+			slog.Warn("whatsapp relay: persist holder id failed", "holder", id, "err", err)
+		}
+	}
+	return id
+}
+
+// relayProxyPath is the WS proxy path a relay session dials. connection_type=
+// channel keeps the pipe from consuming a session seat; holder names this
+// session for the connection lease (omitted when unknown: the proxy then
+// treats the socket as an anonymous holder).
+func relayProxyPath(workspacePath, holder string) string {
+	p := "/workspaces/" + workspacePath + "/nats?connection_type=channel"
+	if holder != "" {
+		p += "&holder=" + url.QueryEscape(holder)
+	}
+	return p
+}
+
+// handleRelayAsyncError reacts to the asynchronous errors nats.go reports. A
+// permissions violation naming this connection's own …inbound or …replay
+// subject means another session holds the connection: the adapter shows
+// relayHolderInUseError and neither replays nor auto-answers until a
+// reconnect's replay succeeds. Every other error is only logged, as before.
+func (w *WhatsAppAdapter) handleRelayAsyncError(err error) {
+	if err == nil {
+		return
+	}
+	if !errors.Is(err, nats.ErrPermissionViolation) || !w.namesOwnRelaySubject(err.Error()) {
+		slog.Warn("whatsapp relay: upstream error", "err", err)
+		return
+	}
+	w.mu.Lock()
+	first := !w.relayRefused
+	w.relayRefused = true
+	w.relayRefusals++
+	w.err = relayHolderInUseError
+	w.mu.Unlock()
+	if first {
+		slog.Warn("whatsapp relay: connection held by another rysh session; not serving it",
+			"connection", w.config.RelayConnectionID, "err", err)
+	}
+}
+
+func (w *WhatsAppAdapter) namesOwnRelaySubject(text string) bool {
+	return strings.Contains(text, `"`+w.relaySubject("inbound")+`"`) ||
+		strings.Contains(text, `"`+w.relaySubject("replay")+`"`)
+}
+
+// retryRelayHold runs on every reconnect. nats.go has already re-sent the
+// subscriptions, so the proxy re-evaluates the lease; the replay request is
+// the second half of the attempt. The status error stays until that replay
+// succeeds — a fresh refusal sets it again.
+func (w *WhatsAppAdapter) retryRelayHold() {
+	w.mu.Lock()
+	w.relayRefused = false
+	w.mu.Unlock()
+	w.replayMissed()
 }
 
 // handleRelayInbound converts a server-side inbound message and feeds it to the
@@ -269,6 +406,17 @@ func (w *WhatsAppAdapter) handleRelayInbound(data []byte, replayed bool) {
 	// gets an unprompted reply to something they have forgotten, and a humanoid
 	// starting in a workspace with no local state would do it for every message
 	// the stream still holds.
+	// A session that does not hold the connection (D-21) records but never
+	// answers: the holder answers.
+	w.mu.RLock()
+	refused := w.relayRefused
+	w.mu.RUnlock()
+	if refused {
+		slog.Info("whatsapp relay: connection held by another session — recorded only",
+			"message_id", in.MessageID, "from", in.SenderID)
+		return
+	}
+
 	if replayed && relayTooStale(in.Timestamp) {
 		slog.Warn("whatsapp relay: replayed message too old to auto-answer — recorded only",
 			"message_id", in.MessageID, "from", in.SenderID,
@@ -371,8 +519,14 @@ func (w *WhatsAppAdapter) noteRelaySeen(ts int64) {
 func (w *WhatsAppAdapter) replayMissed() {
 	w.mu.RLock()
 	nc, since := w.relayConn, w.relayLastSeen
+	refused, refusals := w.relayRefused, w.relayRefusals
 	w.mu.RUnlock()
 	if nc == nil {
+		return
+	}
+	if refused {
+		// Another session holds the connection; retryRelayHold reopens this
+		// on the next reconnect.
 		return
 	}
 
@@ -395,6 +549,14 @@ func (w *WhatsAppAdapter) replayMissed() {
 		slog.Warn("whatsapp relay: replay refused", "err", resp.Error)
 		return
 	}
+	// A replay answered with no refusal seen meanwhile: this session holds
+	// the connection (again), so the holder error clears.
+	w.mu.Lock()
+	if w.relayRefusals == refusals && !w.relayRefused && w.err == relayHolderInUseError {
+		w.err = ""
+		slog.Info("whatsapp relay: connection held by this session again", "connection", w.config.RelayConnectionID)
+	}
+	w.mu.Unlock()
 	if len(resp.Messages) == 0 {
 		return
 	}

@@ -456,6 +456,18 @@ type MsgPaneDisableMode struct {
 	Mode     string `json:"mode"`
 }
 
+// MsgPaneReleaseHumanoid tells a pane that a humanoid no longer routes its
+// output there (unregister, or the humanoid moved to another pane). The pane
+// drops its humanoid binding and disables Surface — the visible mode the
+// humanoid enabled at register time ("email" or "external") — but ONLY if
+// Humanoid is still the pane's registered humanoid, so a release that races a
+// re-register to someone else changes nothing. Routed: HumanoidActor →
+// PaneActor (direct).
+type MsgPaneReleaseHumanoid struct {
+	Humanoid string `json:"humanoid"`
+	Surface  string `json:"surface"`
+}
+
 // MsgPaneWebHeadless controls the pane's CLI-owned headless browser executor
 // (Phase 4 web automation — runs browser_action requests in a headless
 // Chromium without the desktop app). Routed: WorkspaceActor → PaneActor.

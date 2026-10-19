@@ -69,16 +69,6 @@ familiar and the session model underneath them does not, which is video 2.
 
 ## Secrets stay on your machine
 
-<!-- HOSTING DECISION PENDING — DO NOT replace this block with an <img> until a URL is settled.
-     The GIF exists and is committed in the private monorepo at
-       marketing/assets/videos/secretnat-readme-loop.gif
-     but this README is injected into a PUBLIC repo by scripts/export-oss.sh, and that export
-     copies prose only — it ships no binary assets. So a relative path cannot resolve here, and
-     no public URL for this asset exists yet. rysh.ai already serves ~111 tutorial videos under
-     /video-tutorials-assets/, so the hosting mechanism exists; using it needs a deploy, which is
-     a founder gate. Substituting a guessed URL would render as a broken image on github.com,
-     which is worse than this block. See new_roadmap/archive/epics-2026-08/epic01-launch-readiness.md. -->
-
 SecretNAT is on by default. Secrets are substituted with tokens in the request body
 before it leaves the machine, and a response carrying a live credential in plaintext
 is reported into the pane. Responses are not rewritten — by design.
@@ -123,33 +113,6 @@ curl -fsSL https://packages.rysh.ai/install-rysh.sh | sh
 Installs `rysh` from this repository's own releases — the Apache-2.0 binary, not
 `ry`. It resolves the newest release at run time; set `RYSH_VERSION` to pin one
 instead, or `RYSH_INSTALL_DIR` to choose where it lands.
-
-<!-- RESTORED 2026-08-16 by founder ruling, WITHOUT an amendment to 024 — read this
-     before citing either document, because they disagree on purpose.
-
-     This block was withdrawn earlier today against designs/024-investor-claims.md,
-     row "The open-source build is current", guard (1): "never point anyone at the
-     GitHub Releases page", recorded there as frozen at v0.1.4.
-
-     The premise is measurably false as of 2026-08-16: rysh-cli-code carries real
-     release objects v0.2.6, v0.2.7 and v0.2.9, ten assets each; /releases/latest
-     resolves to v0.2.9; the tags API serves v0.2.9. The cause of the flip is known —
-     the guard was written when the export published TAGS WITHOUT RELEASE OBJECTS,
-     and the OSS release workflow now publishes both.
-
-     The founder was shown that measurement, asked to amend guard (1), and ruled to
-     add this block WITHOUT amending it. So: 024 guard (1) STILL STANDS, UNAMENDED,
-     and this block is a knowing exception to it — not evidence that the guard was
-     satisfied, retired, or quietly overtaken. Only E3 amends 024.
-
-     Guards (2) and (3) of that row are untouched and still bind: the public tree is
-     an export run by hand, not a mirror (E-2 is open), and nothing here implies
-     development happens in the open.
-
-     One narrowing that is true but was NOT the basis of the ruling: this points at
-     packages.rysh.ai/install-rysh.sh, and the installer resolves the release at run
-     time, so no version can go stale in this file the way a Releases link or a
-     "latest release" badge can. -->
 
 **The prebuilt distribution — installs `ry`, not `rysh`.** It is the packaged
 product and a separate distribution; nothing in it is produced by this repository,
@@ -233,6 +196,67 @@ what a pane has and `##mode new <mode>` adds the rest.
 
 The [parent repo README](https://github.com/rysh-ai/rysh-cli-parent#readme) has
 the keybindings, sessions, agents and humanoids.
+
+## A first session, start to finish
+
+One path from nothing to two Claude panes posting to a board. Step 4 needs
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed as
+`claude`. `##codex` works the same way if you use Codex instead.
+
+**1. Install and onboard**, in the directory you want to work in. Config is
+project-local, so onboarding writes `rysh.config.yaml` and `.rysh/` right here:
+
+```sh
+go install github.com/rysh-ai/rysh-cli-code/cmd/rysh@latest
+export ANTHROPIC_API_KEY=sk-ant-...
+rysh onboard --provider anthropic --key-env ANTHROPIC_API_KEY
+```
+
+**2. Open a session.**
+
+```sh
+rysh create first
+```
+
+You are now in one pane, in shell mode. Press `Esc Esc` until the pane's mode
+reads **rysh**.
+
+**3. Make a stack.**
+
+```
+##new stack 2
+```
+
+The pane you typed in now has two more under it, in one stack. `Ctrl+S` then a
+digit jumps to that pane of the stack, and `Esc` leaves stack mode.
+
+**4. Put Claude in two of them.** In pane 2 and then pane 3, in rysh mode:
+
+```
+##claude
+```
+
+Each pane now runs its own interactive Claude session. Give each a different
+task.
+
+**5. Open the board** from pane 1:
+
+```
+##board open
+```
+
+Ask either Claude to report on the board when it finishes. From inside its
+pane, a post is one shell command, and `rysh board tail` reads the stream back:
+
+```sh
+rysh board post --as "$RYSH_PANE" -- 'parser wiring done'
+rysh board tail --limit 20
+```
+
+The board belongs to this session, on this machine.
+
+**6. Step away.** `Ctrl+P d` detaches and the session keeps running;
+`rysh attach first` brings you back. The tours below go deeper into each step.
 
 ## Three tours
 
@@ -327,10 +351,61 @@ rysh board tail --fleet epic-07     # that fleet's stream, not the session's
 
 A fleet may be claudes, codexes, or both — the commands are the same either way.
 
-<!-- VIDEOS PENDING — two of them, from the founder: (a) the agents board with several
-     agent panes posting and a board agent routing; (b) a fleet coming up, working, and
-     its own board read back with `rysh board tail --fleet`. Same rules as above: a public
-     URL as a plain link, never a committed file and never a guessed URL. -->
+A fleet of Claude and Codex panes working off one shared board is video 4 of the
+[tutorials](#video-tutorials) at the top of this page; how to choose a fleet's
+shape — who sends orders to whom, and who reports where — is video 5.
+
+## Examples
+
+`examples/` in this repository is runnable. None of it needs a provider key.
+
+**Scripts.** A `.rysh` file is a bash script whose `##` lines are rysh commands:
+`rysh script` runs them, and plain `bash` reads them as comments. A script
+refuses to drive a session somebody is attached to, so point it at a detached
+one:
+
+```sh
+rysh create demo -d
+rysh script examples/scripts/deploy-check.rysh --session demo staging
+```
+
+| Script | What it shows |
+| --- | --- |
+| `deploy-check.rysh` | the format itself: a `##` line's output in `$RYSH_OUT`, its exit status in `$?`, and a command that is expected to fail |
+| `workspace-setup.rysh` | a tab and a grid, with each pane named after a role — `rysh script … --session demo 4` for four panes |
+| `morning-standup.rysh` | one pane per repository given as an argument, named after it, with `git log` fanned out across them |
+| `fanout.rysh` | one command run in every pane of a lane, tab or workspace — `rysh script … --session demo tab 'git status -s'` |
+| `bootstrap-env.rysh` | seeding `##variable`s (the agent can read them) and `##secret`s (it cannot) from your environment, safely re-runnable |
+| `ci-gate.rysh` | a CI gate that boots its own throwaway session — run it with `--ephemeral` in place of `--session` |
+
+Each script's header comment has the full usage.
+
+**A fleet on its own board.** `examples/fleet/fleet-board.rysh` registers a
+fleet, stacks three member panes (a lead and two workers), and has each one
+post to the fleet's board from its own pane. Then it reads the board back.
+Run it in a fresh session:
+
+```sh
+rysh create fleet-demo -d
+rysh script examples/fleet/fleet-board.rysh --session fleet-demo
+rysh board tail --fleet demo-fleet --session fleet-demo
+```
+
+The panes run plain shells. The comment at the end of the script is the next
+step: `##claude` in each member, with work handed out by `rysh ansa prompt` and
+reported back on the board: a smaller version of what video 4 shows, on one machine.
+
+**A channel plugin.** `examples/plugins/echo-channel` is the reference stdio
+channel plugin. It uses only the standard library, and every message sent to it
+comes straight back:
+
+```sh
+(cd examples/plugins/echo-channel && go build -o echo-channel .)
+rysh channel install examples/plugins/echo-channel
+rysh channel list
+```
+
+`go test ./examples/plugins/echo-channel/` runs its test.
 
 ## Layout
 

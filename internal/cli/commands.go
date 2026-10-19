@@ -76,6 +76,17 @@ func Connect(store *session.Store, sessionName string) (*Client, error) {
 	return connect(store, sessionName)
 }
 
+// ConnectPersistent is Connect with a connection that reconnects forever, for
+// `rysh board listen`. See NewPersistentClient.
+func ConnectPersistent(store *session.Store, sessionName string) (*Client, error) {
+	rec, err := resolveSession(store, sessionName)
+	if err != nil {
+		return nil, err
+	}
+	msg.SetSessionPrefix(rec.Name)
+	return NewPersistentClient(rec.NATSPort, rec.Name)
+}
+
 // getSnapshot fetches the workspace snapshot from a running session.
 func getSnapshot(c *Client) (*domain.WorkspaceSnapshot, error) {
 	reply, err := c.RequestSnapshot(defaultTimeout)
@@ -600,6 +611,22 @@ func RyshCommandResult(store *session.Store, sessionName, tabID, paneID, command
 	})
 }
 
+// CronApply sends an edited cron job Input to a running session — the
+// non-interactive half of `##cron edit <name>`, invoked by `rysh cron apply`
+// after $EDITOR exits successfully on the temp file `##cron edit` created.
+func CronApply(store *session.Store, sessionName, jobName, input string) (*msg.MsgCLIResponse, error) {
+	c, err := connect(store, sessionName)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+
+	return cliRequest(c, &msg.MsgCLICronApply{
+		JobName: jobName,
+		Input:   input,
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Send input command
 // ---------------------------------------------------------------------------
@@ -761,6 +788,54 @@ func BoardPost(store *session.Store, sessionName, asPaneID, kind, threadID, boar
 	})
 }
 
+// BoardSendRequest sends a fully-formed MsgCLIBoardPost — the door for the
+// design-050 kinds (cmd, ack), whose extra fields BoardPost's positional
+// signature does not carry. Same silent agent door, same reply.
+func BoardSendRequest(store *session.Store, sessionName string, req *msg.MsgCLIBoardPost) (*msg.MsgCLIResponse, error) {
+	c, err := connect(store, sessionName)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+
+	return cliRequest(c, req)
+}
+
+// BoardResolve asks the workspace for a pane's full uuid (resp.ID) and the
+// board it posts to (resp.Output), without focusing or echoing into it.
+func BoardResolve(store *session.Store, sessionName, asPaneID string) (*msg.MsgCLIResponse, error) {
+	c, err := connect(store, sessionName)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+
+	return cliRequest(c, &msg.MsgCLIBoardResolve{AsPaneID: asPaneID})
+}
+
+// BoardCaps asks the running daemon which board capabilities it has (design
+// 051). An older daemon answers with none.
+func BoardCaps(store *session.Store, sessionName, asPaneID string) ([]string, error) {
+	c, err := connect(store, sessionName)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	resp, err := cliRequest(c, &msg.MsgCLIBoardResolve{AsPaneID: asPaneID, WantCaps: true})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.OK {
+		return nil, fmt.Errorf("%s", resp.Error)
+	}
+	for _, line := range strings.Split(resp.Output, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "caps:"); ok {
+			return strings.Fields(rest), nil
+		}
+	}
+	return nil, nil
+}
+
 // boardQueryTimeout bounds a board read.
 //
 // Deliberately not defaultTimeout (30s) and deliberately not the TUI's 400ms
@@ -792,6 +867,22 @@ func BoardTail(store *session.Store, sessionName, boardID string, q board.Query)
 	defer c.Close()
 
 	return board.Ask(c.nc, boardID, q, boardQueryTimeout)
+}
+
+// BoardFlowPanes lists the session's agent panes as the flow model takes them
+// (design 052): ids, names and meta from one workspace snapshot.
+func BoardFlowPanes(store *session.Store, sessionName string) ([]board.FlowPane, error) {
+	c, err := connect(store, sessionName)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+
+	snap, err := getSnapshot(c)
+	if err != nil {
+		return nil, err
+	}
+	return board.FlowPanesFromSnapshot(snap), nil
 }
 
 // ---------------------------------------------------------------------------

@@ -576,6 +576,9 @@ func parseAutoJobInput(input string) (label, recipe string, ok bool) {
 // `schedule:` frontmatter key. Extra args are baked into the scheduled run.
 // A recipe without the key gets a friendly pointer instead of a job.
 func (w *WorkspaceActor) cmdAutoSchedule(out *strings.Builder, spec autoKindSpec, name string, args []string) {
+	if w.cron == nil || !w.cronReady(out) {
+		return
+	}
 	store := w.autoStore(spec.kind)
 	a, err := store.Load(name)
 	if err != nil {
@@ -627,6 +630,9 @@ func (w *WorkspaceActor) cmdAutoSchedule(out *strings.Builder, spec autoKindSpec
 
 // cmdAutoUnschedule removes the recipe's auto-* cron job.
 func (w *WorkspaceActor) cmdAutoUnschedule(out *strings.Builder, spec autoKindSpec, name string) {
+	if w.cron == nil || !w.cronReady(out) {
+		return
+	}
 	jobName := autoJobName(spec.label, webauto.SanitizeName(name))
 	for i, j := range w.cron.jobs {
 		if j.Name == jobName {

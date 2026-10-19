@@ -269,7 +269,7 @@ func (l *LaneActor) Receive(ctx actor.Context) {
 	case *msg.RequestEnvelope:
 		switch inner := m.Inner.(type) {
 		case *msg.MsgGetLaneSnapshot:
-			snap := l.collectSnapshot(inner.LayoutOnly, inner.NoHistories)
+			snap := l.collectSnapshot(inner.LayoutOnly, inner.NoHistories, inner.HistoryPaneID)
 			_ = m.Reply(&msg.MsgLaneSnapshotReply{Snapshot: snap})
 		case *msg.MsgGetLaneActivePane:
 			paneID := ""
@@ -680,7 +680,7 @@ func (l *LaneActor) updateActivePaneFromGroup() {
 // Snapshot
 // ---------------------------------------------------------------------------
 
-func (l *LaneActor) collectSnapshot(layoutOnly, noHistories bool) domain.LaneSnapshot {
+func (l *LaneActor) collectSnapshot(layoutOnly, noHistories bool, historyPane string) domain.LaneSnapshot {
 	snap := domain.LaneSnapshot{
 		ID:   l.id,
 		Flex: l.flex,
@@ -697,7 +697,7 @@ func (l *LaneActor) collectSnapshot(layoutOnly, noHistories bool) domain.LaneSna
 	fetch := func(i int, id, activePaneID string, rowFlex int) {
 		reply, err := l.pub.Request(
 			msg.T("pane-group", id, "snapshot"),
-			&msg.MsgGetPaneGroupSnapshot{LayoutOnly: layoutOnly, NoHistories: noHistories},
+			&msg.MsgGetPaneGroupSnapshot{LayoutOnly: layoutOnly, NoHistories: noHistories, HistoryPaneID: historyPane},
 			2*time.Second,
 		)
 		if err != nil {
@@ -892,6 +892,13 @@ func (l *LaneActor) AppendPaneRyshOutput(paneID, text string) {
 }
 
 // DeleteAllPaneKV removes all pane entries from the KV store.
+func (t *TabActor) DeleteAllPaneKV() {
+	for _, la := range t.laneActors {
+		la.DeleteAllPaneKV()
+	}
+}
+
+// DeleteAllPaneKV removes all pane entries from the KV store.
 func (l *LaneActor) DeleteAllPaneKV() {
 	for _, ga := range l.groupActors {
 		ga.DeleteAllPaneKV()
@@ -948,6 +955,7 @@ type laneKV struct {
 	ID           string        `json:"id"`
 	Flex         int           `json:"flex"`
 	Name         string        `json:"name,omitempty"`
+	Collapsed    bool          `json:"collapsed,omitempty"` // tab-owned (laneRef.collapsed); stamped by the tab like Flex
 	PaneGroups   []paneGroupKV `json:"pane_groups"`
 	GroupRowFlex []int         `json:"group_row_flex,omitempty"`
 	ActiveGroup  int           `json:"active_group"`

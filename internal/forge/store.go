@@ -14,8 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/rysh-ai/rysh-cli-code/internal/forge/runtime"
-	"github.com/rysh-ai/rysh-cli-code/internal/forge/toolpack"
+	"github.com/rysh-ai/rysh-cli-shared/forge/runtime"
+	"github.com/rysh-ai/rysh-cli-shared/forge/toolpack"
 )
 
 // Integration is a persisted, per-project integration definition. Secrets are
@@ -29,7 +29,13 @@ type Integration struct {
 	// WSURL overrides the websocket URL used for GraphQL subscriptions. When
 	// empty, it is derived from the endpoint by scheme convention (http→ws,
 	// https→wss). Set with `forge add --ws-url`.
-	WSURL         string `json:"ws_url,omitempty"`
+	WSURL string `json:"ws_url,omitempty"`
+	// GRPCProtocol selects the wire protocol for a gRPC source's
+	// server-streaming sessions: "" / "gateway" (grpc-gateway NDJSON) or
+	// "connect" (Connect enveloped framing, JSON codec — design 015 §5.3). A
+	// server accepts only its own request shape, so this is explicit, not
+	// sniffed. Set with `forge add --grpc-protocol`.
+	GRPCProtocol  string `json:"grpc_protocol,omitempty"`
 	CredentialEnv string `json:"credential_env,omitempty"`
 	BasicUserEnv  string `json:"basic_user_env,omitempty"`
 	BasicPassEnv  string `json:"basic_pass_env,omitempty"`
@@ -74,6 +80,22 @@ func (d Integration) Validate() error {
 	}
 	if strings.TrimSpace(d.SpecFile) == "" {
 		return fmt.Errorf("spec file is required")
+	}
+	return ValidateGRPCProtocol(d.GRPCProtocol, d.source())
+}
+
+// ValidateGRPCProtocol checks a --grpc-protocol value against the source it is
+// attached to: only gRPC sources have streaming wire protocols to choose.
+func ValidateGRPCProtocol(protocol, source string) error {
+	switch protocol {
+	case "":
+		return nil
+	case runtime.StreamProtocolGateway, runtime.StreamProtocolConnect:
+	default:
+		return fmt.Errorf("--grpc-protocol %q: want gateway or connect", protocol)
+	}
+	if source != SourceGRPC {
+		return fmt.Errorf("--grpc-protocol only applies to gRPC sources (this spec is %s)", source)
 	}
 	return nil
 }

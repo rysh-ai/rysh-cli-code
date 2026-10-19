@@ -15,8 +15,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/rysh-ai/rysh-cli-shared/forge/ir"
 	"github.com/rysh-ai/rysh-cli-code/internal/forge/gen"
-	"github.com/rysh-ai/rysh-cli-code/internal/forge/ir"
 )
 
 func init() { gen.Register(&generator{}) }
@@ -26,6 +26,16 @@ type generator struct{}
 func (g *generator) Name() string { return "java-sdk" }
 
 const basePackage = "com.rysh.forge.client"
+
+// javaRelease is the Java feature version the emitted SDK targets. The client
+// uses java.net.http (Java 11+) and URLEncoder.encode(String, Charset)
+// (Java 10+), so 11 is a floor, not a preference.
+//
+// This is the single source of truth for that requirement: javaPom writes it
+// into the emitted pom as <maven.compiler.release>, and the compile test reads
+// it to decide whether the local javac is new enough. Bumping it here can
+// therefore never leave the test asserting a stale level.
+const javaRelease = 11
 
 // Generate renders the API into a Java SDK FileSet: a Maven pom.xml, the main
 // Client.java, one model class per named schema, and a README.
@@ -76,7 +86,7 @@ func javaPom(artifact string, api *ir.API) string {
 	fmt.Fprintf(&b, "  <version>%s</version>\n", xmlEscape(version))
 	b.WriteString("  <packaging>jar</packaging>\n")
 	b.WriteString("  <properties>\n")
-	b.WriteString("    <maven.compiler.release>11</maven.compiler.release>\n")
+	fmt.Fprintf(&b, "    <maven.compiler.release>%d</maven.compiler.release>\n", javaRelease)
 	b.WriteString("    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>\n")
 	b.WriteString("  </properties>\n")
 	b.WriteString("  <!-- Zero third-party dependencies: JDK java.net.http only. -->\n")

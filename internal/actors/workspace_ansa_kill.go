@@ -4,6 +4,7 @@ package actors
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
@@ -64,13 +65,11 @@ func ansaResumeCommand(agent, sid, extraArgs string) string {
 	switch agent {
 	case "codex":
 		if sid != "" {
-			// Flags before the id: `codex resume` takes [OPTIONS] [SESSION_ID]
-			// [PROMPT], so a trailing flag risks being read as the prompt.
 			cmd = "codex resume"
 			if extraArgs != "" {
 				cmd += " " + extraArgs
 			}
-			return cmd + " " + sid + " " + shellQuote(ansaResumeNudge)
+			return nativeAgentScrubbed(nativeAgentCodex, cmd+" "+sid+" "+shellQuote(ansaResumeNudge))
 		}
 		cmd = "codex resume --last"
 	default:
@@ -79,7 +78,58 @@ func ansaResumeCommand(agent, sid, extraArgs string) string {
 	if extraArgs != "" {
 		cmd += " " + extraArgs
 	}
-	return cmd + " " + shellQuote(ansaResumeNudge)
+	return nativeAgentScrubbed(agent, cmd+" "+shellQuote(ansaResumeNudge))
+}
+
+const ansaMetaFleetWorktree = "fleet.worktree"
+
+// ansaPaneCwd is the directory a fleet pane's agent works in, or "" if none was
+// recorded.
+//
+// fleet.worktree WINS. It is the directory fleetctl assigned and the fleet's
+// standing orders require the agent to stay in. agent.cwd is a snapshot taken
+// whenever `##claude`/`##codex` last ran in the pane, and on a fleet pane it
+// goes stale: on 2026-09-21 video-roadmap carried agent.cwd=<repo root> from an
+// ad-hoc `##codex`, while its worktree was correct — and preferring agent.cwd,
+// as the first version of this fix did, resumed it in the root onto the shared
+// conversation. agent.cwd remains the fallback for a fleet built without
+// --worktrees, where it is the only directory anyone recorded.
+func ansaPaneCwd(p ansaPane) string {
+	if d := strings.TrimSpace(p.meta(ansaMetaFleetWorktree)); d != "" {
+		return d
+	}
+	return strings.TrimSpace(p.meta(metaAgentCwd))
+}
+
+// ansaResumeLine is ansaResumeCommand, run from the directory the agent was
+// working in.
+//
+// WITHOUT THE CD, A WHOLE FLEET RESUMES INTO ONE CONVERSATION. A restarted
+// daemon restores every pane as a fresh shell at the session root, and
+// `codex resume --last` is filtered to the current directory — so on
+// 2026-09-21 forty-two codex agents all resolved to the same newest root
+// conversation: one pane got it, every other showed "this conversation is open
+// in another session", and `fleetctl verify` still read them all as running.
+// claude is exposed the same way (it cannot find a session stored under a
+// directory it is not in), which the native path's nativeAgentCommand already
+// handles for `##claude`/`##codex` panes; this is the same rule for fleet panes.
+//
+// A recorded directory that no longer exists is REFUSED, not skipped past:
+// resuming in place instead is exactly how an agent attaches to somebody
+// else's conversation, and the receipt would still say "resumed". A pane that
+// recorded no directory at all keeps the old behaviour — there is nothing to
+// be wrong about.
+func ansaResumeLine(p ansaPane, agent, sid string) (string, error) {
+	cmd := ansaResumeCommand(agent, sid, ansaPaneAgentArgs(p))
+	dir := ansaPaneCwd(p)
+	if dir == "" {
+		return cmd, nil
+	}
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		return "", fmt.Errorf("its working directory %s is gone — not resuming "+
+			"in place, which would attach it to whichever conversation is newest there", dir)
+	}
+	return "cd " + shellQuote(dir) + " && " + cmd, nil
 }
 
 // ansaAgentRysh is the agent that is not a CLI at all: rysh's own
@@ -257,6 +307,17 @@ func (w *WorkspaceActor) ansaKill(out *strings.Builder, args []string) error {
 	return nil
 }
 
+// ansaRearmRestartSweep puts back the restart-sweep stamp a kill cleared, once
+// the agent has been relaunched (R12). Only a pane stamped before — it carries
+// `agent.kind` — is re-armed: inventing a kind and a cwd for a pane that never
+// had them would resume it somewhere it never ran.
+func ansaRearmRestartSweep(tr ansaTransport, p ansaPane) {
+	if strings.TrimSpace(p.meta(metaAgentKind)) == "" || strings.TrimSpace(p.meta(metaAgentNative)) != "" {
+		return
+	}
+	_ = tr.SetMeta(p.ID, metaAgentNative, "1")
+}
+
 // ansaResume relaunches each killed agent with its own CLI's resume verb.
 //
 // Everything it needs is on the PANE, stamped by fleetctl at launch: which CLI
@@ -324,18 +385,28 @@ func (w *WorkspaceActor) ansaResume(out *strings.Builder, args []string) error {
 		// and none of the readiness/composer races (F-31/F-35/F-39) that a
 		// post-resume nudge would reopen. The agent has its full history, so
 		// "continue where you left off" is unambiguous to it.
-		cmd := ansaResumeCommand(agent, sid, ansaPaneAgentArgs(p))
+		cmd, lerr := ansaResumeLine(p, agent, sid)
+		if lerr != nil {
+			fmt.Fprintf(out, "  FAILED   %s  %s [%s]: %v\n", p.ID, ansaPersona(p), p.fleetRole(), lerr)
+			continue
+		}
 		if derr := r.tr.Deliver(p.ID, msg.AnsaModeShell, cmd, ""); derr != nil {
 			fmt.Fprintf(out, "  FAILED   %s  %s [%s]: %v\n", p.ID, ansaPersona(p), p.fleetRole(), derr)
 			continue
 		}
+		ansaRearmRestartSweep(r.tr, p)
 		resumed++
 		// The receipt names the SESSION it targeted where there is one, and the
 		// cwd rule where there is not — "session " with nothing after it read as
 		// a resume that had lost the id, which for codex is not a fault.
 		which := "session " + sid
 		if sid == "" {
-			which = agent + " --last, by working directory"
+			which = agent + " --last"
+		}
+		if dir := ansaPaneCwd(p); dir != "" {
+			which += ", in " + dir
+		} else if sid == "" {
+			which += ", in the pane's current directory — no worktree recorded"
 		}
 		fmt.Fprintf(out, "  resumed  %s  %s [%s] (%s)\n", p.ID, ansaPersona(p), p.fleetRole(), which)
 	}

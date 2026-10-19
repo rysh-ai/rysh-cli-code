@@ -11,11 +11,11 @@ import (
 
 	"github.com/asynkron/protoactor-go/actor"
 
+	"github.com/rysh-ai/rysh-cli-shared/forge/runtime"
 	"github.com/rysh-ai/rysh-cli-code/internal/agentic"
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
 	"github.com/rysh-ai/rysh-cli-code/internal/forge"
 	"github.com/rysh-ai/rysh-cli-code/internal/forge/forgecmd"
-	"github.com/rysh-ai/rysh-cli-code/internal/forge/runtime"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 )
 
@@ -113,6 +113,11 @@ func (j *forgeConfigJob) run() {
 			}
 			if ig.Source != "" {
 				args = append(args, "--source", ig.Source)
+			}
+			if ig.GRPCProtocol != "" {
+				// Routed through the CLI flag so the config path gets exactly the
+				// same validation (gateway|connect, gRPC sources only).
+				args = append(args, "--grpc-protocol", ig.GRPCProtocol)
 			}
 			if ig.CredentialEnv != "" {
 				args = append(args, "--cred-env", ig.CredentialEnv)

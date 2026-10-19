@@ -153,6 +153,11 @@ type ansaTransport interface {
 	// when hard. The pane guards its own shell, so a kill aimed at a pane
 	// whose program already exited is a no-op rather than a pane-killer.
 	Kill(paneID string, hard bool) error
+	// SetMeta writes one pane metadata key; an empty value deletes it
+	// (MsgPaneSetMeta's convention). It exists so a stop can DISARM the
+	// restart sweep (design 029 §7, R12): `agent.native` is the pane's own
+	// statement that a restart should bring its agent back.
+	SetMeta(paneID, key, value string) error
 
 	// TurnStatus asks the pane's OWN agent — rysh's LLMPromptExecutionActor —
 	// whether it is mid-turn and whether it is paused.
@@ -502,6 +507,10 @@ func (t *natsAnsaTransport) Kill(paneID string, hard bool) error {
 		&msg.MsgPaneKillForeground{PaneID: paneID, Hard: hard})
 }
 
+func (t *natsAnsaTransport) SetMeta(paneID, key, value string) error {
+	return t.pub.Send(msg.T("pane", paneID, "inbox"), &msg.MsgPaneSetMeta{Key: key, Value: value})
+}
+
 // The native trio. Both transports implement them the same way — one subject,
 // three questions for the pane's own agent — so a rysh agent behaves
 // identically whether ANSA is reached in-process or over the bus.
@@ -750,10 +759,6 @@ func ansaConfirmSubmitted(pub *msg.NATSPublisher, screen func(string) ([]string,
 	if program == "" || screen == nil {
 		return nil // inbox path: nothing was typed, nothing to submit
 	}
-	probe := text
-	if len(probe) > ansaSubmitProbeLen {
-		probe = probe[:ansaSubmitProbeLen]
-	}
 	for i := 0; i < ansaSubmitRetries; i++ {
 		time.Sleep(ansaSubmitRecheck)
 		rows, err := screen(paneID)
@@ -766,7 +771,7 @@ func ansaConfirmSubmitted(pub *msg.NATSPublisher, screen func(string) ([]string,
 			// verification mattered most. Keep looking until the bound.
 			continue
 		}
-		if !ansaComposerHolds(rows, probe) {
+		if !ansaComposerHolds(rows, text) {
 			return nil
 		}
 		if err := pub.Send(msg.T("pane", paneID, "rawinput"),
@@ -796,7 +801,58 @@ func ansaConfirmSubmitted(pub *msg.NATSPublisher, screen func(string) ([]string,
 // Rules are the TUI's own horizontal borders. Fewer than two means no composer
 // is drawn (a shell pane, or a program that took the alternate screen), and the
 // honest answer there is "not held" rather than a guess.
-func ansaComposerHolds(rows []string, probe string) bool {
+//
+// F-44 — IT TAKES THE WHOLE TEXT, NOT A PRE-CUT PROBE, and the length is load
+// bearing. The literal scan below cannot see an order the recipient's TUI has
+// COLLAPSED into `[Pasted text #N]` placeholders: ansaTypeIntoPane publishes the
+// body as one MsgRawKeyInput, the pane writes it straight to the PTY, and a
+// burst that large arrives in several chunks, each detected as a paste. Not one
+// character of what we typed is then on screen, so the literal scan missed,
+// "not held" was returned, ansaConfirmSubmitted concluded the order had been
+// submitted, and the re-press declined at the one moment it exists for. A ~4k
+// order sat unsent for twelve minutes behind a receipt that said `delivered`.
+// Same shape as F-38 one layer in: there the verifier looked in the wrong
+// REGION, here it looked for the wrong TEXT.
+//
+// WHY THE PLACEHOLDER VOCABULARY AND NOT "THE COMPOSER IS NON-EMPTY", which is
+// the shorter fix and the wrong one: a human sharing this pane types too. A
+// half-written human keystroke makes a non-empty composer look exactly like our
+// unsubmitted order, and the re-press would then SUBMIT A HUMAN'S UNFINISHED
+// LINE on their behalf — a worse failure than the one being closed, and one they
+// could not attribute. Narrow beats broad on a surface that presses keys.
+//
+// ansaPasteCollapseMin is the second half of that guard: a placeholder only
+// counts as OUR order when what we typed was big enough to be collapsed at all.
+// Below it, a placeholder in the composer is somebody else's paste and we keep
+// our hands off.
+//
+// THE LIMITS, WRITTEN DOWN RATHER THAN IMPLIED (E9 §4 — a documented limit is a
+// feature, an implied one is a defect):
+//
+//   - The vocabulary is claude's `[Pasted text #N]` and rysh's own
+//     `[clipboard text]` (internal/tui/model_input.go:592). **Codex's placeholder,
+//     if it has one, is unverified** — a codex pane that collapses a paste is
+//     still F-44 and this fix will not see it.
+//   - ansaPasteCollapseMin is a conservative floor, NOT the recipient's real
+//     threshold. That threshold lives in the recipient TUI's own paste heuristic,
+//     which we cannot observe from a rendered screen; an order between the two
+//     numbers collapses without being recognised.
+//   - A placeholder means the composer holds SOMETHING WE CANNOT READ. When our
+//     own text is long enough, that is overwhelmingly our order — but it is an
+//     inference, not the literal match the rest of this function makes.
+func ansaComposerHolds(rows []string, text string) bool {
+	// An empty probe makes strings.Contains true on every row, which reports a
+	// composer as holding an order nobody typed and re-presses Enter against it.
+	// Pre-existing, latent while every caller passed a real order; closed here
+	// because this function now owns the truncation.
+	if text == "" {
+		return false
+	}
+	probe := text
+	if len(probe) > ansaSubmitProbeLen {
+		probe = probe[:ansaSubmitProbeLen]
+	}
+
 	var rules []int
 	for i, r := range rows {
 		if strings.Count(r, "─") > 8 {
@@ -807,13 +863,49 @@ func ansaComposerHolds(rows []string, probe string) bool {
 		return false
 	}
 	open, close := rules[len(rules)-2], rules[len(rules)-1]
-	for _, r := range rows[open:close] {
+	composer := rows[open:close]
+
+	for _, r := range composer {
 		if strings.Contains(r, probe) {
 			return true
 		}
 	}
+
+	// Only now, and only for text large enough to have been collapsed.
+	if len(text) < ansaPasteCollapseMin {
+		return false
+	}
+	for _, r := range composer {
+		for _, ph := range ansaPastePlaceholders {
+			if strings.Contains(r, ph) {
+				return true
+			}
+		}
+	}
 	return false
 }
+
+// ansaPasteCollapseMin is how much typed text makes a paste collapse possible at
+// all, and it is deliberately well above any short prompt and well below the ~4k
+// order F-44 was observed on. See ansaComposerHolds for why it is not the
+// recipient's real threshold and cannot be.
+const ansaPasteCollapseMin = 200
+
+// ansaPastePlaceholders is the recipient-side vocabulary for "text is here but
+// not rendered". SCOPED TO THE COMPOSER REGION by the only caller: once an order
+// is submitted its placeholder moves into the transcript, above the opening
+// rule, where finding it would re-press Enter forever on a working pane
+// (TestASubmittedOrderIsNotMistakenForAnUnsentOne pins that).
+var ansaPastePlaceholders = []string{
+	"[Pasted text", // claude
+	pastedPlaceholderToken,
+}
+
+// pastedPlaceholderToken mirrors internal/tui.pastedPlaceholder, which is in
+// another package and unexported. Duplicated rather than exported: this is a
+// SCREEN-MATCHING string, and the two uses are independent — the TUI owns what
+// it draws, this owns what it recognises on someone else's screen.
+const pastedPlaceholderToken = "[clipboard text]"
 
 // ---------------------------------------------------------------------------
 // draining a stop (F-30, founder decision 2026-08-10)
@@ -1161,7 +1253,16 @@ func (r *ansaRouter) KillFleet(fleet string) ([]ansaKillOutcome, *msg.MsgAnsaRou
 	}
 	out := make([]ansaKillOutcome, 0, len(targets))
 	for _, p := range targets {
-		out = append(out, r.killPane(p))
+		o := r.killPane(p)
+		// A STOP STAYS STOPPED ACROSS A RESTART (R12). The startup sweep
+		// resumes every pane still carrying `agent.native`, so a verified kill
+		// clears it; `##ansa resume` puts it back (ansaRearmRestartSweep). Only
+		// a VERIFIED stop of a process agent disarms: an unverified kill may
+		// have left the agent running, and a rysh agent is not the sweep's.
+		if !o.Native && o.Err == nil && o.Dead && strings.TrimSpace(p.meta(metaAgentNative)) != "" {
+			_ = r.tr.SetMeta(p.ID, metaAgentNative, "")
+		}
+		out = append(out, o)
 	}
 	return out, nil
 }

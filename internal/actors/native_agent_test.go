@@ -5,11 +5,14 @@ package actors
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/agentenv"
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 )
 
@@ -39,9 +42,16 @@ func TestClaudeLaunchAndResumeAgreeOnTheSessionId(t *testing.T) {
 // inherits those markers, and so does every pane shell under it.
 func TestClaudeLaunchScrubsTheNestingMarkers(t *testing.T) {
 	cmd := nativeAgentCommand(nativeAgentSpec{Kind: nativeAgentClaude, SessionID: "x"})
-	for _, v := range claudeCleanEnv {
+	if !strings.Contains(cmd, " exec-clean --agent claude -- claude --session-id x") {
+		t.Errorf("the launch must run through exec-clean: %q", cmd)
+	}
+	for _, v := range []string{"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH",
+		"CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CLAUDE_PID", "CLAUDE_EFFORT"} {
+		if !agentenv.Denied(v) {
+			t.Errorf("%s must be scrubbed from the launch env", v)
+		}
 		if !strings.Contains(cmd, "-u "+v) {
-			t.Errorf("%s must be scrubbed from the launch env: %q", v, cmd)
+			t.Errorf("%s must be in the static fallback of the launch line: %q", v, cmd)
 		}
 	}
 }
@@ -50,13 +60,13 @@ func TestClaudeLaunchScrubsTheNestingMarkers(t *testing.T) {
 // id discovery read back off its rollout file.
 func TestCodexLaunchIsBareAndResumeNamesTheSession(t *testing.T) {
 	launch := nativeAgentCommand(nativeAgentSpec{Kind: nativeAgentCodex})
-	if launch != "codex "+codexAutonomyFlag {
+	if launch != agentenv.StaticPrefix()+" codex "+codexAutonomyFlag {
 		t.Errorf("codex takes no session id at launch: %q", launch)
 	}
 
 	const sid = "019e60f7-d058-7ac1-9cd0-eb7be5280af2"
 	resume := nativeAgentCommand(nativeAgentSpec{Kind: nativeAgentCodex, SessionID: sid, Resume: true})
-	if resume != "codex resume "+codexAutonomyFlag+" "+sid {
+	if resume != agentenv.StaticPrefix()+" codex resume "+codexAutonomyFlag+" "+sid {
 		t.Errorf("a known id must be resumed by id: %q", resume)
 	}
 	if strings.Contains(resume, "--last") {
@@ -71,7 +81,7 @@ func TestCodexResumeFlagsPrecedeTheSessionId(t *testing.T) {
 	cmd := nativeAgentCommand(nativeAgentSpec{
 		Kind: nativeAgentCodex, SessionID: "sid-1", Args: "--search", Resume: true,
 	})
-	if cmd != "codex resume "+codexAutonomyFlag+" --search sid-1" {
+	if cmd != agentenv.StaticPrefix()+" codex resume "+codexAutonomyFlag+" --search sid-1" {
 		t.Errorf("flags must precede the id: %q", cmd)
 	}
 }
@@ -81,7 +91,7 @@ func TestCodexResumeFlagsPrecedeTheSessionId(t *testing.T) {
 // directory apart — which is why it is the fallback and never the first choice.
 func TestResumeWithoutAnIdFallsBackToTheMostRecentInThisDirectory(t *testing.T) {
 	codex := nativeAgentCommand(nativeAgentSpec{Kind: nativeAgentCodex, Resume: true})
-	if codex != "codex resume --last "+codexAutonomyFlag {
+	if codex != agentenv.StaticPrefix()+" codex resume --last "+codexAutonomyFlag {
 		t.Errorf("codex fallback: %q", codex)
 	}
 	claude := nativeAgentCommand(nativeAgentSpec{Kind: nativeAgentClaude, Resume: true})
@@ -169,7 +179,7 @@ func TestOnlyResumeCarriesTheWorkingDirectory(t *testing.T) {
 	resume := nativeAgentCommand(nativeAgentSpec{
 		Kind: nativeAgentClaude, SessionID: "s", Cwd: dir, Resume: true,
 	})
-	if !strings.HasPrefix(resume, "cd "+shellQuote(dir)+" && ") {
+	if want := nativeAgentInDir(dir, nativeAgentClaude, ""); !strings.HasPrefix(resume, want) {
 		t.Errorf("resume must cd into the agent's directory first: %q", resume)
 	}
 
@@ -185,9 +195,140 @@ func TestTheWorkingDirectoryIsQuotedForTheShell(t *testing.T) {
 	cmd := nativeAgentCommand(nativeAgentSpec{
 		Kind: nativeAgentClaude, SessionID: "s", Cwd: "/tmp/it's here", Resume: true,
 	})
-	if !strings.HasPrefix(cmd, `cd '/tmp/it'\''s here' && `) {
+	if !strings.Contains(cmd, `cd '/tmp/it'\''s here' && `) {
 		t.Errorf("a quote in the path must be escaped: %q", cmd)
 	}
+}
+
+// A RESUME INTO A DIRECTORY THAT IS GONE SAYS WHAT TO DO NEXT — IN EVERY PANE
+// SHELL (design 029 §7).
+//
+// The line is typed into whatever shell the pane runs, and rysh supports sh,
+// bash, zsh and fish (history_expand.go). A form only POSIX shells parse —
+// `if …; then …; fi` — is a parse error under fish for EVERY resume with a cwd,
+// not just the missing-directory one. So the same three behaviours are run
+// under each shell found on PATH; a shell that is not installed skips rather
+// than passes, and TestTheResumeLineUsesOnlyGrammarEveryPaneShellShares guards
+// the fish half where fish is absent.
+//
+// The command is injected by swapping the agent invocation inside the builder's
+// own output, so what runs is exactly what a pane is sent, with only the CLI
+// replaced.
+func TestAResumeIntoAMissingDirectorySaysWhatToDoNext(t *testing.T) {
+	for _, sh := range []string{"sh", "bash", "zsh", "dash", "fish"} {
+		t.Run(sh, func(t *testing.T) {
+			bin, err := exec.LookPath(sh)
+			if err != nil {
+				t.Skipf("%s is not installed here", sh)
+			}
+			run := func(dir, agent string) (string, error) {
+				t.Helper()
+				with := nativeAgentCommand(nativeAgentSpec{
+					Kind: nativeAgentClaude, SessionID: "s", Cwd: dir, Resume: true})
+				bare := nativeAgentCommand(nativeAgentSpec{
+					Kind: nativeAgentClaude, SessionID: "s", Resume: true})
+				if !strings.Contains(with, bare) {
+					t.Fatalf("the cwd wrapper must contain the agent command verbatim:\n%q\n%q", with, bare)
+				}
+				out, err := exec.Command(bin, "-c", strings.Replace(with, bare, agent, 1)).CombinedOutput()
+				return string(out), err
+			}
+
+			// Gone: one line, naming the directory and both ways out, a non-zero
+			// status, and the agent never starts somewhere else instead.
+			gone := filepath.Join(t.TempDir(), "removed worktree")
+			out, err := run(gone, "echo AGENT-RAN")
+			if err == nil {
+				t.Errorf("a resume that could not enter its directory must not exit 0")
+			}
+			if strings.Contains(out, "AGENT-RAN") {
+				t.Errorf("the agent must not start outside its directory: %q", out)
+			}
+			if lines := strings.Split(strings.TrimRight(out, "\n"), "\n"); len(lines) != 1 {
+				t.Errorf("want exactly one line, got %d: %q", len(lines), out)
+			}
+			for _, want := range []string{gone, "re-create", "##claude new"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("the line must name %q: %q", want, out)
+				}
+			}
+
+			// Present but the agent fails: its own status, and no talk of a
+			// missing directory — `cd X && cmd || echo` would get this wrong.
+			here := t.TempDir()
+			out, err = run(here, "false")
+			if err == nil {
+				t.Errorf("the agent's non-zero exit must survive the wrapper")
+			}
+			if strings.Contains(out, "re-create") || strings.Contains(out, here) {
+				t.Errorf("an agent that exits non-zero is not a missing directory: %q", out)
+			}
+
+			// Present and fine — including a name with a quote and a backslash,
+			// the two characters whose quoting differs between the grammars —
+			// the agent runs, and runs in the directory.
+			odd := filepath.Join(t.TempDir(), `it's a\dir`)
+			if err := os.Mkdir(odd, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, dir := range []string{here, odd} {
+				out, err = run(dir, "pwd")
+				if err != nil {
+					t.Fatalf("resume in an existing directory failed: %v %q", err, out)
+				}
+				if real, _ := filepath.EvalSymlinks(dir); !strings.HasSuffix(strings.TrimSpace(out), filepath.Base(real)) {
+					t.Errorf("the agent must run in its directory, got %q want %q", out, real)
+				}
+			}
+		})
+	}
+}
+
+// THE FISH HALF, WHERE FISH IS NOT INSTALLED. fish has no `then`/`fi` (an `if`
+// ends with `end`), no `$(…)` before 3.4, and gives `{`/`(` meanings of its own;
+// and inside fish single quotes `\\` and `\'` are escapes, where POSIX keeps
+// every byte literal. The emitted line is held to the grammar both share —
+// simple commands, `;`, `&&`, `||`, redirections, single quotes holding no
+// `\\` and not ending in `\` — so a regression goes red here even on a machine without fish.
+func TestTheResumeLineUsesOnlyGrammarEveryPaneShellShares(t *testing.T) {
+	forbidden := regexp.MustCompile(`(^|[\s;])(then|fi|do|done|esac)([\s;]|$)|\$\(|[{}()]`)
+	for _, dir := range []string{"/w", "/tmp/it's here", `C:\odd\dir`, `/ends/with\`} {
+		for _, kind := range []string{nativeAgentClaude, nativeAgentCodex} {
+			line := nativeAgentCommand(nativeAgentSpec{Kind: kind, SessionID: "s", Cwd: dir, Resume: true})
+			if m := forbidden.FindString(line); m != "" {
+				t.Errorf("%s/%q: %q is not fish grammar: %s", kind, dir, m, line)
+			}
+			for i, span := range singleQuotedSpans(line) {
+				// fish's only escapes inside single quotes are \\ and \' (a span
+				// ending in \ escapes its own closing quote); `\n` in '%s\n' is
+				// literal in both grammars, so it is allowed.
+				if strings.Contains(span, `\\`) || strings.HasSuffix(span, `\`) {
+					t.Errorf("%s/%q: quoted span %d holds a fish escape: %q in %s",
+						kind, dir, i, span, line)
+				}
+			}
+		}
+	}
+}
+
+// singleQuotedSpans returns the bodies of the '…' spans in a POSIX-quoted line
+// (a backslash outside quotes escapes the next byte).
+func singleQuotedSpans(line string) []string {
+	var spans []string
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case '\\':
+			i++
+		case '\'':
+			j := strings.IndexByte(line[i+1:], '\'')
+			if j < 0 {
+				return append(spans, line[i+1:])
+			}
+			spans = append(spans, line[i+1:i+1+j])
+			i += j + 1
+		}
+	}
+	return spans
 }
 
 // An agent kind this binary does not know resolves to claude rather than to an
@@ -271,10 +412,10 @@ func writeRollout(t *testing.T, dir, id, cwd string, mod time.Time) string {
 func TestParseCodexRolloutMetaReadsTheRealShape(t *testing.T) {
 	line := []byte(`{"timestamp":"2026-05-25T21:08:34.009Z","type":"session_meta",` +
 		`"payload":{"id":"019e60f7-d058-7ac1-9cd0-eb7be5280af2","timestamp":"2026-05-25T21:08:34.009Z",` +
-		`"cwd":"/Users/halilagin","originator":"codex-tui","cli_version":"0.133.0"}}`)
+		`"cwd":"/home/codex-user","originator":"codex-tui","cli_version":"0.133.0"}}`)
 
 	id, cwd, ok := parseCodexRolloutMeta(line)
-	if !ok || id != "019e60f7-d058-7ac1-9cd0-eb7be5280af2" || cwd != "/Users/halilagin" {
+	if !ok || id != "019e60f7-d058-7ac1-9cd0-eb7be5280af2" || cwd != "/home/codex-user" {
 		t.Errorf("real session_meta not parsed: id=%q cwd=%q ok=%v", id, cwd, ok)
 	}
 }

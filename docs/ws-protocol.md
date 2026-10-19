@@ -29,6 +29,7 @@ change is a test that reads the server's source — which is what guards this fi
 | Query flag | `?stream=1` marks a **content-plane client** (see §1.2) |
 | Inbound frame limit | 32 MB — `browser_result` carries a base64 screenshot and the old 64 KB limit closed the socket (`hub.go:200-204`) |
 | Keepalive | server pings; the client's pong resets the read deadline |
+| Compression | `permessage-deflate` (no context takeover) when the client offers it — every browser does. Frames under 256 bytes go uncompressed. `pane_vt` screens shrink ~70× |
 
 ### 1.1 Envelope
 
@@ -60,6 +61,16 @@ this document exists.
   `pipeline_output`, `webpane_frame`. Seeded on connect with a layout-only `snapshot`
   followed by `pane_content` batches (`seed.go`), because one 17 MB snapshot could not
   be written inside the write deadline over a tunnel.
+  A stream client that has sent `visible_panes` (§3.2) receives `pane_vt` frames only
+  for the panes it named; see that command.
+  **Sync-paused panes are the exception to all of the above.** A pane whose meta carries
+  `web.sync=off` (`##pane sync off`) sends stream clients no `pane_vt`, no `pane_output`
+  (chat-mode output excepted — it builds the Ask Rysh transcript) and no `pane_content`
+  catch-up, whether or not a client shows it; the server does not even fetch its frame.
+  It stays in the layout snapshot, `meta` included, so a client can mark it frozen. When
+  the key is cleared every stream client showing the pane is sent a `pane_content` with
+  its current content and its next `pane_vt`, even if that frame is unchanged. This is
+  what lets one browser hold a fleet of agents it is not watching (`internal/web/pane_sync.go`).
 - **Non-stream clients** receive the full `snapshot`.
 - Everything else is broadcast to all clients, except `completion_result` and
   `clipboard_content`, which are returned **only to the client that asked**. A broadcast
@@ -278,9 +289,50 @@ looking at.
 
 ---
 
+### 2.10 Company (design 037, Company Connect)
+
+**`company_snapshot`** — the bound AI-native company as the daemon's follower last saw it.
+Broadcast to every client whenever the CompanyActor publishes a fresh snapshot (after a fetch,
+a live hint, a poll, or a live/offline transition), and sent to the requesting client only as
+the reply to `company_query`. A session that is not bound to a company never sends it.
+
+| field | type |
+|---|---|
+| `snapshot` | object — the Go `msg.CompanySnapshot` (rysh-cli `internal/msg/company_messages.go`): `company`, `orders`, `enquiries`, `email`, `phone`, `services`, `channels`, `activity` (newest first), `link` (`connected`, `live`, `auth_failed`, `last_error`, `last_fetch`), `fetched_at` |
+
+The interior fields are governed by the Go type, not by this document.
+
+### 2.11 Meetings (design 043)
+
+**`meeting_token`** — reply to `meeting_token` (§3.14), sent to the requesting client
+**only**: it carries a LiveKit participant token for the human in a meeting pane, or —
+for a request with a `room` and no pane (the app's Meeting panel, E-87) — for that room on
+the session's rysh server. The daemon never logs or stores it; the client keeps it in
+memory for the pane's (or panel's) lifetime.
+
+| field | type | notes |
+|---|---|---|
+| `pane_id` | string | echoed from the request (`""` for a room request) |
+| `room` | string | echoed from the request (`""` for a pane request); a client routes a room request's reply by it |
+| `url` | string | LiveKit server URL (success only) |
+| `token` | string | participant token (success only) |
+| `identity` | string | the participant identity the token carries (success only) |
+| `expires_at` | string | RFC 3339 expiry (success only) |
+| `error` | string | set instead of the four fields above when there is no token: not a meeting pane, not a rysh room, an invalid room id, no rysh key/server, or the rysh server refused |
+
+**`meeting_reply`** — reply to `meeting_command` (§3.14), sent to the requesting client
+**only**: the daemon's answer to one meeting-bot lifecycle verb (MTG-6, design 040).
+
+| field | type | notes |
+|---|---|---|
+| `id` | string | echoed meeting id; a client routes the reply to that meeting's panel by it |
+| `verb` | string | echoed verb |
+| `reply` | object | the Go `meeting.Reply` (rysh-cli `internal/meeting/types.go`): `state`, `phase`, `mode`, `turn_id`, `speaker`, `agent`, `request`, `result`, `notice`, … — governed by the Go type, not by this document |
+| `error` | string | set when the verb was refused (not one of the seven, no valid meeting id), the daemon did not answer, or the daemon reported an error (`reply.error`) |
+
 ## 3. Client → server commands
 
-86 actions. All are sent as `{"type":"command","data":{"action":…,"params":…}}`. An
+87 actions. All are sent as `{"type":"command","data":{"action":…,"params":…}}`. An
 action with no parameters takes no `params` at all.
 
 ### 3.1 Layout — tabs, panes, focus
@@ -301,6 +353,7 @@ action with no parameters takes no `params` at all.
 | `rename_pane` | `title` (string) |
 | `rename_tab` | `title` (string) |
 | `rename_lane` | `name` (string) |
+| `lane_collapse` | `verb` (string): `collapse` \| `expand` \| `toggle`; `lane` (string): lane id, 1-based index or name; empty = the active lane; `all` with `expand`. Any other verb is dropped (design 053) |
 | `stacked_pane_next`, `stacked_pane_prev` | — |
 | `stacked_pane_select` | `index` (int) |
 | `stacked_pane_move` | `direction` (string) |
@@ -319,6 +372,17 @@ id and withdraws every claim when the socket closes — without that, a closed b
 window would clamp its panes for the life of the daemon. Send it, or the PTY stays at
 80x24 and `vim` fills 24 rows regardless of the pane's real height.
 
+**`visible_panes`** — `pane_ids` (array of string). The panes this window is showing.
+From the first one a stream client sends, it receives `pane_vt` frames **only** for
+those panes; before it sends one it receives every pane, so a client that never sends
+it behaves exactly as before. Resend the whole set whenever it changes, and again
+after reconnecting — the filter lives on the connection. A pane that joins the set is
+sent its current frame on the next tick even if it has not changed, so the client
+never renders a screen it missed while the pane was off screen. The raw-mode clearing
+`pane_vt` (a pane leaving interactivity) still goes to every stream client. This
+exists because one busy claude pane alone streamed ~40 KB/s of screens, and a fleet
+session sent every one of them to every browser.
+
 **`pane_clear_output`** — `pane_id` (string).
 **`pane_native_mode`** — `pane_id` (string), `action` (string).
 **`agentic_cancel`** — `pane_id` (string).
@@ -333,13 +397,30 @@ window would clamp its panes for the life of the daemon. Send it, or the PTY sta
 | `pane_id` | string |
 | `request_id` | string |
 | `decision` | string — `yes` \| `yes_always` \| `no` \| `no_with_explanation` \| `choice_selected` |
-| `reason` | string — the rejection text for `no_with_explanation`; the chosen index, as a string, for `choice_selected` |
+| `reason` | string — the rejection text for `no_with_explanation`; the chosen option's label for `choice_selected` |
+| `choice_idx` | int — zero-based index into the request's `choices`; meaningful only with `choice_selected` |
 
 Those five are the whole vocabulary (Go: `msg.ApprovalDecision`), and the server now
 **refuses** anything else with an `approval_error` rather than forwarding it. It has to:
 the pane echo counts any non-rejection as approved, while the orchestrator's switch takes
 its default branch and does not run the tool — so an unknown string produced a pane that
 said `[approved]` and a tool that never ran.
+
+**`choice_selected` answers a question, not a gate** (`F-47`). The only `approval_request`
+that carries `choices` is the `ask_user` tool's (`type: "question"`), and `ask_user` turns
+`choice_idx` into the option's text for the model. A gate (`diff`, `destructive_action`)
+offers no choices and refuses `choice_selected` by name — the tool does not run. The echo is
+`[chose option N: <label>]`, never `[approved]`. Clients before `F-47` sent the index as a
+string in `reason` and no `choice_idx`; `ask_user` still reads that, unless `reason` is one of
+the option labels.
+
+**A question is answered, not approved** (`F-92`). The server remembers the `type` of every
+`approval_request` it forwards, so for a `question` the echo is `[answered: yes]` (`yes` /
+`yes_always`, no reason), `[answered: <text>]` (`yes` with a typed answer, or
+`no_with_explanation`), `[declined]` (`no`), or the choice above — never `[approved]` /
+`[rejected]`. `ask_user` hands the model the same thing: `yes`, the text, or
+`(user declined to answer)`. A client answering a question's free-text field sends `yes` with the
+text in `reason`.
 
 **`browser_result`** — `pane_id` (string), `request_id` (string), `success` (bool),
 `result` (any JSON), `error` (string), `screenshot` (string, base64). The frame that
@@ -446,11 +527,21 @@ Mutating actions are gated on control mode inside `handleControlCommand`.
 | `max_bytes` | int | ask for **less** than the 256 KB ceiling; it cannot raise it. 0 means "as much as you will give me" |
 
 `source` is a closed set: `output`, `ai_output`, `rysh_output`, `chat_output`,
-`external_output`, `vt_screen`, `remote_vt_screen`. The two VT sources are the screen
+`external_output`, `vt_screen`, `remote_vt_screen`, `board`. The two VT sources are the screen
 lines joined with `\n`. The set is closed deliberately — the pane snapshot this reads
 from also carries provider names, upstream URLs and pane metadata, and none of that
 should become readable just because it shares a struct. An unrecognised `source` comes
 back as an `err`, not as empty text.
+
+**Agents-board panes.** A board pane is shell-less, so its `output` buffer is not what it
+shows. For an `agents-board` pane, `output` (the default) and `board` both return the
+pane's board as **unwrapped** messages — the exact text `##board copy` and the TUI's
+`y`/`Y` produce, from the one shared item model (`internal/board/items.go`): per message
+(a root or a reply, oldest first) a `● persona  [kind]  YYYY-MM-DD HH:MM:SS` header and
+the body byte for byte (terminal escapes stripped), a blank line between messages. It
+reads the recorder over the same 200-thread window as `board_get`; `truncated` is `true`
+when that window withheld or filtered threads, and a recorder that does not answer comes
+back as `err`, never as empty text. `board` on any other pane type is an `err`.
 
 Unlike every other command here, a `clipboard_copy` that fails **answers**: an unknown
 source, a pane that does not reply, an unexpected reply — each returns a
@@ -523,6 +614,20 @@ The terminal UI does not need this command because it builds the board itself fr
 store it subscribes to directly. Every other client does.
 
 ---
+
+### 3.13 Company (design 037)
+
+| command | parameters |
+|---|---|
+| `company_query` | none — ask the follower for its latest snapshot; answered by `company_snapshot` to this client only, or not at all when the session has no company |
+| `company_refresh` | none — ask the follower to fetch now; the result arrives as a broadcast `company_snapshot` |
+
+### 3.14 Meetings (design 043)
+
+| command | parameters |
+|---|---|
+| `meeting_command` | `id` — the meeting's registry id (`m-xxxxxx`, required; there is no "only meeting" default here), `verb` — one of `pending`, `approve`, `reject`, `speak`, `pause`, `resume`, `cancel` (anything else is refused; list/status/leave stay with `##meeting`), `turn_id` — the waiting turn, for `approve`/`reject`/`speak`. Forwarded as `MsgMeetingCommand` to this server's session workspace; answered by `meeting_reply` (§2.11) to this client only (MTG-6) |
+| `meeting_token` | `pane_id` — a meeting pane of kind `livekit`; answered by `meeting_token` (§2.11) to this client only. The room and server come from the daemon's registry entry for that pane, never from the client. Or, with no `pane_id`: `room` — a rysh-server room id (`[A-Za-z0-9_-]{1,64}`) on the session's rysh server (`RYSH_SERVER_URL`, else `upstream.url`), tokened with the session's rysh key (E-87). A request with a `pane_id` ignores `room` |
 
 ## 4. Known asymmetries
 

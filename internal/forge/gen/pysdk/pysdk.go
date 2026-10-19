@@ -14,8 +14,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/rysh-ai/rysh-cli-shared/forge/ir"
 	"github.com/rysh-ai/rysh-cli-code/internal/forge/gen"
-	"github.com/rysh-ai/rysh-cli-code/internal/forge/ir"
 )
 
 func init() { gen.Register(&generator{}) }

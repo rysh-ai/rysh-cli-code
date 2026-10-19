@@ -24,6 +24,7 @@ import (
 
 	"github.com/rysh-ai/rysh-cli-shared/secretnat"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/agentic"
 	"github.com/rysh-ai/rysh-cli-code/internal/provider"
 )
 
@@ -34,6 +35,16 @@ func (w *WorkspaceActor) snatManager() *secretnat.Manager {
 		return nil
 	}
 	return w.agSetup.SecretNAT
+}
+
+// snatRejectedDetectors returns the [snat] custom_detectors entries that were
+// refused when the manager was built, so ##snat status can name them. Empty
+// when the setup is unavailable or the config is clean.
+func (w *WorkspaceActor) snatRejectedDetectors() []agentic.SNATRejectedDetector {
+	if w.agSetup == nil {
+		return nil
+	}
+	return w.agSetup.SNATRejected
 }
 
 // snatSimpleProvider wraps a simple single-turn provider (judge/loop seats)
@@ -241,9 +252,43 @@ func (w *WorkspaceActor) handleSnatSubcommand(out *strings.Builder, paneID strin
 			fmt.Fprintf(out, "\n")
 		}
 		fmt.Fprintf(out, "  detectors       : %s\n", strings.Join(mgr.DetectorNames(), ", "))
+
+		// A custom detector that failed to load is coverage the user
+		// configured and does not have. It has to be named here, with the
+		// pattern and the reason, or the only notice is an slog line in the
+		// daemon log that nobody reads.
+		if rej := w.snatRejectedDetectors(); len(rej) > 0 {
+			fmt.Fprintf(out, "%s\n", strings.Repeat("-", 60))
+			fmt.Fprintf(out, "  REJECTED custom detectors — configured but NOT active:\n")
+			for _, r := range rej {
+				fmt.Fprintf(out, "    %s  pattern: %s\n", r.Name, r.Pattern)
+				fmt.Fprintf(out, "      -> %s\n", r.Reason)
+			}
+			fmt.Fprintf(out, "  the other detectors above are unaffected. fix the pattern in\n")
+			fmt.Fprintf(out, "  snat.custom_detectors and restart to activate it.\n")
+		}
+
 		fmt.Fprintf(out, "%s\n", strings.Repeat("-", 60))
 		fmt.Fprintf(out, "  the LLM provider only ever sees synthetic tokens; real values are\n")
 		fmt.Fprintf(out, "  restored locally at tool execution. mappings live in memory only.\n")
+
+		// What is NOT covered. These two exclusions are stated in code
+		// comments (secretnat.go, internal/proxy/echo.go) — invisible at the
+		// surface where a user forms their mental model, which is here.
+		// Wording is bounded by the project's claims table, which narrows this one:
+		// under-claiming is correct, and any hint that responses are
+		// sanitised is a defect.
+		fmt.Fprintf(out, "%s\n", strings.Repeat("-", 60))
+		fmt.Fprintf(out, "  NOT covered:\n")
+		fmt.Fprintf(out, "    env secrets  : values from the environment are not in the known\n")
+		fmt.Fprintf(out, "                   tier — register one with ##secret new to cover it.\n")
+		// "never rewritten" is kept CONTIGUOUS on one line deliberately. It is
+		// the 024 NARROW row in plain words, and TestSnatStatusNamesExclusions
+		// asserts the substring — wrapping it across a line break makes the
+		// claim unguarded while the text still reads correctly to a human.
+		fmt.Fprintf(out, "    responses    : response bodies are scanned and an echoed live\n")
+		fmt.Fprintf(out, "                   credential is reported into the pane — it is\n")
+		fmt.Fprintf(out, "                   never rewritten, by design.\n")
 
 	case "help":
 		snatHelp(out)

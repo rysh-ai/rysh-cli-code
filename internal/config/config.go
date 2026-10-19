@@ -315,13 +315,17 @@ func (wc WorkspaceConfig) ResolveUpstream(session UpstreamConfig) UpstreamConfig
 
 // Config is the main configuration for Rysh.
 type Config struct {
-	NATS          NATSConfig
-	Upstream      UpstreamConfig
+	NATS     NATSConfig
+	Upstream UpstreamConfig
+	// Company binds this session to one AI-native company on the upstream
+	// server (design 037); written by `rysh connect`.
+	Company       CompanyConfig
 	SNAT          SNATConfig
 	Profile       ProfileConfig
 	Voice         VoiceConfig
 	VoiceControl  VoiceControlConfig
 	Automation    AutomationConfig
+	Email         EmailConfig
 	Usage         UsageConfig
 	Proxy         ProxyConfig
 	Replay        ReplayConfig
@@ -509,6 +513,38 @@ type Config struct {
 	Variables map[string]map[string]string
 }
 
+// EmailConfig selects the session-wide email transport. Secret-bearing fields
+// should be ${NAME} references resolved from .rysh/secrets or the environment.
+type EmailConfig struct {
+	Provider                 string
+	Address                  string
+	IMAPHost                 string
+	IMAPPort                 int
+	SMTPHost                 string
+	SMTPPort                 int
+	Username                 string
+	Password                 string
+	MailgunDomain            string
+	MailgunBaseURL           string
+	MailgunAPIKey            string
+	MailgunWebhookSigningKey string
+	// AttachmentDir is where the email client saves attachments on the
+	// daemon's machine (email.attachment_dir, ~ allowed). Empty ⇒ ~/Downloads,
+	// else home. Kept raw here; channels.AttachmentDir resolves and checks it.
+	AttachmentDir string
+	// Safety "read_only" turns on the opt-in read-only guard (founder ruling
+	// U-6/H-5; default off): IMAP EXAMINE + BODY.PEEK only, every mutating
+	// verb refused, only mail whose subject carries SubjectTag is fetched or
+	// sent, and every IMAP command is recorded in AuditLog. channels enforces it.
+	Safety     string
+	SubjectTag string
+	AuditLog   string
+	// AllowFrom is the guard's sender allow-list (root-0320): under read_only
+	// only mail whose From addr-spec is listed has a body fetched. Empty ⇒
+	// the account's username.
+	AllowFrom []string
+}
+
 // ForgeConfig is the declarative startup config for forged-API sharing, declared
 // per-workspace under `workspace[].forge`.
 type ForgeConfig struct {
@@ -521,7 +557,8 @@ type ForgeIntegrationConfig struct {
 	Name          string           `yaml:"name"`           // integration name (tool prefix)
 	Spec          string           `yaml:"spec"`           // path to the OpenAPI/GraphQL spec (~ expanded at apply time)
 	BaseURL       string           `yaml:"base_url"`       // absolute base URL (required when the spec server is relative)
-	Source        string           `yaml:"source"`         // "openapi" | "graphql" (inferred when empty)
+	Source        string           `yaml:"source"`         // "openapi" | "graphql" | "grpc" (inferred when empty)
+	GRPCProtocol  string           `yaml:"grpc_protocol"`  // gRPC streaming wire protocol: "gateway" (default) | "connect" — same as `forge add --grpc-protocol`
 	CredentialEnv string           `yaml:"credential_env"` // env var holding the API key (optional)
 	Auth          *ForgeAuthConfig `yaml:"auth"`           // JWT/OAuth2 token flow (owner identity, Model A)
 	EnableScope   string           `yaml:"enable_scope"`   // pane|panegroup|lane|tab; empty ⇒ added but not enabled
@@ -600,6 +637,7 @@ type ryshConfigFile struct {
 	Rysh         ryshRysh                     `yaml:"rysh"`
 	NATS         ryshNATS                     `yaml:"nats"`
 	Upstream     ryshUpstream                 `yaml:"upstream"`
+	Company      CompanyConfig                `yaml:"company"`
 	SNAT         ryshSNAT                     `yaml:"snat"`
 	Profile      ryshProfile                  `yaml:"profile"`
 	HumanoidCfg  ryshHumanoidDefaults         `yaml:"humanoid_defaults"`
@@ -617,9 +655,30 @@ type ryshConfigFile struct {
 	Voice        ryshVoice                    `yaml:"voice"`
 	VoiceControl ryshVoiceControl             `yaml:"voice_control"`
 	Automation   AutomationConfig             `yaml:"automation"`
+	Email        ryshEmail                    `yaml:"email"`
 	Secrets      map[string]map[string]string `yaml:"secrets"`
 	Variables    map[string]map[string]string `yaml:"variables"`
 	Workspaces   []WorkspaceConfig            `yaml:"workspace"`
+}
+
+type ryshEmail struct {
+	Provider                 string   `yaml:"provider"`
+	Address                  string   `yaml:"address"`
+	IMAPHost                 string   `yaml:"imap_host"`
+	IMAPPort                 int      `yaml:"imap_port"`
+	SMTPHost                 string   `yaml:"smtp_host"`
+	SMTPPort                 int      `yaml:"smtp_port"`
+	Username                 string   `yaml:"username"`
+	Password                 string   `yaml:"password"`
+	MailgunDomain            string   `yaml:"mailgun_domain"`
+	MailgunBaseURL           string   `yaml:"mailgun_base_url"`
+	MailgunAPIKey            string   `yaml:"mailgun_api_key"`
+	MailgunWebhookSigningKey string   `yaml:"mailgun_webhook_signing_key"`
+	AttachmentDir            string   `yaml:"attachment_dir"`
+	Safety                   string   `yaml:"safety"`
+	SubjectTag               string   `yaml:"subject_tag"`
+	AuditLog                 string   `yaml:"audit_log"`
+	AllowFrom                []string `yaml:"allow_from"`
 }
 
 type ryshVoiceControl struct {
@@ -680,7 +739,10 @@ type ryshNATS struct {
 	Mode    string `yaml:"mode"`
 	URL     string `yaml:"url"`
 	DataDir string `yaml:"data_dir"`
-	Port    int    `yaml:"port"`
+	// Port is a pointer so an explicit `port: 0` is distinguishable from an
+	// omitted key. 0 means "kernel-assigned" (see bus.Config.Port); an omitted
+	// key keeps the 24242 default.
+	Port *int `yaml:"port"`
 }
 
 type ryshUpstream struct {
@@ -1323,6 +1385,13 @@ func loadFrom(explicitPath string, w io.Writer) (Config, error) {
 	// a missing login instead of serving the UI behind the literal "${...}".
 	cfg.WebUsername = resolveSecretRef(ryshDir, cfg.WebUsername)
 	cfg.WebPassword = resolveSecretRef(ryshDir, cfg.WebPassword)
+	cfg.Email.Address = resolveSecretRef(ryshDir, cfg.Email.Address)
+	cfg.Email.Username = resolveSecretRef(ryshDir, cfg.Email.Username)
+	cfg.Email.Password = resolveSecretRef(ryshDir, cfg.Email.Password)
+	cfg.Email.MailgunDomain = resolveSecretRef(ryshDir, cfg.Email.MailgunDomain)
+	cfg.Email.MailgunBaseURL = resolveSecretRef(ryshDir, cfg.Email.MailgunBaseURL)
+	cfg.Email.MailgunAPIKey = resolveSecretRef(ryshDir, cfg.Email.MailgunAPIKey)
+	cfg.Email.MailgunWebhookSigningKey = resolveSecretRef(ryshDir, cfg.Email.MailgunWebhookSigningKey)
 	cfg = applyEnvOverrides(cfg)
 	// Fold the automation model-seat defaults into every kind (recipe >
 	// automation.<kind> > automation.loop > built-ins), so the internal loop
@@ -1426,6 +1495,7 @@ func applyDefaults() Config {
 		VoiceControl: VoiceControlConfig{
 			TTSProviderName: "deepgram",
 		},
+		Email:                   EmailConfig{Provider: "imap-smtp", IMAPPort: 993, SMTPPort: 587, MailgunBaseURL: "https://api.mailgun.net"},
 		LogLevel:                "off",
 		ProviderName:            "claude",
 		ClaudeCommand:           "claude",
@@ -1470,6 +1540,58 @@ func loadFromFile(path string, cfg Config) (Config, error) {
 		return cfg, err
 	}
 
+	if value := strings.ToLower(strings.TrimSpace(f.Email.Provider)); value != "" {
+		cfg.Email.Provider = value
+	}
+	if f.Email.Address != "" {
+		cfg.Email.Address = f.Email.Address
+	}
+	if f.Email.IMAPHost != "" {
+		cfg.Email.IMAPHost = f.Email.IMAPHost
+	}
+	if f.Email.IMAPPort > 0 {
+		cfg.Email.IMAPPort = f.Email.IMAPPort
+	}
+	if f.Email.SMTPHost != "" {
+		cfg.Email.SMTPHost = f.Email.SMTPHost
+	}
+	if f.Email.SMTPPort > 0 {
+		cfg.Email.SMTPPort = f.Email.SMTPPort
+	}
+	if f.Email.Username != "" {
+		cfg.Email.Username = f.Email.Username
+	}
+	if f.Email.Password != "" {
+		cfg.Email.Password = f.Email.Password
+	}
+	if f.Email.MailgunDomain != "" {
+		cfg.Email.MailgunDomain = f.Email.MailgunDomain
+	}
+	if f.Email.MailgunBaseURL != "" {
+		cfg.Email.MailgunBaseURL = f.Email.MailgunBaseURL
+	}
+	if f.Email.MailgunAPIKey != "" {
+		cfg.Email.MailgunAPIKey = f.Email.MailgunAPIKey
+	}
+	if f.Email.MailgunWebhookSigningKey != "" {
+		cfg.Email.MailgunWebhookSigningKey = f.Email.MailgunWebhookSigningKey
+	}
+	if f.Email.AttachmentDir != "" {
+		cfg.Email.AttachmentDir = f.Email.AttachmentDir
+	}
+	if f.Email.Safety != "" {
+		cfg.Email.Safety = f.Email.Safety
+	}
+	if f.Email.SubjectTag != "" {
+		cfg.Email.SubjectTag = f.Email.SubjectTag
+	}
+	if f.Email.AuditLog != "" {
+		cfg.Email.AuditLog = f.Email.AuditLog
+	}
+	if len(f.Email.AllowFrom) > 0 {
+		cfg.Email.AllowFrom = append([]string(nil), f.Email.AllowFrom...)
+	}
+
 	// NATS section
 	if f.NATS.Mode != "" {
 		cfg.NATS.Mode = f.NATS.Mode
@@ -1480,8 +1602,12 @@ func loadFromFile(path string, cfg Config) (Config, error) {
 	if f.NATS.DataDir != "" {
 		cfg.NATS.DataDir = f.NATS.DataDir
 	}
-	if f.NATS.Port > 0 {
-		cfg.NATS.Port = f.NATS.Port
+	// `port: 0` must survive: it asks for a kernel-assigned port, and the
+	// daemon tests depend on it. Reading it as "unset" once handed every test
+	// daemon the default 24242, so each one joined the developer's live NATS
+	// as a guest and left its buckets in that store for good.
+	if f.NATS.Port != nil && *f.NATS.Port >= 0 {
+		cfg.NATS.Port = *f.NATS.Port
 	}
 
 	// Automation section: config-level defaults for the ##auto command family,
@@ -1844,6 +1970,12 @@ func loadFromFile(path string, cfg Config) (Config, error) {
 	}
 	if f.Upstream.PredictiveEcho {
 		cfg.Upstream.PredictiveEcho = true
+	}
+
+	// Company section (design 037): the AI-native company this session shows.
+	if id := strings.TrimSpace(f.Company.ID); id != "" {
+		cfg.Company = f.Company
+		cfg.Company.ID = id
 	}
 
 	// SNAT section (SecretNAT / ReSet). Enabled/RestoreDisplay are pointers
@@ -2227,6 +2359,9 @@ func applyEnvOverrides(cfg Config) Config {
 	}
 	if v := env("RYSH_VOICE_LANGUAGE"); v != "" {
 		cfg.Voice.Language = v
+	}
+	if v := strings.ToLower(env("RYSH_EMAIL_PROVIDER")); v == "imap-smtp" || v == "mailgun" {
+		cfg.Email.Provider = v
 	}
 	return cfg
 }

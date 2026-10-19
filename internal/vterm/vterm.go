@@ -565,7 +565,7 @@ func glyphAt(cells []vt10x.Glyph, col int) vt10x.Glyph {
 // is still 78 columns after the pane narrows to 70. Bounding by the current
 // width silently dropped everything past it: a soft-wrapped line lost the tail
 // of its first visual row while the continuation row survived intact, which is
-// how `…/marketing/assets/videos/…` came back as `…/marketing/a` + `deos/…`.
+// how a long `…/assets/videos/…` path came back as `…/a` + `deos/…`.
 func renderGlyphsANSI(cells []vt10x.Glyph) string {
 	lastCol := -1
 	for col := len(cells) - 1; col >= 0; col-- {

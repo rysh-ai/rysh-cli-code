@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -148,12 +149,23 @@ type TimedEvent struct {
 // PlayerStatus is a snapshot of a controlled playback, for the REPLAY badge:
 // position/total in recording time, current speed (+Inf = max), paused flag.
 // Pos is the recording-time offset of the last emitted event (or the seek
-// target) — it advances per emission, not per wall-clock tick.
+// target) — it advances per emission, not per wall-clock tick. Start is the
+// wall-clock time of the recording's first event (offset 0); zero = unknown.
 type PlayerStatus struct {
+	Start  time.Time
 	Pos    time.Duration
 	Total  time.Duration
 	Speed  float64
 	Paused bool
+}
+
+// WallClock is the wall-clock time the current frame was recorded: Start+Pos,
+// in Start's location. Zero when the recording start is unknown.
+func (st PlayerStatus) WallClock() time.Time {
+	if st.Start.IsZero() {
+		return time.Time{}
+	}
+	return st.Start.Add(st.Pos)
 }
 
 // PlayerHooks are the callbacks a controlled playback drives. All run on the
@@ -275,7 +287,8 @@ func (p *Player) Active() bool {
 
 // StartControlledPlayer schedules a recording timeline on a new goroutine with
 // interactive controls (v2, the replay pane's engine). `tl` must be sorted by
-// At (Capture.Timeline guarantees it). Events with At < from are skipped, the
+// At (Capture.Timeline guarantees it); `start` is the wall-clock time of its
+// offset 0, carried into every status for the badge's wall clock. Events with At < from are skipped, the
 // same seek-forward semantics as --from in v1. `after` is the clock seam.
 //
 // `lead` is an initial grace wait before the first emission (still
@@ -283,7 +296,7 @@ func (p *Player) Active() bool {
 // (workspace → tab → lane → group → pane spawn + NATS subscribe), so emitting
 // immediately could race the pane's output subscription and drop the first
 // events. 0 = start immediately.
-func StartControlledPlayer(tl []TimedEvent, from time.Duration, speed float64, lead time.Duration, after func(time.Duration) <-chan time.Time, h PlayerHooks) *Player {
+func StartControlledPlayer(tl []TimedEvent, start time.Time, from time.Duration, speed float64, lead time.Duration, after func(time.Duration) <-chan time.Time, h PlayerHooks) *Player {
 	if speed <= 0 {
 		speed = 1
 	}
@@ -302,13 +315,36 @@ func StartControlledPlayer(tl []TimedEvent, from time.Duration, speed float64, l
 		done: make(chan struct{}),
 		ctrl: make(chan ctrlMsg),
 	}
-	go p.runControlled(tl, from, speed, lead, total, after, h)
+	go p.runControlled(tl, PlayerStatus{Start: start, Pos: from, Total: total, Speed: speed}, lead, after, h, false)
 	return p
 }
 
-func (p *Player) runControlled(tl []TimedEvent, from time.Duration, speed float64, lead, total time.Duration, after func(time.Duration) <-chan time.Time, h PlayerHooks) {
+// ResumeControlledPlayer restarts a controlled playback that was interrupted
+// (a daemon restart, design 006): after the lead-in it clears the destination,
+// re-renders every event up to pos at once — so the pane shows what it showed
+// at pos, the same re-render a backward seek does — and then waits PAUSED at
+// pos for the user to resume. Otherwise identical to StartControlledPlayer.
+func ResumeControlledPlayer(tl []TimedEvent, start time.Time, pos time.Duration, speed float64, lead time.Duration, after func(time.Duration) <-chan time.Time, h PlayerHooks) *Player {
+	if speed <= 0 {
+		speed = 1
+	}
+	total := time.Duration(0)
+	if len(tl) > 0 {
+		total = tl[len(tl)-1].At
+	}
+	pos = max(0, min(pos, total))
+	p := &Player{
+		stop: make(chan struct{}),
+		done: make(chan struct{}),
+		ctrl: make(chan ctrlMsg),
+	}
+	go p.runControlled(tl, PlayerStatus{Start: start, Pos: pos, Total: total, Speed: speed, Paused: true}, lead, after, h, true)
+	return p
+}
+
+func (p *Player) runControlled(tl []TimedEvent, st PlayerStatus, lead time.Duration, after func(time.Duration) <-chan time.Time, h PlayerHooks, resume bool) {
 	defer close(p.done)
-	st := PlayerStatus{Pos: from, Total: total, Speed: speed}
+	from, total := st.Pos, st.Total
 	// i is the index of the next event to play: --from skips events before the
 	// seek point (v1 semantics), so the pane starts at the seeked moment.
 	i := 0
@@ -381,6 +417,15 @@ func (p *Player) runControlled(tl []TimedEvent, from time.Duration, speed float6
 				return
 			}
 		}
+	}
+	if resume {
+		// Re-render the screen as it stood at the resume point.
+		if h.Clear != nil {
+			h.Clear()
+		}
+		i = 0
+		emitTo(st.Pos)
+		push()
 	}
 	for i < len(tl) {
 		if st.Paused {
@@ -499,10 +544,20 @@ func (p *Player) Status() (PlayerStatus, bool) {
 	return p.st, true
 }
 
+// badgeBarCells is the width of the badge's position bar, in cells.
+const badgeBarCells = 12
+
 // FormatBadge renders the REPLAY badge text for a status, e.g.
-// "REPLAY 01:23/04:56 ×2" ("×max" at max speed, "⏸" when paused).
+// "REPLAY ▕███░░░░░░░░░▏ 01:23/04:56 · 14:32:07 ×2" — a position bar, the
+// recording offset, the wall-clock time the current frame was recorded (when
+// the start is known), then "×max" at max speed and "⏸" when paused. Every
+// part has 1-second (or coarser) resolution, so the badge text changes at
+// most once per displayed second of position plus once per bar cell.
 func FormatBadge(st PlayerStatus) string {
-	b := fmt.Sprintf("REPLAY %s/%s", fmtClock(st.Pos), fmtClock(st.Total))
+	b := fmt.Sprintf("REPLAY %s %s/%s", scrubBar(st.Pos, st.Total), fmtClock(st.Pos), fmtClock(st.Total))
+	if wc := st.WallClock(); !wc.IsZero() {
+		b += " · " + wc.Format("15:04:05")
+	}
 	if math.IsInf(st.Speed, 1) {
 		b += " ×max"
 	} else if st.Speed != 1 {
@@ -512,6 +567,45 @@ func FormatBadge(st PlayerStatus) string {
 		b += " ⏸"
 	}
 	return b
+}
+
+// BadgeVariants returns a rendered REPLAY badge (FormatBadge's output) from
+// longest to shortest, for a renderer that has to fit it into a narrow pane:
+// the badge as given, without the position bar, then also without the
+// wall-clock time. Position/total, speed and the pause marker are in every
+// variant. Anything that is not a playing badge ("REPLAY finished") is
+// returned unchanged as the only variant. The degrading lives here, beside
+// FormatBadge, so the two can never disagree about the format.
+func BadgeVariants(badge string) []string {
+	if !strings.HasPrefix(badge, "REPLAY ▕") {
+		return []string{badge}
+	}
+	out := []string{badge}
+	noBar := badge
+	if end := strings.Index(badge, "▏ "); end >= 0 {
+		noBar = "REPLAY " + badge[end+len("▏ "):]
+		out = append(out, noBar)
+	}
+	if i := strings.Index(noBar, " · "); i >= 0 {
+		rest := noBar[i+len(" · "):]
+		if sp := strings.IndexByte(rest, ' '); sp >= 0 {
+			out = append(out, noBar[:i]+rest[sp:])
+		} else {
+			out = append(out, noBar[:i])
+		}
+	}
+	return out
+}
+
+// scrubBar renders Pos/Total as a fixed-width bar of filled and empty cells.
+// An empty recording (Total 0) is a full bar: there is nothing left to play.
+func scrubBar(pos, total time.Duration) string {
+	filled := badgeBarCells
+	if total > 0 {
+		filled = int(int64(pos) * badgeBarCells / int64(total))
+		filled = max(0, min(filled, badgeBarCells))
+	}
+	return "▕" + strings.Repeat("█", filled) + strings.Repeat("░", badgeBarCells-filled) + "▏"
 }
 
 // fmtClock renders a duration as MM:SS (or H:MM:SS past an hour).
@@ -527,23 +621,44 @@ func fmtClock(d time.Duration) string {
 }
 
 // Timeline returns the recording for a pane ("" = all panes merged) as offsets
-// from the first event, plus nothing else — the controlled player's input.
-// Falls back to the durable stream when the RAM ring is empty (post-restart),
-// exactly like export and PlaybackPlan.
-func (c *Capture) Timeline(paneID string) ([]TimedEvent, error) {
+// from the first event, plus the wall-clock time of that first event — the
+// controlled player's input. Falls back to the durable stream when the RAM
+// ring is empty (post-restart), exactly like export and PlaybackPlan.
+func (c *Capture) Timeline(paneID string) ([]TimedEvent, time.Time, error) {
 	evs := c.events(paneID)
 	if len(evs) == 0 {
 		evs = c.streamEvents(paneID)
 	}
 	if len(evs) == 0 {
-		return nil, fmt.Errorf("no captured output%s", paneSuffix(paneID))
+		return nil, time.Time{}, fmt.Errorf("no captured output%s", paneSuffix(paneID))
 	}
+	return timelineOf(evs)
+}
+
+// ResumeTimeline is Timeline for resuming a playback after a daemon restart:
+// it prefers the durable stream, which holds the recording from before AND
+// after the restart, over the RAM ring, which only holds what this daemon has
+// seen — usually a prompt redraw by the time a replay pane is restored. Falls
+// back to the RAM ring when there is no durable stream.
+func (c *Capture) ResumeTimeline(paneID string) ([]TimedEvent, time.Time, error) {
+	evs := c.streamEvents(paneID)
+	if len(evs) == 0 {
+		evs = c.events(paneID)
+	}
+	if len(evs) == 0 {
+		return nil, time.Time{}, fmt.Errorf("no captured output%s", paneSuffix(paneID))
+	}
+	return timelineOf(evs)
+}
+
+// timelineOf converts recorded events into offsets from the first one.
+func timelineOf(evs []recEvent) ([]TimedEvent, time.Time, error) {
 	first := evs[0].ts
 	tl := make([]TimedEvent, len(evs))
 	for i, e := range evs {
 		tl[i] = TimedEvent{At: time.Duration(e.ts-first) * time.Millisecond, Text: e.text}
 	}
-	return tl, nil
+	return tl, time.UnixMilli(first), nil
 }
 
 // ParseFromOffset parses a --from spec against a timeline's first recorded

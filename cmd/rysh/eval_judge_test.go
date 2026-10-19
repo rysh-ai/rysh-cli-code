@@ -34,7 +34,7 @@ func writeJudge(t *testing.T, caseDir, rubric string) {
 // passingRunner returns a green run whose Result satisfies the fixture
 // expectations used in these tests.
 func passingRunner(output string) liveRunFunc {
-	return func(prompt, _ string) (runOutcome, eval.Result, error) {
+	return func(prompt, _, _ string) (runOutcome, eval.Result, error) {
 		return runOutcome{Status: "done", ExitCode: runExitDone},
 			eval.Result{Output: output, TokensUsed: 10}, nil
 	}
@@ -63,7 +63,7 @@ func TestEvalLive_JudgeComposesWithAssertions(t *testing.T) {
 	}
 
 	var tap bytes.Buffer
-	passed, total := runEvalLive([]string{good, bad}, passingRunner("done"), judge, false, &tap)
+	passed, total := runEvalLive([]string{good, bad}, passingRunner("done"), judge, false, false, &tap)
 	if passed != 1 || total != 2 {
 		t.Fatalf("passed/total = %d/%d, want 1/2\nTAP:\n%s", passed, total, tap.String())
 	}
@@ -90,7 +90,7 @@ func TestEvalLive_JudgeFailureFailsGreenAssertions(t *testing.T) {
 		return false, "not poetry", nil
 	}
 	var tap bytes.Buffer
-	passed, _ := runEvalLive([]string{cdir}, passingRunner("done"), judge, false, &tap)
+	passed, _ := runEvalLive([]string{cdir}, passingRunner("done"), judge, false, false, &tap)
 	if passed != 0 {
 		t.Fatalf("judge FAIL must fail the case despite green assertions\nTAP:\n%s", tap.String())
 	}
@@ -105,7 +105,7 @@ func TestEvalLive_NoJudgeMdMeansNoJudgeCall(t *testing.T) {
 		return false, "", nil
 	}
 	var tap bytes.Buffer
-	passed, total := runEvalLive([]string{cdir}, passingRunner("done"), judge, false, &tap)
+	passed, total := runEvalLive([]string{cdir}, passingRunner("done"), judge, false, false, &tap)
 	if passed != 1 || total != 1 {
 		t.Fatalf("passed/total = %d/%d, want 1/1\nTAP:\n%s", passed, total, tap.String())
 	}
@@ -124,7 +124,7 @@ func TestEvalLive_JudgeErrorFailsCase(t *testing.T) {
 		return false, "", errors.New("judge completion failed: 503")
 	}
 	var tap bytes.Buffer
-	passed, _ := runEvalLive([]string{cdir}, passingRunner("done"), judge, false, &tap)
+	passed, _ := runEvalLive([]string{cdir}, passingRunner("done"), judge, false, false, &tap)
 	if passed != 0 || !strings.Contains(tap.String(), "judge error: judge completion failed: 503") {
 		t.Fatalf("judge error must fail the case with diagnostics:\n%s", tap.String())
 	}
@@ -137,7 +137,7 @@ func TestEvalLive_ReplaySkipsJudgeWithNote(t *testing.T) {
 	cdir := writeCase(t, fixtures, "replayed", "task\n", "output_matches:\n  - \"done\"\n")
 	writeJudge(t, cdir, "rubric")
 	var gotReplayDir string
-	run := func(prompt, replayDir string) (runOutcome, eval.Result, error) {
+	run := func(prompt, replayDir, _ string) (runOutcome, eval.Result, error) {
 		gotReplayDir = replayDir
 		return runOutcome{Status: "done", ExitCode: runExitDone}, eval.Result{Output: "done"}, nil
 	}
@@ -146,7 +146,7 @@ func TestEvalLive_ReplaySkipsJudgeWithNote(t *testing.T) {
 		return false, "", nil
 	}
 	var tap bytes.Buffer
-	passed, _ := runEvalLive([]string{cdir}, run, judge, true, &tap)
+	passed, _ := runEvalLive([]string{cdir}, run, judge, true, false, &tap)
 	if passed != 1 {
 		t.Fatalf("replay case with green assertions must pass\nTAP:\n%s", tap.String())
 	}

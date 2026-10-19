@@ -128,7 +128,7 @@ func tlABC() []TimedEvent {
 func TestControlledPlayerPauseResume(t *testing.T) {
 	ma := newManualAfter()
 	h := newCtrlHarness()
-	p := StartControlledPlayer(tlABC(), 0, 1, 0, ma.after, h.hooks())
+	p := StartControlledPlayer(tlABC(), time.Time{}, 0, 1, 0, ma.after, h.hooks())
 
 	h.expectEmit(t, "a")
 	ma.waitRegistered(t) // waiting the 1s gap before "b"
@@ -173,7 +173,7 @@ func TestControlledPlayerSeekForward(t *testing.T) {
 	tl := append(tlABC(), TimedEvent{At: 30 * time.Second, Text: "d"})
 	ma := newManualAfter()
 	h := newCtrlHarness()
-	p := StartControlledPlayer(tl, 0, 1, 0, ma.after, h.hooks())
+	p := StartControlledPlayer(tl, time.Time{}, 0, 1, 0, ma.after, h.hooks())
 
 	h.expectEmit(t, "a")
 	ma.waitRegistered(t)
@@ -208,7 +208,7 @@ func TestControlledPlayerSeekForward(t *testing.T) {
 func TestControlledPlayerSeekBackward(t *testing.T) {
 	ma := newManualAfter()
 	h := newCtrlHarness()
-	p := StartControlledPlayer(tlABC(), 0, 1, 0, ma.after, h.hooks())
+	p := StartControlledPlayer(tlABC(), time.Time{}, 0, 1, 0, ma.after, h.hooks())
 	defer p.Stop()
 
 	h.expectEmit(t, "a")
@@ -240,7 +240,7 @@ func TestControlledPlayerSeekBackward(t *testing.T) {
 func TestControlledPlayerSpeedChanges(t *testing.T) {
 	ma := newManualAfter()
 	h := newCtrlHarness()
-	p := StartControlledPlayer(tlABC(), 0, 1, 0, ma.after, h.hooks())
+	p := StartControlledPlayer(tlABC(), time.Time{}, 0, 1, 0, ma.after, h.hooks())
 	defer p.Stop()
 
 	h.expectEmit(t, "a")
@@ -272,7 +272,7 @@ func TestControlledPlayerSpeedChanges(t *testing.T) {
 func TestControlledPlayerLeadDelaysFirstEmission(t *testing.T) {
 	ma := newManualAfter()
 	h := newCtrlHarness()
-	p := StartControlledPlayer(tlABC(), 0, 1, 500*time.Millisecond, ma.after, h.hooks())
+	p := StartControlledPlayer(tlABC(), time.Time{}, 0, 1, 500*time.Millisecond, ma.after, h.hooks())
 	defer p.Stop()
 
 	ma.waitRegistered(t) // the lead wait itself
@@ -290,7 +290,7 @@ func TestControlledPlayerLeadDelaysFirstEmission(t *testing.T) {
 	// Stop during a second player's lead reports stopped without emitting.
 	ma2 := newManualAfter()
 	h2 := newCtrlHarness()
-	p2 := StartControlledPlayer(tlABC(), 0, 1, time.Minute, ma2.after, h2.hooks())
+	p2 := StartControlledPlayer(tlABC(), time.Time{}, 0, 1, time.Minute, ma2.after, h2.hooks())
 	ma2.waitRegistered(t)
 	p2.Stop()
 	select {
@@ -331,7 +331,7 @@ func TestAdjustSpeedBounds(t *testing.T) {
 func TestControlledPlayerFromAndTotal(t *testing.T) {
 	ma := newManualAfter()
 	h := newCtrlHarness()
-	p := StartControlledPlayer(tlABC(), 1500*time.Millisecond, 1, 0, ma.after, h.hooks())
+	p := StartControlledPlayer(tlABC(), time.Time{}, 1500*time.Millisecond, 1, 0, ma.after, h.hooks())
 	defer p.Stop()
 
 	st := h.expectStatus(t, "initial", func(st PlayerStatus) bool { return true })
@@ -356,17 +356,17 @@ func TestControlledPlayerFromAndTotal(t *testing.T) {
 	}
 }
 
-// TestFormatBadge: the REPLAY badge shows position/total, a speed suffix when
-// not 1x, and a pause marker.
+// TestFormatBadge: the REPLAY badge shows a position bar, position/total, a
+// speed suffix when not 1x, and a pause marker.
 func TestFormatBadge(t *testing.T) {
 	cases := []struct {
 		st   PlayerStatus
 		want string
 	}{
-		{PlayerStatus{Pos: 83 * time.Second, Total: 296 * time.Second, Speed: 1}, "REPLAY 01:23/04:56"},
-		{PlayerStatus{Pos: 83 * time.Second, Total: 296 * time.Second, Speed: 2}, "REPLAY 01:23/04:56 ×2"},
-		{PlayerStatus{Pos: 0, Total: 5 * time.Second, Speed: 0.5, Paused: true}, "REPLAY 00:00/00:05 ×0.5 ⏸"},
-		{PlayerStatus{Pos: 3661 * time.Second, Total: 7200 * time.Second, Speed: math.Inf(1)}, "REPLAY 1:01:01/2:00:00 ×max"},
+		{PlayerStatus{Pos: 83 * time.Second, Total: 296 * time.Second, Speed: 1}, "REPLAY ▕███░░░░░░░░░▏ 01:23/04:56"},
+		{PlayerStatus{Pos: 83 * time.Second, Total: 296 * time.Second, Speed: 2}, "REPLAY ▕███░░░░░░░░░▏ 01:23/04:56 ×2"},
+		{PlayerStatus{Pos: 0, Total: 5 * time.Second, Speed: 0.5, Paused: true}, "REPLAY ▕░░░░░░░░░░░░▏ 00:00/00:05 ×0.5 ⏸"},
+		{PlayerStatus{Pos: 3661 * time.Second, Total: 7200 * time.Second, Speed: math.Inf(1)}, "REPLAY ▕██████░░░░░░▏ 1:01:01/2:00:00 ×max"},
 	}
 	for _, c := range cases {
 		if got := FormatBadge(c.st); got != c.want {
@@ -381,7 +381,7 @@ func TestCaptureTimeline(t *testing.T) {
 	c := NewCapture(nil, nil, "tl-sess")
 	c.byPane["p1"] = []recEvent{{ts: 5000, text: "one"}, {ts: 6500, text: "two"}}
 
-	tl, err := c.Timeline("p1")
+	tl, _, err := c.Timeline("p1")
 	if err != nil {
 		t.Fatalf("Timeline: %v", err)
 	}
@@ -389,7 +389,7 @@ func TestCaptureTimeline(t *testing.T) {
 		t.Fatalf("timeline = %+v, want offsets 0 and 1.5s", tl)
 	}
 
-	if _, err := c.Timeline("nope"); err == nil {
+	if _, _, err := c.Timeline("nope"); err == nil {
 		t.Fatal("Timeline(nope): want error for empty recording")
 	}
 

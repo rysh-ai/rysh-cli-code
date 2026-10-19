@@ -47,19 +47,19 @@ func TestFilterPanesByProgram(t *testing.T) {
 	}}}
 	all := []string{"a", "b", "c"}
 
-	if got := filterPanesByProgram(snap, all, ""); len(got) != 3 {
+	if got, _ := filterPanesByProgram(snap, all, ""); len(got) != 3 {
 		t.Errorf("no filter dropped panes: %v", got)
 	}
-	if got := filterPanesByProgram(snap, all, "claude"); len(got) != 1 || got[0] != "a" {
+	if got, _ := filterPanesByProgram(snap, all, "claude"); len(got) != 1 || got[0] != "a" {
 		t.Errorf("--running claude = %v, want [a]", got)
 	}
 	// "shell" is the pane at its prompt, which reports an EMPTY program — the
 	// spelling users will reach for, and the one case a naive equality check
 	// gets backwards.
-	if got := filterPanesByProgram(snap, all, "shell"); len(got) != 1 || got[0] != "b" {
+	if got, _ := filterPanesByProgram(snap, all, "shell"); len(got) != 1 || got[0] != "b" {
 		t.Errorf("--running shell = %v, want [b]", got)
 	}
-	if got := filterPanesByProgram(snap, all, "emacs"); len(got) != 0 {
+	if got, _ := filterPanesByProgram(snap, all, "emacs"); len(got) != 0 {
 		t.Errorf("unmatched filter = %v, want nothing", got)
 	}
 }

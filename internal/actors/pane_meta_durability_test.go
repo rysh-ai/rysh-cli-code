@@ -136,3 +136,36 @@ func TestDurableMetaMissingSidecarKeepsSnapshot(t *testing.T) {
 		t.Errorf("meta[fleet.role] = %q, want %q", restored.meta["fleet.role"], "manager")
 	}
 }
+
+// TestBirthMetaSurvivesRestart: meta a pane is BORN with (an agents-board pane
+// opened for a fleet carries board.id from creation) must reach the sidecar
+// immediately. It used to be held in memory only, so a daemon restart brought
+// the board pane back with no board.id — showing the session board instead of
+// the fleet's, with nothing wrong on screen but the content.
+func TestBirthMetaSurvivesRestart(t *testing.T) {
+	kv := newPaneMetaMemKV()
+	born := map[string]string{"board.id": "flowdemo"}
+
+	p := &PaneActor{id: "pane-board", kvStore: kv}
+	applyBirthMeta(p, born)
+	born["board.id"] = "mutated" // the payload map is not aliased
+	if got := p.meta["board.id"]; got != "flowdemo" {
+		t.Fatalf("birth meta aliased the caller's map: board.id = %q", got)
+	}
+
+	restored := &PaneActor{id: "pane-board", kvStore: kv}
+	restored.restoreDurableMeta() // no big snapshot: the board pane never wrote one
+	if got := restored.meta["board.id"]; got != "flowdemo" {
+		t.Errorf("after restart board.id = %q, want flowdemo — the board pane would show the session board", got)
+	}
+}
+
+// A pane born with no meta writes no sidecar, so a pre-sidecar snapshot's
+// meta is not overwritten by an empty record on restore.
+func TestNoBirthMetaWritesNoSidecar(t *testing.T) {
+	kv := newPaneMetaMemKV()
+	applyBirthMeta(&PaneActor{id: "pane-plain", kvStore: kv}, nil)
+	if _, ok := kv.data["pane-plain"+paneMetaKVSuffix]; ok {
+		t.Error("a pane born without meta wrote a sidecar")
+	}
+}

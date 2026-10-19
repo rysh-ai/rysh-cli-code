@@ -411,7 +411,7 @@ func TestSessionWebSettingsSharedOnlyKeepsPrimaryPort(t *testing.T) {
 func TestInheritedLoginIsStaleWhenSessionSecretsDiffer(t *testing.T) {
 	w, _ := newPersistWorkspace(t)
 	// The project login, as another session left it.
-	if _, err := web.SaveCredentials(w.cfg.RyshDir, "halilagin", "cli-password"); err != nil {
+	if _, err := web.SaveCredentials(w.cfg.RyshDir, "alice", "cli-password"); err != nil {
 		t.Fatal(err)
 	}
 	if w.inheritedLoginIsStale() {
@@ -419,7 +419,7 @@ func TestInheritedLoginIsStaleWhenSessionSecretsDiffer(t *testing.T) {
 	}
 
 	scope, _ := w.secretWorkspaceScope()
-	_ = w.secrets.Set(scope, webUserSecret, "halilagin", true)
+	_ = w.secrets.Set(scope, webUserSecret, "alice", true)
 	_ = w.secrets.Set(scope, webPassSecret, "app-password", true)
 	if !w.inheritedLoginIsStale() {
 		t.Fatal("a different password in this session's secrets was not noticed")
@@ -433,7 +433,7 @@ func TestInheritedLoginIsStaleWhenSessionSecretsDiffer(t *testing.T) {
 
 	// And once the session has its OWN credentials file, the question is moot.
 	_ = w.secrets.Set(scope, webPassSecret, "app-password", true)
-	if _, err := web.SaveCredentialsFor(w.credentialsRef(), "halilagin", "app-password"); err != nil {
+	if _, err := web.SaveCredentialsFor(w.credentialsRef(), "alice", "app-password"); err != nil {
 		t.Fatal(err)
 	}
 	if w.inheritedLoginIsStale() {
@@ -441,7 +441,7 @@ func TestInheritedLoginIsStaleWhenSessionSecretsDiffer(t *testing.T) {
 	}
 	// The project file is untouched by all of this.
 	proj, err := web.LoadCredentials(w.cfg.RyshDir)
-	if err != nil || proj == nil || !proj.Verify("halilagin", "cli-password") {
+	if err != nil || proj == nil || !proj.Verify("alice", "cli-password") {
 		t.Fatalf("the project login was disturbed: %+v (%v)", proj, err)
 	}
 }

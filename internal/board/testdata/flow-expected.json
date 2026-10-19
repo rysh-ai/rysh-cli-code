@@ -1,0 +1,333 @@
+{
+  "board": "fleet-x",
+  "nodes": [
+    {
+      "id": "board:fleet-x",
+      "kind": "board",
+      "label": "fleet-x",
+      "posts": 0
+    },
+    {
+      "id": "c0000000-0000-4000-8000-000000000002",
+      "kind": "pane",
+      "label": "mgr-a",
+      "role": "manager",
+      "parent": "c0000000-0000-4000-8000-000000000001",
+      "comm": "queue",
+      "posts": 4,
+      "work": "progress",
+      "task": "plan the parser",
+      "activity": "working",
+      "health": "ok"
+    },
+    {
+      "id": "c0000000-0000-4000-8000-000000000001",
+      "kind": "pane",
+      "label": "ceo",
+      "role": "ceo",
+      "comm": "queue",
+      "posts": 3
+    },
+    {
+      "id": "c0000000-0000-4000-8000-000000000003",
+      "kind": "pane",
+      "label": "wk-a1",
+      "role": "worker",
+      "parent": "c0000000-0000-4000-8000-000000000002",
+      "comm": "grid",
+      "posts": 3,
+      "work": "blocked",
+      "task": "parser",
+      "activity": "idle",
+      "health": "ok",
+      "blocked_by": [
+        "c0000000-0000-4000-8000-000000000002",
+        "human"
+      ]
+    },
+    {
+      "id": "listener",
+      "kind": "listener",
+      "label": "listener",
+      "posts": 1
+    },
+    {
+      "id": "c0000000-0000-4000-8000-000000000004",
+      "kind": "pane",
+      "label": "wk-a2",
+      "role": "worker",
+      "parent": "c0000000-0000-4000-8000-000000000002",
+      "comm": "queue",
+      "posts": 0
+    },
+    {
+      "id": "fleet",
+      "kind": "fleet",
+      "label": "fleet",
+      "posts": 2
+    },
+    {
+      "id": "c0000000-0000-4000-8000-000000000005",
+      "kind": "pane",
+      "label": "wk-a3",
+      "role": "worker",
+      "parent": "c0000000-0000-4000-8000-000000000002",
+      "comm": "queue",
+      "posts": 1,
+      "work": "progress",
+      "task": "tests red",
+      "activity": "idle",
+      "health": "stalled"
+    }
+  ],
+  "edges": [
+    {
+      "type": "chain",
+      "from": "c0000000-0000-4000-8000-000000000002",
+      "to": "c0000000-0000-4000-8000-000000000003",
+      "count": 1
+    },
+    {
+      "type": "chain",
+      "from": "c0000000-0000-4000-8000-000000000002",
+      "to": "c0000000-0000-4000-8000-000000000004",
+      "count": 1
+    },
+    {
+      "type": "chain",
+      "from": "c0000000-0000-4000-8000-000000000002",
+      "to": "c0000000-0000-4000-8000-000000000005",
+      "count": 1
+    },
+    {
+      "type": "chain",
+      "from": "c0000000-0000-4000-8000-000000000001",
+      "to": "c0000000-0000-4000-8000-000000000002",
+      "count": 1
+    },
+    {
+      "type": "blocks",
+      "from": "c0000000-0000-4000-8000-000000000003",
+      "to": "c0000000-0000-4000-8000-000000000002",
+      "count": 1
+    },
+    {
+      "type": "prompt",
+      "from": "c0000000-0000-4000-8000-000000000002",
+      "to": "c0000000-0000-4000-8000-000000000003",
+      "count": 2,
+      "answered": 1,
+      "undelivered": 1,
+      "open": 0,
+      "latency_ms": 1000,
+      "last_ts": 8000
+    },
+    {
+      "type": "prompt",
+      "from": "c0000000-0000-4000-8000-000000000001",
+      "to": "c0000000-0000-4000-8000-000000000002",
+      "count": 1,
+      "answered": 1,
+      "undelivered": 0,
+      "open": 0,
+      "latency_ms": 2000,
+      "last_ts": 2000
+    },
+    {
+      "type": "prompt",
+      "from": "c0000000-0000-4000-8000-000000000001",
+      "to": "c0000000-0000-4000-8000-000000000004",
+      "count": 1,
+      "answered": 0,
+      "undelivered": 0,
+      "open": 1,
+      "last_ts": 10000
+    },
+    {
+      "type": "prompt",
+      "from": "fleet",
+      "to": "c0000000-0000-4000-8000-000000000005",
+      "count": 1,
+      "answered": 1,
+      "undelivered": 0,
+      "open": 0,
+      "latency_ms": 1500,
+      "last_ts": 13000
+    },
+    {
+      "type": "undelivered",
+      "from": "listener",
+      "to": "c0000000-0000-4000-8000-000000000003",
+      "count": 1,
+      "last_ts": 6000
+    },
+    {
+      "type": "status",
+      "from": "c0000000-0000-4000-8000-000000000002",
+      "to": "board:fleet-x",
+      "count": 1,
+      "last_ts": 1000
+    },
+    {
+      "type": "status",
+      "from": "c0000000-0000-4000-8000-000000000003",
+      "to": "board:fleet-x",
+      "count": 2,
+      "last_ts": 12000
+    },
+    {
+      "type": "status",
+      "from": "fleet",
+      "to": "board:fleet-x",
+      "count": 1,
+      "last_ts": 12500
+    }
+  ],
+  "events": [
+    {
+      "ts": 1000,
+      "type": "status",
+      "from": "c0000000-0000-4000-8000-000000000002",
+      "to": "board:fleet-x",
+      "kind": "milestone",
+      "thread": "c0000000-0000-4000-8000-000000000002/1",
+      "summary": "started the unit"
+    },
+    {
+      "ts": 2000,
+      "type": "prompt",
+      "from": "c0000000-0000-4000-8000-000000000001",
+      "to": "c0000000-0000-4000-8000-000000000002",
+      "kind": "cmd",
+      "thread": "c0000000-0000-4000-8000-000000000001/msg-0001",
+      "cmd_id": "msg-0001",
+      "summary": "[FLEET fleet-x | WORK ORDER | FROM ceo]"
+    },
+    {
+      "ts": 4000,
+      "type": "ack",
+      "from": "c0000000-0000-4000-8000-000000000002",
+      "to": "c0000000-0000-4000-8000-000000000001",
+      "kind": "ack",
+      "thread": "c0000000-0000-4000-8000-000000000001/msg-0001",
+      "cmd_id": "msg-0001",
+      "summary": "ack"
+    },
+    {
+      "ts": 5000,
+      "type": "prompt",
+      "from": "c0000000-0000-4000-8000-000000000002",
+      "to": "c0000000-0000-4000-8000-000000000003",
+      "kind": "cmd",
+      "thread": "c0000000-0000-4000-8000-000000000002/msg-0002",
+      "cmd_id": "msg-0002",
+      "summary": "write the lexer"
+    },
+    {
+      "ts": 6000,
+      "type": "undelivered",
+      "from": "listener",
+      "to": "c0000000-0000-4000-8000-000000000003",
+      "kind": "undelivered",
+      "thread": "c0000000-0000-4000-8000-000000000002/msg-0002",
+      "cmd_id": "msg-0002",
+      "summary": "pane not answering after 9m"
+    },
+    {
+      "ts": 7000,
+      "type": "status",
+      "from": "c0000000-0000-4000-8000-000000000003",
+      "to": "board:fleet-x",
+      "kind": "task-done",
+      "thread": "c0000000-0000-4000-8000-000000000003/1",
+      "summary": "task finished — all 42 tests green, branch feat-parser is ready for review by t…"
+    },
+    {
+      "ts": 8000,
+      "type": "prompt",
+      "from": "c0000000-0000-4000-8000-000000000002",
+      "to": "c0000000-0000-4000-8000-000000000003",
+      "kind": "cmd",
+      "thread": "c0000000-0000-4000-8000-000000000002/msg-0003",
+      "cmd_id": "msg-0003",
+      "summary": "write the parser"
+    },
+    {
+      "ts": 9000,
+      "type": "reply",
+      "from": "c0000000-0000-4000-8000-000000000003",
+      "to": "c0000000-0000-4000-8000-000000000002",
+      "kind": "reply",
+      "thread": "c0000000-0000-4000-8000-000000000002/msg-0003",
+      "cmd_id": "msg-0003",
+      "summary": "on it"
+    },
+    {
+      "ts": 10000,
+      "type": "prompt",
+      "from": "c0000000-0000-4000-8000-000000000001",
+      "to": "c0000000-0000-4000-8000-000000000004",
+      "kind": "cmd",
+      "thread": "c0000000-0000-4000-8000-000000000001/msg-0004",
+      "cmd_id": "msg-0004",
+      "summary": "review the parser"
+    },
+    {
+      "ts": 11000,
+      "type": "prompt",
+      "from": "c0000000-0000-4000-8000-000000000001",
+      "to": "c0000000-0000-4000-8000-000000000004",
+      "kind": "cmd",
+      "thread": "c0000000-0000-4000-8000-000000000001/msg-0004",
+      "cmd_id": "msg-0004",
+      "summary": "review the parser"
+    },
+    {
+      "ts": 12000,
+      "type": "status",
+      "from": "c0000000-0000-4000-8000-000000000003",
+      "to": "board:fleet-x",
+      "kind": "cmd",
+      "thread": "c0000000-0000-4000-8000-000000000003/2",
+      "summary": "orphan order"
+    },
+    {
+      "ts": 12500,
+      "type": "status",
+      "from": "fleet",
+      "to": "board:fleet-x",
+      "kind": "fleet-alert",
+      "thread": "fleet/1",
+      "summary": "wk-a3 is STALLED: says progress (tests) but its pane has been idle since 10:00:…"
+    },
+    {
+      "ts": 13000,
+      "type": "prompt",
+      "from": "fleet",
+      "to": "c0000000-0000-4000-8000-000000000005",
+      "kind": "cmd",
+      "thread": "fleet/ci-0001",
+      "cmd_id": "ci-0001",
+      "summary": "[FLEET fleet-x | CHECK-IN | FROM fleet-actor | TO worker wk-a3 (pane c0000000) …"
+    },
+    {
+      "ts": 14500,
+      "type": "reply",
+      "from": "c0000000-0000-4000-8000-000000000005",
+      "to": "fleet",
+      "kind": "progress",
+      "thread": "fleet/ci-0001",
+      "cmd_id": "ci-0001",
+      "summary": "status progress: tests"
+    }
+  ],
+  "stats": {
+    "panes": 5,
+    "prompts": 5,
+    "answered": 3,
+    "undelivered": 1,
+    "open": 1,
+    "status": 4,
+    "blocked": 1
+  }
+}

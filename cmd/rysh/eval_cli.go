@@ -41,10 +41,17 @@ const recordedDirName = "recorded"
 //	    TAP note; structural assertions are the gate (design 009 §3.2/§5).
 //
 // Output is TAP per case; exit is 0 when every case passed, 1 otherwise.
-// `rysh eval --update-baseline` (golden-transcript refresh) is future work.
+//
+// `rysh eval --live --update-baseline` additionally refreshes each case's
+// golden transcript from the run it just made (design 009's answer to
+// "recorded transcripts go stale"). It is a modifier on live mode only: the
+// other two modes produce no recording, so the flag is refused there rather
+// than silently ignored — an operator who believes the transcripts were
+// refreshed when nothing ran is the failure worth preventing. Promotion is
+// conservative: see promoteBaseline.
 func runEval(cfg config.Config, configPath string, args []string) error {
 	var dir, resultPath string
-	var live, replay, wt bool
+	var live, replay, wt, updateBaseline bool
 	var providerName string
 	timeout := runDefaultTimeout
 	for i := 0; i < len(args); i++ {
@@ -58,6 +65,8 @@ func runEval(cfg config.Config, configPath string, args []string) error {
 			live = true
 		case "--replay":
 			replay = true
+		case "--update-baseline":
+			updateBaseline = true
 		case "--worktree":
 			wt = true
 		case "--provider":
@@ -82,7 +91,21 @@ func runEval(cfg config.Config, configPath string, args []string) error {
 	}
 	engine := live || replay
 	if dir == "" || (resultPath == "" && !engine) || (resultPath != "" && engine) {
-		return errors.New(progname.Rewrite("usage: rysh eval <evals-dir> --result <result.json> | --live | --replay [--timeout <dur>] [--worktree] [--provider <name>]"))
+		return errors.New(progname.Rewrite("usage: rysh eval <evals-dir> --result <result.json> | --live [--update-baseline] | --replay [--timeout <dur>] [--worktree] [--provider <name>]"))
+	}
+	// --update-baseline only means something where a recording is produced.
+	// Refuse it everywhere else — checked on the parsed flags, not on argument
+	// order, so `--replay --update-baseline` is caught exactly like
+	// `--update-baseline --replay`.
+	if updateBaseline && !live {
+		switch {
+		case replay:
+			return errors.New(progname.Rewrite("rysh eval --update-baseline needs --live: a --replay run serves recorded turns and produces no new transcript to promote"))
+		case resultPath != "":
+			return errors.New(progname.Rewrite("rysh eval --update-baseline needs --live: --result grades an existing artifact without running anything"))
+		default:
+			return errors.New(progname.Rewrite("rysh eval --update-baseline needs --live (nothing is recorded without a live run)"))
+		}
 	}
 
 	cases, err := discoverCases(dir)
@@ -115,10 +138,11 @@ func runEval(cfg config.Config, configPath string, args []string) error {
 			}
 			cfg = config.LoadFrom(configPath)
 		}
-		run := func(prompt, replayDir string) (runOutcome, eval.Result, error) {
+		run := func(prompt, replayDir, recordDir string) (runOutcome, eval.Result, error) {
 			opts := baseOpts
 			opts.Prompt = prompt
 			opts.ReplayDir = replayDir
+			opts.RecordDir = recordDir
 			outcome, res, _, _, err := executeHeadlessRun(cfg, configPath, opts)
 			return outcome, res, err
 		}
@@ -128,7 +152,7 @@ func runEval(cfg config.Config, configPath string, args []string) error {
 		if !replay {
 			judge = makeEvalJudge(cfg)
 		}
-		passed, total := runEvalLive(cases, run, judge, replay, os.Stdout)
+		passed, total := runEvalLive(cases, run, judge, replay, updateBaseline, os.Stdout)
 		if passed != total {
 			return fmt.Errorf("eval: %d/%d cases failed", total-passed, total)
 		}
@@ -178,10 +202,14 @@ func runEval(cfg config.Config, configPath string, args []string) error {
 
 // liveRunFunc runs one case's prompt headlessly and returns the outcome plus
 // the honestly-derived Result. replayDir is empty in live mode; in replay
-// mode it names the case's recorded transcript directory. It is a seam:
+// mode it names the case's recorded transcript directory. recordDir is empty
+// unless --update-baseline asked for a refresh, in which case it names a
+// STAGING directory — never the case's recorded/ — so a bad run cannot reach
+// the golden transcript at all. The two are mutually exclusive: a replay
+// serves recorded turns and has nothing new to record. It is a seam:
 // production wires executeHeadlessRun; tests substitute a hermetic runner
 // (no daemon, no key).
-type liveRunFunc func(prompt, replayDir string) (runOutcome, eval.Result, error)
+type liveRunFunc func(prompt, replayDir, recordDir string) (runOutcome, eval.Result, error)
 
 // runEvalLive runs each case through the runner and grades what it produced,
 // emitting TAP to w. A run that ends on a non-done outcome (gate-blocked,
@@ -195,7 +223,13 @@ type liveRunFunc func(prompt, replayDir string) (runOutcome, eval.Result, error)
 // comment. In replay mode (replay=true) the judge is skipped with an explicit
 // note — a recorded transcript has no live seat to judge with, and structural
 // assertions are the design's hard gate.
-func runEvalLive(cases []string, run liveRunFunc, judge evalJudgeFunc, replay bool, w io.Writer) (passed, total int) {
+//
+// When updateBaseline is set, each case runs with a staging record dir and its
+// golden transcript is promoted from it afterwards — but only if the case
+// passed and actually recorded something. Every outcome, refresh or keep, is
+// announced in the TAP output: the epic's bar is "baseline updates are
+// explicit, never silent".
+func runEvalLive(cases []string, run liveRunFunc, judge evalJudgeFunc, replay, updateBaseline bool, w io.Writer) (passed, total int) {
 	fmt.Fprintf(w, "TAP version 13\n")
 	for _, cdir := range cases {
 		total++
@@ -208,9 +242,25 @@ func runEvalLive(cases []string, run liveRunFunc, judge evalJudgeFunc, replay bo
 		if replay {
 			replayDir = filepath.Join(cdir, recordedDirName)
 		}
-		outcome, result, err := run(c.Prompt, replayDir)
+		// Record into a staging dir beside the case, never into recorded/
+		// itself: a failing or empty run must not be able to touch the
+		// baseline, and it cannot if it never had the path.
+		stage := ""
+		if updateBaseline {
+			s, err := os.MkdirTemp(cdir, ".baseline-stage-")
+			if err != nil {
+				fmt.Fprintf(w, "not ok - %s (baseline: cannot stage a recording: %v)\n", c.Name, err)
+				continue
+			}
+			stage = s
+		}
+		outcome, result, err := run(c.Prompt, replayDir, stage)
 		if err != nil {
 			fmt.Fprintf(w, "not ok - %s (run failed: %v)\n", c.Name, err)
+			if stage != "" {
+				_ = os.RemoveAll(stage)
+				fmt.Fprintf(w, "  # baseline: kept for %s — the run failed; nothing was promoted\n", c.Name)
+			}
 			continue
 		}
 		assertions := eval.Evaluate(c.Expect, result)
@@ -262,10 +312,102 @@ func runEvalLive(cases []string, run liveRunFunc, judge evalJudgeFunc, replay bo
 		case judgeSkipNote != "":
 			fmt.Fprintf(w, "  # %s\n", judgeSkipNote)
 		}
+
+		if stage != "" {
+			fmt.Fprint(w, promoteBaseline(cdir, stage, c.Name, ok))
+			_ = os.RemoveAll(stage) // no-op once promoted (renamed away)
+		}
 	}
 	fmt.Fprintf(w, "1..%d\n", total)
 	fmt.Fprintf(w, "# %d/%d cases passed\n", passed, total)
 	return passed, total
+}
+
+// baselinePrevDirName holds the outgoing golden transcript for the moment
+// between "old one moved aside" and "new one in place", so a failed promotion
+// can put it back instead of leaving the case with no baseline at all.
+const baselinePrevDirName = ".baseline-prev"
+
+// promoteBaseline moves a staged recording into the case's recorded/ directory
+// and returns the TAP comment announcing what it did. It returns a comment in
+// every path — a refresh that happened silently and a refresh that silently
+// did not happen are the same bug to an operator reading the output.
+//
+// It refuses to promote in three cases, because each would destroy a good
+// baseline rather than refresh it:
+//
+//   - the case FAILED — a bad run must never become the new truth; this is the
+//     whole reason the flag is dangerous enough to need a test;
+//   - the run recorded NOTHING — promoting an empty dir blanks the baseline;
+//   - the filesystem move failed — the previous transcript is restored.
+func promoteBaseline(cdir, stage, name string, ok bool) string {
+	kept := func(why string) string {
+		return fmt.Sprintf("  # baseline: kept for %s — %s\n", name, why)
+	}
+	if !ok {
+		return kept("the case failed; a failing run must not overwrite a good transcript")
+	}
+	n, err := stagedRecordingSize(stage)
+	if err != nil {
+		return kept(fmt.Sprintf("the staged recording could not be read: %v", err))
+	}
+	if n == 0 {
+		return kept("the run recorded no transcript; promoting an empty recording would blank it")
+	}
+
+	dest := filepath.Join(cdir, recordedDirName)
+	existed := false
+	if _, err := os.Stat(dest); err == nil {
+		existed = true
+	}
+
+	// Move the outgoing baseline aside rather than deleting it, so a failed
+	// rename below is recoverable.
+	prev := filepath.Join(cdir, baselinePrevDirName)
+	if existed {
+		_ = os.RemoveAll(prev)
+		if err := os.Rename(dest, prev); err != nil {
+			return kept(fmt.Sprintf("the previous transcript could not be moved aside: %v", err))
+		}
+	}
+	if err := os.Rename(stage, dest); err != nil {
+		if existed {
+			_ = os.Rename(prev, dest) // put it back; better stale than absent
+		}
+		return kept(fmt.Sprintf("the recording could not be promoted: %v", err))
+	}
+	_ = os.RemoveAll(prev)
+
+	verb := "created"
+	if existed {
+		verb = "refreshed"
+	}
+	return fmt.Sprintf("  # baseline: %s for %s — %d file(s) → %s\n", verb, name, n, dest)
+}
+
+// stagedRecordingSize counts the non-empty regular files a run recorded. Zero
+// means there is nothing worth promoting: both "the run wrote no transcript"
+// and "the run wrote an empty one" reach the baseline as a blanking, so they
+// are refused together.
+func stagedRecordingSize(stage string) (int, error) {
+	entries, err := os.ReadDir(stage)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			return 0, err
+		}
+		if info.Size() > 0 {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // discoverCases returns dir itself if it holds a task.md, else its immediate

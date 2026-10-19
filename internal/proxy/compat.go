@@ -124,6 +124,72 @@ func ProfileFor(binary string) (CLIProfile, bool) {
 	return p, ok
 }
 
+// IdentifyCLI names the known agent CLI a process is, from what the OS says
+// about it: comm is the kernel's accounting name (darwin p_comm, Linux
+// /proc/<pid>/comm), execPath the executable's path and argv its arguments.
+// It returns the profile's own binary name, so every notice names the CLI the
+// way `##proxy check` expects it.
+//
+// comm alone is not enough (F-15). The native installer lays `claude` out as
+//
+//	~/.local/bin/claude -> ~/.local/share/claude/versions/<version>
+//
+// so the executable's own basename IS the version, and comm reads "2.1.288".
+// What still says "claude" is argv[0], and on darwin the exec path as invoked
+// (the symlink, unresolved). Linux's /proc/<pid>/exe is already resolved to
+// versions/<version>, so the `<cli>/versions/<anything>` layout is recognised
+// too. Walking symlinks would be the wrong direction: it lands on the version.
+//
+// A script CLI run through an interpreter (`node …/bin/claude`, `python3 …/aider`)
+// reports the interpreter as comm and argv[0], so argv[1] is consulted when
+// argv[0] is one.
+//
+// ok is false when nothing identifies a known CLI. That is the gate design 022
+// §4.4 asked for and F-13 found missing: only a known agent CLI is watched.
+func IdentifyCLI(comm, execPath string, argv []string) (string, bool) {
+	candidates := []string{comm, execPath, versionedInstallName(execPath)}
+	if len(argv) > 0 {
+		candidates = append(candidates, argv[0], versionedInstallName(argv[0]))
+		if len(argv) > 1 && isInterpreter(argv[0]) {
+			candidates = append(candidates, argv[1], versionedInstallName(argv[1]))
+		}
+	}
+	for _, c := range candidates {
+		if strings.TrimSpace(c) == "" {
+			continue
+		}
+		if p, ok := ProfileFor(c); ok {
+			return p.Binary, true
+		}
+	}
+	return "", false
+}
+
+// versionedInstallName returns "<cli>" for a path shaped
+// ".../<cli>/versions/<version>", and "" otherwise.
+func versionedInstallName(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	dir := filepath.Dir(path)
+	if filepath.Base(dir) != "versions" {
+		return ""
+	}
+	return filepath.Base(filepath.Dir(dir))
+}
+
+// isInterpreter reports whether argv[0] names a runtime that runs a CLI from a
+// script, so the script path in argv[1] is the program's real identity.
+func isInterpreter(arg0 string) bool {
+	name := strings.TrimSuffix(strings.ToLower(filepath.Base(strings.TrimSpace(arg0))), ".exe")
+	switch name {
+	case "node", "nodejs", "bun", "deno", "python", "python3":
+		return true
+	}
+	return strings.HasPrefix(name, "python3.")
+}
+
 // KnownCLIs lists the binaries rysh recognises, sorted for stable output.
 func KnownCLIs() []string {
 	out := make([]string, 0, len(profiles))
@@ -247,9 +313,21 @@ func (g *govWatch) noteGoverned(paneID string) {
 
 // noteForeground records that binary became the pane's foreground process.
 // A change resets the observation, so each run of a CLI is judged on its own.
+//
+// Only a known agent CLI is watched (design 022 §4.4). Anything else — a
+// build, a test run, `ssh`, an editor, `sleep 120` — is treated exactly like
+// the shell being back in front, because strict acts on the ABSENCE of
+// governed traffic and a program that never talks to a provider is always
+// absent (F-13). The caller must pass the CLI's real identity, not the
+// kernel's name for it; see IdentifyCLI and F-15.
 func (g *govWatch) noteForeground(paneID, binary string, now time.Time) {
 	if g == nil || paneID == "" {
 		return
+	}
+	if p, ok := ProfileFor(binary); ok {
+		binary = p.Binary
+	} else {
+		binary = ""
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()

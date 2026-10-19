@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/rysh-ai/rysh-cli-code/internal/forge/ir"
+	"github.com/rysh-ai/rysh-cli-shared/forge/ir"
 )
 
 // Options parameterize a generation run.

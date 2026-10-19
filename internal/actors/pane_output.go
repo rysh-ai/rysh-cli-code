@@ -2,6 +2,12 @@
 
 package actors
 
+import (
+	"fmt"
+	"strings"
+	"time"
+)
+
 // ---------------------------------------------------------------------------
 // Buffer management
 // ---------------------------------------------------------------------------
@@ -11,6 +17,27 @@ const (
 	maxScrollbackRows  = 2000
 	maxScrollbackBytes = 700 * 1024
 )
+
+// redrawFrameMinInterval throttles redraw-frame capture (see captureRedrawFrame)
+// so a rapidly repainting foreground program — streaming tokens, a spinner —
+// does not flood the history ring with near-duplicate frames. One snapshot per
+// interval is enough granularity to reconstruct "the previous message", which
+// is what scrolling actually needs.
+const redrawFrameMinInterval = 500 * time.Millisecond
+
+// maxRedrawFrames/maxRedrawFrameBytes cap the redraw-frame ring the same way
+// scrollback transport is capped above — bounded memory, trimmed oldest-first.
+const (
+	maxRedrawFrames     = 400
+	maxRedrawFrameBytes = 700 * 1024
+)
+
+// maxPipelineBytes caps a tab's pipeline output. It used to be a bare
+// strings.Builder, reset only when a new pipeline started, and it rides every
+// tab snapshot — layout-only ones included — so a long-running pipeline grew
+// every snapshot of the tab without bound. Same bound as a pane's default
+// shell buffer.
+const maxPipelineBytes = 256 * 1024
 
 // cappedBuffer is an append-mostly text buffer that retains at most a given
 // number of trailing bytes. It is backed by a []byte so appends are amortized
@@ -44,10 +71,13 @@ func (b *cappedBuffer) String() string { return string(b.buf) }
 // Len returns the current byte length.
 func (b *cappedBuffer) Len() int { return len(b.buf) }
 
-// buildScrollbackRows returns the VT scrollback history followed by the current
-// screen, rendered as ANSI rows (oldest first), for raw-pane scroll mode.
-// Bounded by row count and total bytes (trimming from the oldest end).
-// Cross-actor-safe: the vterm wrapper serializes access against the read loop.
+// buildScrollbackRows returns the redraw-frame history (see redrawFrames),
+// then the VT scrollback history, then the current screen, rendered as ANSI
+// rows (oldest first), for raw-pane scroll mode. Bounded by row count and
+// total bytes (trimming from the oldest end). Cross-actor-safe: the vterm
+// wrapper serializes access against the read loop, and redrawFrames is read
+// with the same best-effort convention as the other cross-actor buffer reads
+// in this file.
 func (p *PaneActor) buildScrollbackRows() []string {
 	var rows []string
 	if p.remoteInteractive {
@@ -56,7 +86,8 @@ func (p *PaneActor) buildScrollbackRows() []string {
 		rows = append(rows, p.remoteScrollback...)
 		rows = append(rows, p.remoteVTScreen...)
 	} else if p.vtermEmu != nil {
-		rows = p.vtermEmu.ScrollbackANSI()
+		rows = append(rows, p.redrawFrames...)
+		rows = append(rows, p.vtermEmu.ScrollbackANSI()...)
 		rows = append(rows, p.vtermEmu.RenderANSI()...)
 	} else {
 		return nil
@@ -73,6 +104,52 @@ func (p *PaneActor) buildScrollbackRows() []string {
 		rows = rows[1:]
 	}
 	return rows
+}
+
+// captureRedrawFrame snapshots the pane's current VT screen into the
+// redraw-frame history ring (see the redrawFrames field), throttled and
+// de-duplicated so it only grows on a genuinely new, settled screen state.
+// Called from rawReadLoop right after a redraw-in-place is detected on a
+// non-alt-screen foreground program (see fgRedrew in pane_shell.go) — cheap
+// in the common case because the time check short-circuits before any
+// rendering happens, so a burst of redraws (streaming tokens) costs one
+// render per interval rather than one per PTY chunk.
+func (p *PaneActor) captureRedrawFrame() {
+	if p.vtermEmu == nil {
+		return
+	}
+	now := time.Now()
+	if now.Sub(p.lastRedrawFrameAt) < redrawFrameMinInterval {
+		return
+	}
+	frame := p.vtermEmu.RenderANSI()
+	if len(frame) == 0 {
+		return
+	}
+	joined := strings.Join(frame, "\n")
+	if joined == p.lastRedrawFrame {
+		// Cursor blinked or something repainted the identical content —
+		// nothing new happened, so don't waste a ring slot on it.
+		return
+	}
+	p.lastRedrawFrameAt = now
+	p.lastRedrawFrame = joined
+
+	divider := fmt.Sprintf("\x1b[2m── %s ──\x1b[0m", now.Format("15:04:05"))
+	p.redrawFrames = append(p.redrawFrames, divider)
+	p.redrawFrames = append(p.redrawFrames, frame...)
+
+	if len(p.redrawFrames) > maxRedrawFrames {
+		p.redrawFrames = p.redrawFrames[len(p.redrawFrames)-maxRedrawFrames:]
+	}
+	total := 0
+	for _, r := range p.redrawFrames {
+		total += len(r) + 1
+	}
+	for total > maxRedrawFrameBytes && len(p.redrawFrames) > 1 {
+		total -= len(p.redrawFrames[0]) + 1
+		p.redrawFrames = p.redrawFrames[1:]
+	}
 }
 
 // scrollbackDelta returns the pane's current monotonic evicted-line total and

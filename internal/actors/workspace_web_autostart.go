@@ -33,6 +33,7 @@ func (w *WorkspaceActor) autoStartWebServer() {
 		port = defaultWebPort
 	}
 	w.webServer = web.NewServer(port, w.sessionName, w.pub, w.nc, w.pub.Codecs())
+	w.wireWebGuestOf()
 	w.webServer.SetFSBrowser(w.webFSBrowser())
 	if settings.Host != "" {
 		w.webServer.SetHost(settings.Host)

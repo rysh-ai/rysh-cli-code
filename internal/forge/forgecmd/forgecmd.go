@@ -18,12 +18,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rysh-ai/rysh-cli-shared/forge/ingest"
+	"github.com/rysh-ai/rysh-cli-shared/forge/ir"
+	"github.com/rysh-ai/rysh-cli-shared/forge/runtime"
+	"github.com/rysh-ai/rysh-cli-shared/forge/toolpack"
 	"github.com/rysh-ai/rysh-cli-code/internal/forge"
 	"github.com/rysh-ai/rysh-cli-code/internal/forge/gen"
-	"github.com/rysh-ai/rysh-cli-code/internal/forge/ingest"
-	"github.com/rysh-ai/rysh-cli-code/internal/forge/ir"
-	"github.com/rysh-ai/rysh-cli-code/internal/forge/runtime"
-	"github.com/rysh-ai/rysh-cli-code/internal/forge/toolpack"
 
 	// Blank imports register the generator targets via their init() functions.
 	// Importing forgecmd therefore makes every target available to gen.Get /
@@ -33,6 +33,7 @@ import (
 	_ "github.com/rysh-ai/rysh-cli-code/internal/forge/gen/javasdk"
 	_ "github.com/rysh-ai/rysh-cli-code/internal/forge/gen/mcpserver"
 	_ "github.com/rysh-ai/rysh-cli-code/internal/forge/gen/pysdk"
+	_ "github.com/rysh-ai/rysh-cli-code/internal/forge/gen/toolpackgen"
 	_ "github.com/rysh-ai/rysh-cli-code/internal/forge/gen/tssdk"
 )
 
@@ -100,7 +101,10 @@ Add/generate flags:
   --out DIR                  output directory (default: .rysh/forge/<name>/gen)
   --base-url URL             override the spec's server URL (for live execution)
   --ws-url URL               websocket URL for GraphQL subscriptions (default: base URL, http→ws)
+  --grpc-protocol P          gRPC server-streaming wire protocol: gateway (grpc-gateway NDJSON, default) | connect
   --cred-env VAR             env var holding the API key/token (live execution)
+  --basic-user-env VAR       env var holding the HTTP Basic username
+  --basic-pass-env VAR       env var holding the HTTP Basic password
   --mode auto|static|dynamic exposure mode (default: auto — dynamic above ~50 ops)
   --tags a,b                 expose only operations with these tags
   --read-only                expose only GET/HEAD operations
@@ -126,12 +130,21 @@ type forgeFlags struct {
 	out      string
 	baseURL  string
 	wsURL    string
+	grpcProt string
 	credEnv  string
 	mode     string
 	tags     string
 	readOnly bool
 	maxTools int
 	module   string
+
+	// Static HTTP Basic (Integration.BasicUserEnv/BasicPassEnv → InjectAuth).
+	// This is the per-request Basic header, NOT the username/password of a
+	// login flow — those are --user-env/--pass-env below, which feed
+	// AuthConfig and exchange the credentials for a token. An API whose spec
+	// declares `http basic` wants these two.
+	basicUserEnv string
+	basicPassEnv string
 
 	// Token auth (forged-API auth plan, Phase A / ##forge add). Secrets are
 	// ENV-VAR NAMES only.
@@ -166,7 +179,10 @@ func bindForgeFlags(fs *flag.FlagSet) *forgeFlags {
 	fs.StringVar(&f.out, "out", "", "output directory")
 	fs.StringVar(&f.baseURL, "base-url", "", "override server base URL")
 	fs.StringVar(&f.wsURL, "ws-url", "", "override the websocket URL for GraphQL subscriptions (default: base URL with http→ws / https→wss)")
+	fs.StringVar(&f.grpcProt, "grpc-protocol", "", "gRPC server-streaming wire protocol: gateway (grpc-gateway NDJSON, default) | connect (Connect enveloped framing)")
 	fs.StringVar(&f.credEnv, "cred-env", "", "env var holding the credential")
+	fs.StringVar(&f.basicUserEnv, "basic-user-env", "", "env var holding the HTTP Basic username")
+	fs.StringVar(&f.basicPassEnv, "basic-pass-env", "", "env var holding the HTTP Basic password")
 	fs.StringVar(&f.mode, "mode", "auto", "exposure mode: auto|static|dynamic")
 	fs.StringVar(&f.tags, "tags", "", "comma-separated tag filter")
 	fs.BoolVar(&f.readOnly, "read-only", false, "expose only GET/HEAD operations")
@@ -380,6 +396,10 @@ func forgeAdd(workDir string, args []string, w io.Writer) error {
 		specArg = "--grpc-target " + f.grpcTarget
 	}
 
+	if err := forge.ValidateGRPCProtocol(f.grpcProt, source); err != nil {
+		return err
+	}
+
 	api, err := ingestSpec(source, spec)
 	if err != nil {
 		return err
@@ -402,17 +422,23 @@ func forgeAdd(workDir string, args []string, w io.Writer) error {
 	// not a REST one. Unary methods are modeled as unary POSTs to the gRPC wire
 	// path, which the forge runtime speaks over HTTP/JSON — so live calls work
 	// only against a server that accepts JSON on that path (grpc-gateway
-	// transcoding or an Envoy/grpc-web bridge). Server-streaming sessions
-	// additionally require grpc-gateway's newline-delimited JSON framing;
-	// Connect's enveloped streaming framing is not supported. Generation, docs
-	// and SDK output are unaffected. Say so at add time rather than letting the
+	// transcoding, a Connect server, or an Envoy/grpc-web bridge).
+	// Server-streaming sessions speak one framing per API, chosen with
+	// --grpc-protocol: grpc-gateway's newline-delimited JSON (default) or
+	// Connect's enveloped streaming framing (JSON codec). Generation, docs and
+	// SDK output are unaffected. Say so at add time rather than letting the
 	// user discover it when every call 404s.
 	if source == forge.SourceGRPC {
 		fmt.Fprintf(w, "ℹ gRPC source: unary methods are exposed as POST %s\n"+
-			"  Live calls require a JSON-over-HTTP endpoint (grpc-gateway);\n"+
-			"  a plain gRPC/HTTP2 server will reject them. Server-streaming\n"+
-			"  sessions consume grpc-gateway NDJSON frames (Connect framing is not supported).\n",
+			"  Live calls require a JSON-over-HTTP endpoint (grpc-gateway or Connect);\n"+
+			"  a plain gRPC/HTTP2 server will reject them.\n",
 			"/<package>.<Service>/<Method>")
+		if f.grpcProt == runtime.StreamProtocolConnect {
+			fmt.Fprintln(w, "  Server-streaming sessions speak Connect enveloped framing (application/connect+json).")
+		} else {
+			fmt.Fprintln(w, "  Server-streaming sessions consume grpc-gateway NDJSON frames; for a Connect\n"+
+				"  server, re-run with --grpc-protocol connect.")
+		}
 	}
 	// Report what the ingester routed to streaming sessions (gRPC
 	// server-streaming, GraphQL subscriptions) and what it deliberately did not
@@ -436,7 +462,10 @@ func forgeAdd(workDir string, args []string, w io.Writer) error {
 		SpecFile:      rel,
 		BaseURL:       baseURL,
 		WSURL:         f.wsURL,
+		GRPCProtocol:  f.grpcProt,
 		CredentialEnv: f.credEnv,
+		BasicUserEnv:  f.basicUserEnv,
+		BasicPassEnv:  f.basicPassEnv,
 		Auth:          f.authConfig(),
 		Policy:        f.policy(name),
 		Enabled:       false,
@@ -554,22 +583,39 @@ func forgeDiff(workDir string, args []string, w io.Writer) error {
 	}
 	d := forge.DiffAPIs(oldAPI, newAPI)
 	if d.Empty() {
-		fmt.Fprintf(w, "No operation-level changes for %q (%d operations).\n", name, len(newAPI.Operations))
+		fmt.Fprintf(w, "No changes for %q (%d operations, %d stream(s)).\n",
+			name, len(newAPI.Operations), len(newAPI.Streams))
 		return nil
 	}
-	fmt.Fprintf(w, "Operation changes for %q:\n", name)
-	for _, id := range d.Added {
+	if len(d.Added)+len(d.Removed)+len(d.Changed) > 0 {
+		fmt.Fprintf(w, "Operation changes for %q:\n", name)
+		printIDs(w, d.Added, d.Removed, d.Changed)
+	}
+	// Streams are listed under their own heading. A removed stream breaks a
+	// background streaming session, not a tool call, and an id can name both a
+	// stream and an operation — so the two must stay visually distinct.
+	if len(d.StreamsAdded)+len(d.StreamsRemoved)+len(d.StreamsChanged) > 0 {
+		fmt.Fprintf(w, "Stream changes for %q (server-streaming / subscriptions):\n", name)
+		printIDs(w, d.StreamsAdded, d.StreamsRemoved, d.StreamsChanged)
+	}
+	fmt.Fprintf(w, "(%d added, %d removed, %d changed; streams: %d added, %d removed, %d changed)\n"+
+		"Run 'forge add %s %s' to adopt the new spec and regenerate.\n",
+		len(d.Added), len(d.Removed), len(d.Changed),
+		len(d.StreamsAdded), len(d.StreamsRemoved), len(d.StreamsChanged), name, specFile)
+	return nil
+}
+
+// printIDs renders one added/removed/changed group.
+func printIDs(w io.Writer, added, removed, changed []string) {
+	for _, id := range added {
 		fmt.Fprintf(w, "  + %s\n", id)
 	}
-	for _, id := range d.Removed {
+	for _, id := range removed {
 		fmt.Fprintf(w, "  - %s\n", id)
 	}
-	for _, id := range d.Changed {
+	for _, id := range changed {
 		fmt.Fprintf(w, "  ~ %s\n", id)
 	}
-	fmt.Fprintf(w, "(%d added, %d removed, %d changed)\nRun 'forge add %s %s' to adopt the new spec and regenerate.\n",
-		len(d.Added), len(d.Removed), len(d.Changed), name, specFile)
-	return nil
 }
 
 func generateTargets(workDir, name string, api *ir.API, f *forgeFlags, w io.Writer) error {
@@ -634,10 +680,14 @@ func streamsSummary(api *ir.API) []string {
 
 // skippedSummary renders api.Skipped as specific, honest report lines, e.g.
 //
-//	2 streaming methods skipped (client-streaming: Pub_Upload; bidi: Pub_Chat) — client/bidi streams cannot ride a JSON-over-HTTP bridge
+//	2 streaming methods skipped (client-streaming: Pub_Upload; bidi: Pub_Chat) — client/bidi streams are deliberately not exposed: a ruling with reasons, not a missing feature (design 015 §5.1)
 //
 // Empty when nothing was skipped, so sources without client/bidi streaming
 // print no exclusion claims at all.
+//
+// The line cites design 015 §5.1 because the exclusion is a decision with
+// written reasons, not a limitation someone will lift next week — a user who
+// reads it should be able to find out why, and what would reopen it.
 func skippedSummary(api *ir.API) []string {
 	if api == nil || len(api.Skipped) == 0 {
 		return nil
@@ -667,7 +717,7 @@ func skippedSummary(api *ir.API) []string {
 		streamParts = append(streamParts, label+": "+joinCapped(names, 10))
 	}
 	if streamTotal > 0 {
-		lines = append(lines, fmt.Sprintf("%d streaming %s skipped (%s) — client/bidi streams cannot ride a JSON-over-HTTP bridge",
+		lines = append(lines, fmt.Sprintf("%d streaming %s skipped (%s) — client/bidi streams are deliberately not exposed: a ruling with reasons, not a missing feature (design 015 §5.1)",
 			streamTotal, plural(streamTotal, "method", "methods"), strings.Join(streamParts, "; ")))
 	}
 

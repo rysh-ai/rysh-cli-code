@@ -201,7 +201,7 @@ func TestWorkspaceMirrorTabNavAndSnapshot(t *testing.T) {
 		t.Fatalf("activeMirrorTab() did not return the mirror tab")
 	}
 
-	snap := w.collectSnapshot(false, false)
+	snap := w.collectSnapshot(false, false, "")
 	if len(snap.Tabs) != 1 {
 		t.Fatalf("snapshot tabs = %d, want 1", len(snap.Tabs))
 	}
@@ -240,7 +240,7 @@ func TestWorkspaceMirrorPlaceholderWhenNoData(t *testing.T) {
 	w.addMirrorTab("share-2", "pending")
 	w.activeTabIdx = 0
 
-	snap := w.collectSnapshot(false, false)
+	snap := w.collectSnapshot(false, false, "")
 	if len(snap.Tabs) != 1 {
 		t.Fatalf("want 1 tab, got %d", len(snap.Tabs))
 	}
@@ -806,7 +806,7 @@ func TestMirrorTabLocalRename(t *testing.T) {
 	}
 
 	// The rendered tab title reflects the local name only.
-	snap := w.collectSnapshot(false, false)
+	snap := w.collectSnapshot(false, false, "")
 	if !strings.Contains(snap.Tabs[0].Title, "my-local") || strings.Contains(snap.Tabs[0].Title, "remote-name") {
 		t.Errorf("rendered title = %q, want the local name only", snap.Tabs[0].Title)
 	}

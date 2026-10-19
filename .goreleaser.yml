@@ -5,7 +5,12 @@
 # builds the closed product as `ry`, signs it, and uploads to packages.rysh.ai.
 # This one builds `rysh` and publishes to the public repo's GitHub Releases.
 #
-# It deliberately needs NO secrets beyond the workflow's built-in GITHUB_TOKEN:
+# It runs from local bash, not GitHub Actions: the private monorepo's
+# scripts/oss-release-local.sh clones this repo at the tag and runs
+# `goreleaser release --clean` (no workflow ships here; founder order, 2026-10-16).
+#
+# It deliberately needs NO secret beyond a GITHUB_TOKEN that can create releases
+# on this repository:
 #   - no `signs` block      (no GPG key in a public repo)
 #   - no `blobs` block      (no S3 credentials)
 #   - no `brews` push       (the formula step self-skips unless a
@@ -161,7 +166,7 @@ brews:
       name: homebrew-rysh
       branch: main
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    # Publish the formula only when the tap token is present. The workflow always
+    # Publish the formula only when the tap token is present. The release script always
     # defines HOMEBREW_TAP_TOKEN (empty when the secret is unset), so a release
     # without it still succeeds — it just leaves the formula alone instead of
     # failing the whole run on a push it cannot authenticate.
@@ -172,17 +177,24 @@ brews:
     commit_msg_template: "rysh {{ .Version }}"
     directory: Formula
     homepage: https://github.com/rysh-ai/rysh-cli-parent
-    description: "Agentic terminal multiplexer for code development"
+    # Q4b-iii / E-99 (R5): the open-source build ships as `rysh`, the private
+    # build as `ry`, two separate formulae in one tap; desc + caveats are what
+    # `brew info` / `brew install` show, so they name the build.
+    description: "Agentic terminal multiplexer for code development (open-source build)"
     license: Apache-2.0
+    caveats: |
+      This is the OPEN-SOURCE build of rysh (Apache-2.0); the command is `rysh`.
+      The rysh.ai private build is a separate formula with the command `ry`:
+        brew install rysh-ai/rysh/ry
     test: |
-      system "#{bin}/rysh", "--version"
+      system bin/"rysh", "--version"
     install: |
       bin.install "rysh"
       mkdir_p etc/"rysh"
       etc.install "rysh.config.yaml.example" => "rysh/rysh.config.yaml.example"
 
-# The token must be able to push to rysh-ai/homebrew-rysh; the built-in
-# GITHUB_TOKEN is scoped to this repository alone. Use a fine-grained PAT
+# The token must be able to push to rysh-ai/homebrew-rysh; the release's
+# GITHUB_TOKEN needs this repository alone. Use a fine-grained PAT
 # limited to that one repo with Contents: read and write — not a personal
 # all-repo token, which this being a public repository would over-expose.
 #

@@ -80,7 +80,7 @@ type OutboundMessage struct {
 
 // ValidChannelTypes lists the BUILT-IN channel type strings (installed
 // plugin channels are additionally accepted via the PluginTypeKnown hook).
-var ValidChannelTypes = []string{"whatsapp", "slack", "email", "phone", "chatbot", "discord", "telegram", "signal", "imessage", "teams"}
+var ValidChannelTypes = []string{"whatsapp", "slack", "email", "phone", "chatbot", "discord", "telegram", "signal", "imessage", "teams", "wechat", "wecom", "googlechat"}
 
 // PluginLookup, when non-nil, resolves a non-built-in channel type to an
 // out-of-process plugin adapter (internal/channels/plugin, design 002). It is

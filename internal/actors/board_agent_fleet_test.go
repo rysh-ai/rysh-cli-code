@@ -117,3 +117,77 @@ func TestTheSessionBoardClaudeKeepsItsBriefVerbatim(t *testing.T) {
 		t.Error("the default board's brief changed")
 	}
 }
+
+// TestAMissingBoardClaudeNamesTheNearMiss. A pane the human called
+// `etl-fix-board` is not the board claude of `etl-fix` and must not resolve —
+// but the refusal must point at it, or "not running" next to a pane plainly
+// called that board reads as a bug rather than a naming mismatch.
+func TestAMissingBoardClaudeNamesTheNearMiss(t *testing.T) {
+	want := boardAgentNameFor("etl-fix")
+	near := []domain.PaneSnapshot{{ID: "77cbb01e-a445", GivenName: "etl-fix-board"}}
+
+	_, err := resolveBoardAgentHinted(nil, near, want)
+	if err == nil {
+		t.Fatal("a near miss resolved — it must only be named in the refusal")
+	}
+	for _, needle := range []string{"did you mean", `"etl-fix-board"`, "77cbb01e", `"board-etl-fix"`} {
+		if !strings.Contains(err.Error(), needle) {
+			t.Errorf("refusal is missing %s: %v", needle, err)
+		}
+	}
+}
+
+func TestNearBoardAgentNameIsSameWordsOnly(t *testing.T) {
+	want := boardAgentNameFor("etl-fix")
+	for name, wantNear := range map[string]bool{
+		"etl-fix-board":   true,
+		"Board_ETL_fix":   true,
+		"fix etl board":   true,
+		"board-etl-fix":   false, // the exact name is a match, not a near miss
+		"etl-fix":         false,
+		"board":           false,
+		"board-etl-fix-2": false,
+		"":                false,
+	} {
+		if got := isNearBoardAgentName(name, want); got != wantNear {
+			t.Errorf("isNearBoardAgentName(%q, %q) = %v, want %v", name, want, got, wantNear)
+		}
+	}
+}
+
+// A board claude that dies with the daemon must come back on its own. Its pane
+// is hidden, so nobody is looking at it; without the resume, the pane restores
+// as a bare shell under the board claude's name and every prompt typed into the
+// board runs in bash. This holds the contract end to end: what the board
+// claude's launch stamps is what the post-restore sweep reads back.
+func TestABoardClaudeIsResumedAfterADaemonRestart(t *testing.T) {
+	const sid = "46cd7c37-65ba-4d6f-b59e-08b1b69f014a"
+	meta := map[string]string{}
+	for _, kv := range nativeAgentMeta(nativeAgentClaude, "/work/datalake", boardAgentClaudeArgs, sid, false, "") {
+		meta[kv[0]] = kv[1]
+	}
+	panes := []ansaPane{{ID: "6e2be3cb-802a", GivenName: boardAgentNameFor("etl-fix"), Meta: meta}}
+
+	deliveries, _, _ := nativeResumePlan(panes, idleProbe, sessionAlwaysExists, nil)
+	if len(deliveries) != 1 {
+		t.Fatalf("the board claude was not resumed: %+v", deliveries)
+	}
+	cmd := deliveries[0].Command
+	for _, needle := range []string{"--resume " + sid, boardAgentClaudeArgs, "cd '/work/datalake'"} {
+		if !strings.Contains(cmd, needle) {
+			t.Errorf("resume command is missing %q: %s", needle, cmd)
+		}
+	}
+}
+
+// The refusal and the status line tell the human the exact command that brings
+// a fleet's board claude back — for the session board, without a --board that
+// would name a board nobody created.
+func TestBoardAgentUpCommandNamesTheBoard(t *testing.T) {
+	if got := boardAgentUpCommand("etl-fix"); got != "##board agent up --board etl-fix" {
+		t.Errorf("fleet board: got %q", got)
+	}
+	if got := boardAgentUpCommand(msg.DefaultBoardID); got != "##board agent up" {
+		t.Errorf("session board: got %q", got)
+	}
+}

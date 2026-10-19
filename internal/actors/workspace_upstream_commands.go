@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
+	"github.com/rysh-ai/rysh-cli-code/internal/limits"
 )
 
 // handleUpstreamCommand implements the `##upstream` command family: connecting
@@ -50,6 +51,7 @@ func (w *WorkspaceActor) handleUpstreamCommand(out *strings.Builder, paneID stri
 			o.Field("auto_share", "%v", w.cfg.Upstream.AutoShare)
 			o.Field("shared panes", "%d", sharedCount)
 			o.Rule()
+			w.warnIfOverSessionCap(o)
 		}
 	case "my-shares":
 		w.handleUpstreamShares(out)
@@ -94,5 +96,16 @@ func (w *WorkspaceActor) handleUpstreamCommand(out *strings.Builder, paneID stri
 			"                               (control-mode subscriber only; e.g. ####new grid 2x2)",
 		)
 		w.failRyshUsage("unknown subcommand for ##%s: %q", "upstream", sub)
+	}
+}
+
+// warnIfOverSessionCap prints one warning line when the server reports this
+// account over its plan's session cap, and nothing otherwise (within cap, an
+// older server, an error, a timeout). Informational only: the server does not
+// refuse a rysh daemon for the session cap, so nothing here fails the command.
+func (w *WorkspaceActor) warnIfOverSessionCap(o ryshOut) {
+	up := w.cfg.Upstream
+	if msg := limits.NewChecker(up.URL, up.APIKey).SessionLimitWarning(); msg != "" {
+		o.Warn("warning: %s", msg)
 	}
 }

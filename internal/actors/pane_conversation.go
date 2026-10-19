@@ -154,20 +154,20 @@ func (p *PaneActor) handleConversationHistoryAppend(cm *msg.ConversationMessage)
 	entry := cm.Content
 	switch ct {
 	case msg.ConvShell:
-		p.shellHistory = append(p.shellHistory, entry)
+		p.shellHistory = appendBounded(p.shellHistory, entry, p.historyLimit())
 	case msg.ConvAI:
-		p.promptHistory = append(p.promptHistory, entry)
+		p.promptHistory = appendBounded(p.promptHistory, entry, p.historyLimit())
 	case msg.ConvRysh:
-		p.ryshHistory = append(p.ryshHistory, entry)
+		p.ryshHistory = appendBounded(p.ryshHistory, entry, p.historyLimit())
 	case msg.ConvChat:
-		p.chatHistory = append(p.chatHistory, entry)
+		p.chatHistory = appendBounded(p.chatHistory, entry, p.historyLimit())
 	case msg.ConvEmail, msg.ConvSlack, msg.ConvChatbot:
-		p.externalHistory = append(p.externalHistory, entry)
+		p.externalHistory = appendBounded(p.externalHistory, entry, p.historyLimit())
 	}
 
 	// 4. For dual-publish types, also append to merged legacy history.
 	if ct.IsDualPublish() {
-		p.mergedHistory = append(p.mergedHistory, entry)
+		p.mergedHistory = appendBounded(p.mergedHistory, entry, p.historyLimit())
 	}
 
 	p.kvDirty = true

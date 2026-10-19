@@ -29,27 +29,21 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 )
 
-// MaxUp is how many fleets may be `up` at once (founder gate `D-14`, ruled 3 on
-// 2026-08-11).
-//
-// THE CAP IS ENFORCED HERE, NOT IN THE DRIVER, and that is the point of the
-// number living in this file. A cap the driver respects is a cap that holds
-// until somebody runs `fleetctl up` twice by hand, or a second driver starts,
-// or a script loops — and the failure it prevents is not tidiness: twenty-five
-// fleets is roughly 150 panes and 125 live claude sessions, against a pane
-// limit that refuses first and load failures that report success they did not
-// have (design 028 §6.8).
-//
-// REGISTERED IS FREE. The cap counts only StateUp, so a driver may register all
-// twenty-five and promote them three at a time.
-const MaxUp = 3
+// NO CAP ON HOW MANY FLEETS ARE UP. Founder ruling R11 (2026-10-07) retired
+// `D-14`'s three-fleet cap (ruled 2026-08-11). It had stopped describing
+// reality: `fleetctl up` launched every pane before it asked for the slot, so a
+// refusal arrived after the spend it was meant to prevent and only made the
+// row lie — twenty-seven fleets running while the registry said three were up.
+// The registry now records state truthfully and rations nothing; the limit on
+// spend is the session token-ceiling check fleetctl makes before it launches
+// (`budget_blocked`, which consults each pane's ##cost ceiling).
 
 // State is where a fleet is in its lifecycle.
 //
-// REGISTERED IS NOT A LESSER FORM OF UP, it is the cheap half of the split that
-// makes 25 fleets affordable: a registered fleet is a row, a board id and a
-// roadmap — no panes, no claude sessions, no spend. Bringing it up is what
-// costs, which is what the concurrency cap in design 028 §6.8 (`D-14`) bounds.
+// REGISTERED IS NOT A LESSER FORM OF UP, it is the cheap half of the split: a
+// registered fleet is a row, a board id and a roadmap — no panes, no claude
+// sessions, no spend. Bringing it up is what costs; since R11 that cost is
+// bounded by the session's token ceiling, not by a count of fleets here.
 const (
 	StateRegistered = "registered"
 	StateUp         = "up"
@@ -71,6 +65,15 @@ type Member struct {
 	Parent    string `json:"parent,omitempty"` // parent's pane id
 	Worktree  string `json:"worktree,omitempty"`
 	SessionID string `json:"session_id,omitempty"` // resumable with `claude -r`
+
+	// Status is the member's row in the status ledger (design 054): declared
+	// work, observed activity, derived health. Owned by the fleet actor; a
+	// membership upsert that carries none keeps the one already recorded.
+	Status *MemberStatus `json:"status,omitempty"`
+
+	// Goal is this agent's individual goal (design 055). Kept across a
+	// membership upsert that carries none, like Status.
+	Goal *Goal `json:"goal,omitempty"`
 }
 
 // Fleet is one fleet: its identity, where its work is described, and who is in
@@ -83,6 +86,18 @@ type Fleet struct {
 	RoadmapDir string `json:"roadmap_dir,omitempty"`
 	State      string `json:"state"`
 	Created    int64  `json:"created,omitempty"` // unix millis, stamped by the caller
+
+	// Watch is the fleet's check-in policy (design 054); nil means the
+	// defaults (smart, every 10 minutes, stalled after 5).
+	Watch *Watch `json:"watch,omitempty"`
+
+	// Goal is what the whole fleet is for (design 055); nil means none set.
+	Goal *Goal `json:"goal,omitempty"`
+	// GoalExec configures the fleet's goal executor; nil means the defaults
+	// (adaptive, every 5 to 30 minutes).
+	GoalExec *GoalExec `json:"goal_exec,omitempty"`
+	// GoalStatus is the executor's latest verdict (written by it only).
+	GoalStatus *GoalStatus `json:"goal_status,omitempty"`
 
 	Members []Member `json:"members"`
 }
@@ -158,6 +173,21 @@ func (r *Registry) Register(f Fleet) (*Fleet, error) {
 		if f.Created == 0 {
 			f.Created = existing.Created
 		}
+		if f.Watch == nil {
+			f.Watch = existing.Watch
+		}
+		// Goals and the executor's config are set after registration, by
+		// their own ops: a re-registration (every driver restart) must not
+		// forget them.
+		if f.Goal == nil {
+			f.Goal = existing.Goal
+		}
+		if f.GoalExec == nil {
+			f.GoalExec = existing.GoalExec
+		}
+		if f.GoalStatus == nil {
+			f.GoalStatus = existing.GoalStatus
+		}
 	}
 	stored := f
 	r.fleets[f.Name] = &stored
@@ -231,27 +261,6 @@ func (r *Registry) SetState(name, state string) error {
 			state, StateRegistered, StateUp, StateDown)
 	}
 
-	// The cap, refused rather than queued. A queue would leave the caller
-	// believing its fleet is coming up when nothing will bring it up, which is
-	// the receipt-without-delivery shape; a refusal that NAMES what is already
-	// up tells the operator exactly which fleet to take down first.
-	if state == StateUp && f.State != StateUp {
-		var up []string
-		for _, other := range r.fleets {
-			if other.Name != f.Name && other.State == StateUp {
-				up = append(up, other.Name)
-			}
-		}
-		if len(up) >= MaxUp {
-			sort.Strings(up)
-			return fmt.Errorf(
-				"%d fleets are already up (%s) and the cap is %d — take one down first, "+
-					"or register %q and promote it when a slot frees. Registering costs "+
-					"nothing; a fleet that is up costs panes and live claude sessions",
-				len(up), strings.Join(up, ", "), MaxUp, f.Name)
-		}
-	}
-
 	f.State = state
 	return nil
 }
@@ -274,6 +283,14 @@ func (r *Registry) UpsertMember(name string, m Member) error {
 	}
 	for i := range f.Members {
 		if f.Members[i].PaneID == m.PaneID {
+			// fleetctl re-upserts every member on a restart of the driver,
+			// with no status: that must not wipe the ledger.
+			if m.Status == nil {
+				m.Status = f.Members[i].Status
+			}
+			if m.Goal == nil {
+				m.Goal = f.Members[i].Goal
+			}
 			f.Members[i] = m
 			return nil
 		}
@@ -364,5 +381,29 @@ func copyFleet(f *Fleet) *Fleet {
 	out := *f
 	out.Members = make([]Member, len(f.Members))
 	copy(out.Members, f.Members)
+	for i := range out.Members {
+		out.Members[i].Status = copyStatus(out.Members[i].Status)
+		out.Members[i].Goal = copyGoal(out.Members[i].Goal)
+	}
+	if f.Watch != nil {
+		w := *f.Watch
+		out.Watch = &w
+	}
+	out.Goal = copyGoal(f.Goal)
+	if f.GoalExec != nil {
+		g := *f.GoalExec
+		out.GoalExec = &g
+	}
+	if f.GoalStatus != nil {
+		gs := *f.GoalStatus
+		gs.Why = append([]string(nil), f.GoalStatus.Why...)
+		if f.GoalStatus.Members != nil {
+			gs.Members = make(map[string]string, len(f.GoalStatus.Members))
+			for k, v := range f.GoalStatus.Members {
+				gs.Members[k] = v
+			}
+		}
+		out.GoalStatus = &gs
+	}
 	return &out
 }

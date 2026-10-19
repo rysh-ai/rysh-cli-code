@@ -101,6 +101,10 @@ func (t *workspaceAnsaTransport) Kill(paneID string, hard bool) error {
 		&msg.MsgPaneKillForeground{PaneID: paneID, Hard: hard})
 }
 
+func (t *workspaceAnsaTransport) SetMeta(paneID, key, value string) error {
+	return t.w.pub.Send(msg.T("pane", paneID, "inbox"), &msg.MsgPaneSetMeta{Key: key, Value: value})
+}
+
 // ansaTurnSubject is the pane's own agent — one subject for all three native
 // verbs, because status, cancel and continue are three questions for the same
 // actor and a second address for one of them is how F-23 happened.

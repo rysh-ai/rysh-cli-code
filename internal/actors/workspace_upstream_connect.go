@@ -87,5 +87,6 @@ func (w *WorkspaceActor) handleUpstreamConnect(out io.Writer, args []string) {
 	o.Row("  governance stays off: reporting local spend to the server is a separate")
 	o.Row("  opt-in — set upstream.governance: true only if you want it")
 	o.Row("  restart rysh for sharing to activate, then: ##share pane")
+	w.warnIfOverSessionCap(o)
 	o.Row("")
 }

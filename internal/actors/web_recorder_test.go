@@ -114,6 +114,25 @@ func TestFFmpegArgs(t *testing.T) {
 	}
 }
 
+// TestFFmpegArgsFpsMode is the F-82 regression test: current ffmpeg rejects
+// -vsync ("Unrecognized option 'vsync'", exit 8, on 9.0.2), so every encode
+// failed. The vfr pin must be spelled -fps_mode vfr, as one adjacent pair.
+func TestFFmpegArgsFpsMode(t *testing.T) {
+	args := ffmpegArgs("/tmp/x.frames/frames.txt", "/tmp/out.mp4")
+	pair := false
+	for i, a := range args {
+		if a == "-vsync" {
+			t.Errorf("ffmpeg args carry -vsync, which current ffmpeg rejects: %v", args)
+		}
+		if a == "-fps_mode" && i+1 < len(args) && args[i+1] == "vfr" {
+			pair = true
+		}
+	}
+	if !pair {
+		t.Errorf("ffmpeg args lack the adjacent pair -fps_mode vfr: %v", args)
+	}
+}
+
 // TestLastLines keeps ffmpeg's failure output short enough for a pane line.
 func TestLastLines(t *testing.T) {
 	if got := lastLines("a\nb\nc\nd\n", 2); got != "c | d" {

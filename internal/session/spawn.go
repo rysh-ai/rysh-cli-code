@@ -74,3 +74,45 @@ func WaitReady(store *Store, name string, timeout time.Duration) (Record, error)
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// SpawnRestart launches a detached `rysh restart <name> --from-daemon` helper
+// that stops the named session's daemon and starts a fresh one from the binary
+// on disk. A daemon cannot restart itself — it has to be gone before its
+// replacement can take the NATS port — so `##rysh restart` hands the job to a
+// process in its own session that outlives it. --from-daemon makes the helper
+// wait a moment so the daemon can finish replying first. The helper's output
+// goes to logPath (when non-empty), the only place it can be read afterwards.
+func SpawnRestart(name, workDir, configFile, logPath string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("session name is empty")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable path: %w", err)
+	}
+	args := []string{"restart", name, "--from-daemon"}
+	if strings.TrimSpace(configFile) != "" {
+		args = append(args, "--config", configFile)
+	}
+	cmd := exec.Command(exe, args...)
+	daemonSysProcAttr(cmd)
+	if strings.TrimSpace(workDir) != "" {
+		cmd.Dir = workDir
+	}
+	cmd.Env = append(os.Environ(), "RYSH_SESSION="+name)
+	cmd.Stdin = nil
+	if logPath != "" {
+		if f, ferr := os.Create(logPath); ferr == nil {
+			defer f.Close()
+			cmd.Stdout, cmd.Stderr = f, f
+		}
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("spawn restart helper: %w", err)
+	}
+	// Reap rather than Release, so the helper never lingers as a zombie of a
+	// daemon that is still alive (it is about to stop this daemon anyway).
+	go func() { _ = cmd.Wait() }()
+	return nil
+}

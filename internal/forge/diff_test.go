@@ -5,7 +5,7 @@ package forge
 import (
 	"testing"
 
-	"github.com/rysh-ai/rysh-cli-code/internal/forge/ir"
+	"github.com/rysh-ai/rysh-cli-shared/forge/ir"
 )
 
 func TestDiffAPIs(t *testing.T) {

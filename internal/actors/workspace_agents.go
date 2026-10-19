@@ -252,6 +252,10 @@ func (w *WorkspaceActor) handleAgentSubcommand(out *strings.Builder, paneID stri
 		w.actorSystem.Root.Send(w.agentRegistryPID, &msg.MsgAgentDeactivate{Name: args[1]})
 		fmt.Fprintf(out, "\n[agents] deactivating agent %q\n", args[1])
 
+	case "meeting":
+		// Attach a spawned agent to the live meeting ("hey <name>") or detach it.
+		w.agentMeeting(out, paneID, args[1:])
+
 	case "reload-prompts":
 		// Follow-up 2b: reload the layered prompt store + re-apply on Setup
 		// + broadcast MsgReloadPrompts to every active LLM-execution actor.
@@ -451,6 +455,7 @@ func (w *WorkspaceActor) createAgentFromFile(out *strings.Builder, paneID, path 
 		WorktreeBranch: wtBranch,
 		WorktreePath:   wtPath,
 		AutoApprove:    def.AutoApprove,
+		SkillPath:      def.Path,
 	})
 	fmt.Fprintf(out, "\n[agents] spawning agent %q from %s\n", def.Name, path)
 }
@@ -488,6 +493,7 @@ func (w *WorkspaceActor) createAgentsFromDir(out *strings.Builder, paneID, dirPa
 			WorktreeBranch: wtBranch,
 			WorktreePath:   wtPath,
 			AutoApprove:    def.AutoApprove,
+			SkillPath:      def.Path,
 		})
 		fmt.Fprintf(out, "\n[agents] spawning agent %q\n", def.Name)
 	}
@@ -577,6 +583,9 @@ func (w *WorkspaceActor) agentHelp(out *strings.Builder) {
 		"##agent deactivate <name>                      deactivate an agent",
 		"##agent register-output <agent> <pane>         route agent output to pane chat",
 		"##agent unregister-output <agent> <pane>       stop routing output to pane",
+		"##agent meeting <name> [off]                   answer in the live meeting as this agent (\"hey <name>\"); off detaches",
+		"  the agent uses ALL its own tools with no approval; --allow speakers only;",
+		"  every tool call is audited (meeting status: tool_calls, audit_log)",
 		"##agent reload-prompts                         re-read rysh-cli-agent-prompts/ (override dir wins; effective next prompt)",
 		"##agent metrics                                dump per-tool / LLM / compaction metrics",
 		"",

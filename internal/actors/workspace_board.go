@@ -4,6 +4,7 @@ package actors
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -107,10 +108,110 @@ func (w *WorkspaceActor) handleCLIBoardPost(m *msg.MsgCLIBoardPost) *msg.MsgCLIR
 	}
 
 	post := w.buildBoardPost(paneID, m.Kind, text, m.ThreadID)
+	if err := w.addressBoardPost(post, m); err != nil {
+		return &msg.MsgCLIResponse{OK: false, Error: err.Error()}
+	}
 	if err := msg.SendBoardPost(w.pub, boardID, post); err != nil {
 		return &msg.MsgCLIResponse{OK: false, Error: fmt.Sprintf("publish board post: %v", err)}
 	}
 	return &msg.MsgCLIResponse{OK: true, ID: post.ThreadID, Output: boardPostConfirmation(boardID, post)}
+}
+
+// addressBoardPost applies the design-050 rules for the two kinds that are not
+// chat, and refuses their fields on every kind that is.
+//
+//   - cmd: the recipient is REQUIRED and resolved to a full pane uuid here,
+//     because the courier delivers by uuid and a given-name is not unique per
+//     session. Sending to yourself is refused (it can only loop). The command
+//     gets a CmdID (the caller's, validated, or a minted one) and, unless the
+//     caller filed it under an existing thread, opens its own thread
+//     CmdThreadID(sender, id) so the recipient's ack and replies attach to it.
+//   - ack: names the command it acknowledges and must be filed on a thread —
+//     an ack floating as its own root acknowledges nothing anyone can find.
+//   - anything else: To, CmdID and File are refused, not ignored. A status
+//     post that silently dropped --to would read like an order that was sent.
+func (w *WorkspaceActor) addressBoardPost(post *msg.MsgBoardPost, m *msg.MsgCLIBoardPost) error {
+	to := strings.TrimSpace(m.To)
+	cmdID := strings.TrimSpace(m.CmdID)
+	file := strings.TrimSpace(m.File)
+
+	switch post.Kind {
+	case msg.BoardKindCmd:
+		if to == "" {
+			return fmt.Errorf("a command needs a recipient: --to <pane-id|name>")
+		}
+		toID := w.resolvePaneID(to)
+		if toID == "" {
+			return fmt.Errorf("recipient pane not found: %s", to)
+		}
+		if toID == post.PaneID {
+			return fmt.Errorf("a command cannot be sent to its own sender (%s)", post.Persona)
+		}
+		if cmdID == "" {
+			cmdID = msg.MintCmdID(post.TS)
+		} else if err := msg.ValidateCmdID(cmdID); err != nil {
+			return err
+		}
+		if file != "" && !filepath.IsAbs(file) {
+			return fmt.Errorf("--file must be an absolute path, got %q", file)
+		}
+		var givenName, title string
+		if ps := w.paneSnapshotByID(toID); ps != nil {
+			givenName, title = ps.GivenName, ps.Title
+		}
+		post.ToPaneID = toID
+		post.ToPersona = msg.BoardPersona(givenName, title, toID)
+		post.CmdID = cmdID
+		post.File = file
+		if post.ThreadID == "" {
+			post.ThreadID = msg.CmdThreadID(post.PaneID, cmdID)
+		}
+		return nil
+
+	case msg.BoardKindAck:
+		if to != "" || file != "" {
+			return fmt.Errorf("an ack takes no --to or --file: it answers the command on its thread")
+		}
+		if cmdID == "" {
+			return fmt.Errorf("an ack must name the command it acknowledges")
+		}
+		if err := msg.ValidateCmdID(cmdID); err != nil {
+			return err
+		}
+		if post.ThreadID == "" {
+			return fmt.Errorf("an ack must be filed on the command's thread")
+		}
+		post.CmdID = cmdID
+		return nil
+	}
+
+	if to != "" || cmdID != "" || file != "" {
+		return fmt.Errorf("--to, a command id and --file belong to commands only (kind %q is a status post); "+
+			"use `board send` to give another agent work", post.Kind)
+	}
+	return nil
+}
+
+// handleCLIBoardResolve answers MsgCLIBoardResolve: the caller's full pane uuid
+// in ID and its board in Output. Silent for the same reason the post door is:
+// it focuses nothing and writes into no pane.
+func (w *WorkspaceActor) handleCLIBoardResolve(m *msg.MsgCLIBoardResolve) *msg.MsgCLIResponse {
+	as := ""
+	if m != nil {
+		as = strings.TrimSpace(m.AsPaneID)
+	}
+	if as == "" {
+		return &msg.MsgCLIResponse{OK: false, Error: "--as <pane-id> is required"}
+	}
+	paneID := w.resolvePaneID(as)
+	if paneID == "" {
+		return &msg.MsgCLIResponse{OK: false, Error: fmt.Sprintf("pane not found: %s", as)}
+	}
+	out := w.boardForPane(paneID)
+	if m.WantCaps {
+		out += "\ncaps: " + strings.Join(msg.BoardCaps, " ")
+	}
+	return &msg.MsgCLIResponse{OK: true, ID: paneID, Output: out}
 }
 
 // buildBoardPost assembles one post from a pane's live snapshot. Shared by both
@@ -146,6 +247,10 @@ func (w *WorkspaceActor) buildBoardPost(paneID, kind, text, threadID string) *ms
 // It names the board since 028: "posted to the board" was unambiguous while
 // there was one, and is a guess as soon as a session has several.
 func boardPostConfirmation(boardID string, post *msg.MsgBoardPost) string {
+	if post.Kind == msg.BoardKindCmd {
+		return fmt.Sprintf("sent command %s to %s on board %s as %s: thread %s\n",
+			post.CmdID, post.ToPersona, boardLabel(boardID), post.Persona, post.ThreadID)
+	}
 	if post.ThreadID == "" {
 		return fmt.Sprintf("posted to board %s as %s (%s): root, no thread id\n",
 			boardLabel(boardID), post.Persona, post.Kind)
@@ -193,6 +298,14 @@ func (w *WorkspaceActor) handleBoardCommand(out *strings.Builder, paneID string,
 		// the posting path -- an agent posting must never create panes.
 		w.openAgentsBoardPane(out, paneID, boardID)
 		return nil
+
+	case "copy":
+		// Messages to the clipboard, unwrapped (workspace_board_copy.go).
+		return w.handleBoardCopy(out, paneID, boardID, args[1:])
+
+	case "output":
+		// Messages to an HTML page or a PDF, opened.
+		return w.handleBoardOutput(out, boardID, args[1:])
 
 	case "agent":
 		// The board claude: a real pane kept off screen (design 027 §2 ruling 1).
@@ -257,6 +370,7 @@ func (w *WorkspaceActor) boardUsage(out *strings.Builder, why string) error {
 	out.WriteString("  ##board open [--board <id>]    open the agents board pane (default board: session)\n")
 	out.WriteString("  ##board post <text>            post a milestone to the agents board\n")
 	out.WriteString("  ##board reply <thread> <text>  reply under an existing thread\n")
+	writeBoardItemUsage(out)
 	out.WriteString("  ##board agent up               start the board claude in a hidden pane\n")
 	out.WriteString("  ##board agent visible          show the board claude's pane\n")
 	out.WriteString("  ##board agent invisible        hide it again (it keeps running)\n")

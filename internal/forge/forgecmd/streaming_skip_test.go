@@ -99,7 +99,9 @@ func TestForgeAdd_ReportsStreamingRouting(t *testing.T) {
 	if !strings.Contains(got, wantExposed) {
 		t.Errorf("add output missing streaming-session summary %q, got:\n%s", wantExposed, got)
 	}
-	wantSkipped := "1 streaming method skipped (bidi: Feed_Chat) — client/bidi streams cannot ride a JSON-over-HTTP bridge"
+	// T3: the line must name the exclusion as a ruling and cite where the
+	// reasons live, not read as a mechanical limitation someone will lift.
+	wantSkipped := "1 streaming method skipped (bidi: Feed_Chat) — client/bidi streams are deliberately not exposed: a ruling with reasons, not a missing feature (design 015 §5.1)"
 	if !strings.Contains(got, wantSkipped) {
 		t.Errorf("add output missing client/bidi skip summary %q, got:\n%s", wantSkipped, got)
 	}

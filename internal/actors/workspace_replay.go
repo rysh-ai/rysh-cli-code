@@ -4,6 +4,9 @@ package actors
 
 import (
 	"fmt"
+	"math"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,14 +51,13 @@ func (w *WorkspaceActor) handleReplayCommand(out *strings.Builder, paneID string
 		} else {
 			fmt.Fprintf(out, "  durable: OFF — in-memory only (recording is lost on restart)\n")
 		}
-		if w.replayPlayer != nil && w.replayPlayer.Active() {
-			if w.replayPaneID != "" {
-				fmt.Fprintf(out, "  playback: RUNNING in replay pane %s — focus it for controls, q or ##replay stop to cancel\n", shortID(w.replayPaneID))
-				if st, ok := w.replayPlayer.Status(); ok {
-					fmt.Fprintf(out, "  %s\n", replay.FormatBadge(st))
-				}
-			} else {
-				fmt.Fprintf(out, "  playback: RUNNING — ##replay stop to cancel\n")
+		if w.replayHere != nil && w.replayHere.Active() {
+			fmt.Fprintf(out, "  playback: RUNNING in-pane (--here) — ##replay stop to cancel\n")
+		}
+		for _, id := range w.activeReplayPaneIDs() {
+			fmt.Fprintf(out, "  playback: RUNNING in replay pane %s — focus it for controls, q to close it\n", shortID(id))
+			if st, ok := w.replayPanes[id].Status(); ok {
+				fmt.Fprintf(out, "    %s\n", replay.FormatBadge(st))
 			}
 		}
 		for _, p := range panes {
@@ -66,9 +68,8 @@ func (w *WorkspaceActor) handleReplayCommand(out *strings.Builder, paneID string
 	case "play":
 		w.handleReplayPlay(out, paneID, args[1:])
 	case "stop":
-		if w.replayPlayer != nil && w.replayPlayer.Active() {
-			w.replayPlayer.Stop()
-			fmt.Fprintf(out, "replay: stopping playback\n")
+		if n := w.stopAllReplays(); n > 0 {
+			fmt.Fprintf(out, "replay: stopping playback (%d)\n", n)
 		} else {
 			fmt.Fprintf(out, "replay: no playback running\n")
 		}
@@ -178,8 +179,8 @@ func replayEmitter(pub *msg.NATSPublisher, dest string) func(string) {
 }
 
 // replayBadgeFeed returns the OnStatus hook feeding the REPLAY badge: publish
-// is called with the rendered badge ("REPLAY 01:23/04:56 ×2") whenever the
-// text changes. The badge has 1-second display resolution, so the text-change
+// is called with the rendered badge ("REPLAY ▕███░░░░░░░░░▏ 01:23/04:56 · 14:32:07 ×2")
+// whenever the text changes. The badge has 1-second display resolution, so the text-change
 // check is also the throttle — at most one publish per second of playback
 // position plus one per control action. Pure over `publish`, so the dedupe
 // logic is unit-testable; runs entirely on the player goroutine.
@@ -195,6 +196,181 @@ func replayBadgeFeed(publish func(string)) func(replay.PlayerStatus) {
 	}
 }
 
+// Replay-pane meta (E-15, design 006): a dedicated replay pane carries its
+// playback in its metadata, which rides the pane's KV snapshot — so after a
+// daemon restart the workspace can find the pane and resume it
+// (restoreReplayPanes). Source "*" means all panes merged.
+const (
+	replayMetaSource = "replay.source"
+	replayMetaSpeed  = "replay.speed"
+	replayMetaPosMs  = "replay.pos_ms"
+	replayMetaState  = "replay.state"
+
+	replayStatePlaying  = "playing" // includes paused: still a live playback
+	replayStateFinished = "finished"
+	replayStateStopped  = "stopped"
+
+	replaySourceAll = "*"
+
+	// replayPosPersistStep is how far the position must move before it is
+	// written to pane meta again: each write is a synchronous KV put, so a
+	// restart resumes at most this far behind instead of costing a write per
+	// second of playback.
+	replayPosPersistStep = 5 * time.Second
+)
+
+// formatReplaySpeed renders a speed for pane meta ("max" for +Inf).
+func formatReplaySpeed(v float64) string {
+	if math.IsInf(v, 1) {
+		return "max"
+	}
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+// replayPositionFeed returns an OnStatus hook that records the playback's
+// position and speed in the replay pane's meta via set: the position when it
+// has moved replayPosPersistStep or more since the last write, and on every
+// pause/resume or speed change; the speed when it changes. Pure over set, so
+// the throttle is unit-testable; runs on the player goroutine.
+func replayPositionFeed(set func(key, value string)) func(replay.PlayerStatus) {
+	var last replay.PlayerStatus
+	first := true
+	return func(st replay.PlayerStatus) {
+		speedChanged := first || st.Speed != last.Speed
+		moved := st.Pos - last.Pos
+		if moved < 0 {
+			moved = -moved
+		}
+		if first || moved >= replayPosPersistStep || st.Paused != last.Paused || speedChanged {
+			set(replayMetaPosMs, strconv.FormatInt(st.Pos.Milliseconds(), 10))
+			if speedChanged {
+				set(replayMetaSpeed, formatReplaySpeed(st.Speed))
+			}
+			last = st
+			first = false
+		}
+	}
+}
+
+// replayPaneHooks builds the controlled player's hooks for a replay pane:
+// output, clear, the REPLAY badge, the position/speed meta, and the terminal
+// state on finish/stop. Every hook runs on the player goroutine and touches no
+// actor state — it publishes through the thread-safe NATS publisher only.
+func (w *WorkspaceActor) replayPaneHooks(paneID string) replay.PlayerHooks {
+	pub := w.pub
+	emit := replayEmitter(pub, paneID)
+	statusSubject := msg.T("pane", paneID, "status")
+	inbox := msg.T("pane", paneID, "inbox")
+	setMeta := func(k, v string) { _ = pub.Send(inbox, &msg.MsgPaneSetMeta{Key: k, Value: v}) }
+	badge := replayBadgeFeed(func(b string) {
+		_ = pub.Send(statusSubject, &msg.MsgPaneStatusUpdate{Status: b})
+	})
+	position := replayPositionFeed(setMeta)
+	return replay.PlayerHooks{
+		Emit: emit,
+		Clear: func() {
+			// Backward seek / resume re-render from the start of the buffer:
+			// wipe the pane, then the player re-emits up to the target.
+			_ = pub.Send(inbox, &msg.MsgPaneClearOutput{})
+		},
+		OnStatus: func(st replay.PlayerStatus) {
+			badge(st)
+			position(st)
+		},
+		OnDone: func(stopped bool) {
+			line, b, state := "\n[rysh] replay: playback finished — press q in this pane to close it\n", "REPLAY finished", replayStateFinished
+			if stopped {
+				line, b, state = "\n[rysh] replay: playback stopped\n", "REPLAY stopped", replayStateStopped
+			}
+			emit(line)
+			_ = pub.Send(statusSubject, &msg.MsgPaneStatusUpdate{Status: b})
+			setMeta(replayMetaState, state)
+		},
+	}
+}
+
+// startupRestoreDelay is how long after startup restore the workspace waits
+// before restoring pane state that needs the tabs to have their panes.
+const startupRestoreDelay = 3 * time.Second
+
+// startupRestoreAfter is the clock seam for that wait (time.After in
+// production; tests fire it directly instead of sleeping).
+var startupRestoreAfter = time.After
+
+// scheduleStartupRestores runs once from Started: after startupRestoreDelay
+// it asks the workspace (on its own mailbox) to re-register meeting panes —
+// bots do not survive a restart (design 043 D7) — and to resume replay panes
+// whose playback the restart cut off (E-15).
+func (w *WorkspaceActor) scheduleStartupRestores() {
+	wait := startupRestoreAfter(startupRestoreDelay)
+	go func() {
+		<-wait
+		w.meetingSelf(&msgMeetingRestore{})
+		w.meetingSelf(&msgReplayRestore{})
+	}()
+}
+
+// msgReplayRestore is the workspace's note to itself, sent once after startup
+// restore, to resume an interrupted replay pane.
+type msgReplayRestore struct{}
+
+// restoreReplayPanes resumes a replay pane that was playing when the daemon
+// went down (E-15). Its playback is in its meta; the recording comes back
+// from the durable capture. It resumes PAUSED at the last saved position with
+// the screen re-rendered up to it: nobody was watching across the restart, so
+// starting to play unattended would only skip content. Finished or stopped
+// replay panes are left as they are; so is a pane that is already playing.
+// Every interrupted replay pane is resumed (playbacks are independent).
+func (w *WorkspaceActor) restoreReplayPanes() {
+	for _, t := range w.tabs {
+		snap := w.queryTabSnapshot(t.id)
+		if snap == nil {
+			continue
+		}
+		for _, lane := range snap.Lanes {
+			for _, g := range lane.PaneGroups {
+				for _, p := range g.Panes {
+					if p.PaneType != "replay" || p.Meta[replayMetaState] != replayStatePlaying {
+						continue
+					}
+					if cur := w.replayPanes[p.ID]; cur != nil && cur.Active() {
+						continue
+					}
+					w.resumeReplayPane(p.ID, p.Meta)
+				}
+			}
+		}
+	}
+}
+
+// resumeReplayPane restarts one replay pane's playback from its meta.
+func (w *WorkspaceActor) resumeReplayPane(paneID string, meta map[string]string) {
+	unavailable := func(why string) {
+		_ = w.pub.Send(msg.T("pane", paneID, "status"), &msg.MsgPaneStatusUpdate{Status: "REPLAY unavailable"})
+		replayEmitter(w.pub, paneID)("\n[rysh] replay: cannot resume after restart — " + why + "\n")
+		_ = w.pub.Send(msg.T("pane", paneID, "inbox"), &msg.MsgPaneSetMeta{Key: replayMetaState, Value: replayStateStopped})
+	}
+	if w.replay == nil {
+		unavailable("replay capture is off")
+		return
+	}
+	source := meta[replayMetaSource]
+	if source == replaySourceAll {
+		source = ""
+	}
+	tl, start, err := w.replay.ResumeTimeline(source)
+	if err != nil {
+		unavailable(err.Error())
+		return
+	}
+	speed, err := replay.ParseSpeed(meta[replayMetaSpeed])
+	if err != nil {
+		speed = 1
+	}
+	posMs, _ := strconv.ParseInt(meta[replayMetaPosMs], 10, 64)
+	w.trackReplayPane(paneID, replay.ResumeControlledPlayer(tl, start, time.Duration(posMs)*time.Millisecond, speed, replayPaneLead, time.After, w.replayPaneHooks(paneID)))
+}
+
 // handleReplayPlay implements ##replay play (design 006 §3.2 v2). By default
 // it creates a NEW dedicated replay pane — a PaneActor variant that never
 // starts a shell/PTY, so it is read-only by construction — and replays the
@@ -202,16 +378,12 @@ func replayBadgeFeed(publish func(string)) func(replay.PlayerStatus) {
 // TUI drives playback controls (space pause, ←/→ seek ±10s, +/- speed, q
 // close); closing the pane stops the playback. `--here` keeps the v1 in-pane
 // behavior: replay into the invoking pane, no controls, ##replay stop cancels.
-// One playback at a time either way (single player slot).
+// Replay panes play concurrently and independently (one player each); there
+// is one in-pane playback at a time.
 func (w *WorkspaceActor) handleReplayPlay(out *strings.Builder, curPane string, args []string) {
 	if curPane == "" {
 		fmt.Fprintf(out, "replay: no active pane to play into\n")
 		w.failRysh("replay: no active pane to play into")
-		return
-	}
-	if w.replayPlayer != nil && w.replayPlayer.Active() {
-		fmt.Fprintf(out, "replay: a playback is already running — ##replay stop first\n")
-		w.failRysh("replay: a playback is already running — ##replay stop first")
 		return
 	}
 	target, fromSpec, speedSpec, here, err := parseReplayPlayArgs(args)
@@ -225,6 +397,13 @@ func (w *WorkspaceActor) handleReplayPlay(out *strings.Builder, curPane string, 
 		target = curPane
 	}
 	if here {
+		// Replay panes are independent of each other; an in-pane playback
+		// writes into the invoking pane itself, so there is one of those.
+		if w.replayHere != nil && w.replayHere.Active() {
+			fmt.Fprintf(out, "replay: an in-pane (--here) playback is already running — ##replay stop first\n")
+			w.failRysh("replay: an in-pane (--here) playback is already running — ##replay stop first")
+			return
+		}
 		w.startReplayHere(out, curPane, target, fromSpec, speedSpec)
 		return
 	}
@@ -252,8 +431,7 @@ func (w *WorkspaceActor) startReplayHere(out *strings.Builder, curPane, target, 
 			_ = pub.SendPaneRyshOutput(dest, "\n[rysh] replay: playback finished\n")
 		}
 	}
-	w.replayPlayer = replay.StartPlayer(steps, time.After, emit, onDone)
-	w.replayPaneID = "" // in-pane playback has no dedicated pane to control
+	w.replayHere = replay.StartPlayer(steps, time.After, emit, onDone)
 
 	src := "all panes"
 	if target != "" {
@@ -268,7 +446,7 @@ func (w *WorkspaceActor) startReplayHere(out *strings.Builder, curPane, target, 
 // on the invoking pane, like every other pane-creating ## command; focusing
 // the replay pane hands its keys to the playback controls.
 func (w *WorkspaceActor) startReplayPane(out *strings.Builder, curPane, target, fromSpec, speedSpec string) {
-	tl, err := w.replay.Timeline(target)
+	tl, start, err := w.replay.Timeline(target)
 	if err != nil {
 		w.failRysh("%v", err)
 		fmt.Fprintf(out, "replay: %v\n", err)
@@ -312,46 +490,29 @@ func (w *WorkspaceActor) startReplayPane(out *strings.Builder, curPane, target, 
 	alias := w.generateUniqueAlias()
 	paneID := uuid.NewString()
 	groupID := uuid.NewString()
+	source := target
+	if source == "" {
+		source = replaySourceAll
+	}
 	_ = w.pub.Send(msg.T("tab", tab.id, "inbox"), &msg.MsgTabCreatePaneGroupInLane{
 		LaneID:   laneID,
 		Title:    alias,
 		GroupID:  groupID,
 		PaneID:   paneID,
 		PaneType: "replay",
+		// Born with its playback so a daemon restart can resume it.
+		Meta: map[string]string{
+			replayMetaSource: source,
+			replayMetaSpeed:  formatReplaySpeed(speed),
+			replayMetaPosMs:  strconv.FormatInt(from.Milliseconds(), 10),
+			replayMetaState:  replayStatePlaying,
+		},
 	})
 	w.resCounts.panes++
-	w.replayPaneID = paneID
 	w.restoreFocusAfterCreate(curPane)
 	w.persistToKV()
 
-	// All hooks run on the player goroutine and touch no actor state — they
-	// publish through the thread-safe NATS publisher only.
-	pub := w.pub
-	emit := replayEmitter(pub, paneID)
-	statusSubject := msg.T("pane", paneID, "status")
-	onStatus := replayBadgeFeed(func(badge string) {
-		_ = pub.Send(statusSubject, &msg.MsgPaneStatusUpdate{Status: badge})
-	})
-	clear := func() {
-		// Backward seek re-renders from the start of the buffer: wipe the
-		// pane, then the player re-emits everything up to the target at max
-		// speed (documented v2 behavior).
-		_ = pub.Send(msg.T("pane", paneID, "inbox"), &msg.MsgPaneClearOutput{})
-	}
-	onDone := func(stopped bool) {
-		line, badge := "\n[rysh] replay: playback finished — press q in this pane to close it\n", "REPLAY finished"
-		if stopped {
-			line, badge = "\n[rysh] replay: playback stopped\n", "REPLAY stopped"
-		}
-		emit(line)
-		_ = pub.Send(statusSubject, &msg.MsgPaneStatusUpdate{Status: badge})
-	}
-	w.replayPlayer = replay.StartControlledPlayer(tl, from, speed, replayPaneLead, time.After, replay.PlayerHooks{
-		Emit:     emit,
-		Clear:    clear,
-		OnDone:   onDone,
-		OnStatus: onStatus,
-	})
+	w.trackReplayPane(paneID, replay.StartControlledPlayer(tl, start, from, speed, replayPaneLead, time.After, w.replayPaneHooks(paneID)))
 
 	src := "all panes"
 	if target != "" {
@@ -366,23 +527,21 @@ func (w *WorkspaceActor) startReplayPane(out *strings.Builder, curPane, target, 
 // controls for the active replay pane are honoured — a stale control from a
 // closed pane, or one racing a finished playback, is dropped silently.
 func (w *WorkspaceActor) handleReplayControl(m *msg.MsgReplayControl) {
-	if w.replayPlayer == nil || !w.replayPlayer.Active() {
-		return
-	}
-	if w.replayPaneID == "" || m.PaneID != w.replayPaneID {
+	p := w.replayPanes[m.PaneID]
+	if p == nil || !p.Active() {
 		return
 	}
 	switch m.Action {
 	case "pause":
-		w.replayPlayer.TogglePause()
+		p.TogglePause()
 	case "seek":
-		w.replayPlayer.SeekBy(time.Duration(m.DeltaMs) * time.Millisecond)
+		p.SeekBy(time.Duration(m.DeltaMs) * time.Millisecond)
 	case "faster":
-		w.replayPlayer.SpeedUp()
+		p.SpeedUp()
 	case "slower":
-		w.replayPlayer.SpeedDown()
+		p.SpeedDown()
 	case "stop":
-		w.replayPlayer.Stop()
+		p.Stop()
 	}
 }
 
@@ -390,13 +549,52 @@ func (w *WorkspaceActor) handleReplayControl(m *msg.MsgReplayControl) {
 // pane has closed (any close path — the PaneActor's Stopping hook publishes
 // MsgPaneStopped for every pane). Returns true when a playback was stopped.
 func (w *WorkspaceActor) stopReplayIfPaneClosed(paneID string) bool {
-	if paneID == "" || paneID != w.replayPaneID {
+	p, ok := w.replayPanes[paneID]
+	if paneID == "" || !ok {
 		return false
 	}
-	w.replayPaneID = ""
-	if w.replayPlayer != nil && w.replayPlayer.Active() {
-		w.replayPlayer.Stop()
+	delete(w.replayPanes, paneID)
+	if p.Active() {
+		p.Stop()
 		return true
 	}
 	return false
+}
+
+// trackReplayPane records the playback rendering into a replay pane.
+func (w *WorkspaceActor) trackReplayPane(paneID string, p *replay.Player) {
+	if w.replayPanes == nil {
+		w.replayPanes = make(map[string]*replay.Player)
+	}
+	w.replayPanes[paneID] = p
+}
+
+// activeReplayPaneIDs lists the replay panes still playing, sorted.
+func (w *WorkspaceActor) activeReplayPaneIDs() []string {
+	var ids []string
+	for id, p := range w.replayPanes {
+		if p.Active() {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// stopAllReplays stops every running playback — each replay pane's and the
+// in-pane one — and returns how many it stopped (##replay stop, shutdown).
+// Replay panes stay open and tracked; their playback ends "stopped".
+func (w *WorkspaceActor) stopAllReplays() int {
+	n := 0
+	for _, p := range w.replayPanes {
+		if p.Active() {
+			p.Stop()
+			n++
+		}
+	}
+	if w.replayHere != nil && w.replayHere.Active() {
+		w.replayHere.Stop()
+		n++
+	}
+	return n
 }

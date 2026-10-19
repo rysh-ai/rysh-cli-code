@@ -35,6 +35,7 @@ func (m *Model) recomputePaneRects() {
 	tab := m.activeTab()
 	if tab == nil {
 		m.paneRects = nil
+		m.laneStrips = nil
 		return
 	}
 
@@ -72,10 +73,24 @@ func (m *Model) recomputePaneRects() {
 	totalHeight := m.bodyHeight()
 
 	var rects []paneRect
+	var strips []laneStrip
 	xOffset := m.bodyXOffset() // vertical tab column + body outer Padding(0,1) left
 
 	for c, lane := range lanes {
 		colWidth := colWidths[c]
+		if colWidth == collapsedLaneWidth && lane.Collapsed {
+			// A folded lane has no pane rects — nothing in it is drawn — only a
+			// strip that a click opens.
+			strips = append(strips, laneStrip{
+				laneID: lane.LaneID,
+				x:      xOffset,
+				w:      colWidth + 2,
+				y:      headerHeight,
+				h:      totalHeight + 2,
+			})
+			xOffset += colWidth + 2
+			continue
+		}
 		col := lane.VisiblePanes
 		if len(col) == 0 {
 			xOffset += colWidth + 2
@@ -128,6 +143,7 @@ func (m *Model) recomputePaneRects() {
 	}
 
 	m.paneRects = rects
+	m.laneStrips = strips
 }
 
 // handleMouse processes mouse events: click-to-focus, drag-to-select,
@@ -179,6 +195,21 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Button != tea.MouseButtonLeft {
 			return m, nil
+		}
+		// A click on a folded lane's strip opens it and focuses its front pane.
+		if laneID := m.laneStripAt(msg.X, msg.Y); laneID != "" {
+			m.sendMsg(&msgpkg.MsgLaneCollapse{Verb: "expand", Lane: laneID})
+			if tab := m.activeTab(); tab != nil {
+				for _, lane := range tab.FlatLanes() {
+					if lane.LaneID == laneID {
+						if id := laneFocusTarget(lane); id != "" {
+							m.sendMsg(&msgpkg.MsgFocusPaneByID{ID: id})
+						}
+					}
+				}
+			}
+			m.selection = mouseSelection{}
+			return m, m.refreshCmd()
 		}
 		paneID, localX, localY := m.hitTestPane(msg.X, msg.Y)
 		if paneID == "" {
@@ -284,29 +315,54 @@ func (m *Model) copySelectionToClipboard() tea.Cmd {
 	if text == "" {
 		return nil
 	}
+	if err := writeClipboard(text); err != nil {
+		return m.flash(fmt.Sprintf("clipboard error: %v", err))
+	}
+	lines := strings.Count(text, "\n") + 1
+	chars := len([]rune(text))
+	return m.flash(fmt.Sprintf("copied %d line(s), %d char(s) to clipboard", lines, chars))
+}
+
+// writeClipboard is the TUI's ONE clipboard path — mouse copy, the board
+// pane's y/Y, and `##board copy` handed over by the daemon all go through it:
+// OSC 52 to the controlling terminal first, then the local clipboard as a
+// best-effort fallback whose error is ignored once OSC 52 has been emitted
+// (over SSH it only ever reaches the remote host's clipboard).
+//
+// A variable so tests can observe what would have been copied without
+// writing escape sequences to the terminal running them.
+var writeClipboard = func(text string) error {
 	out, closeOut := OSC52Output()
 	err := WriteOSC52(out, os.Getenv, text)
 	closeOut()
 	if err != nil {
-		m.flashMsg = fmt.Sprintf("clipboard error: %v", err)
-	} else {
-		// Best-effort local fallback; over SSH this reaches only the remote
-		// host's clipboard, so ignore its error — OSC 52 already succeeded.
-		_ = clipboard.WriteAll(text)
-		lines := strings.Count(text, "\n") + 1
-		chars := len([]rune(text))
-		m.flashMsg = fmt.Sprintf("copied %d line(s), %d char(s) to clipboard", lines, chars)
+		return err
 	}
+	_ = clipboard.WriteAll(text)
+	return nil
+}
+
+// flash shows a status-bar message for three seconds.
+func (m *Model) flash(text string) tea.Cmd {
+	m.flashMsg = text
 	m.flashExpires = time.Now().Add(3 * time.Second)
 	return tea.Tick(3*time.Second, func(time.Time) tea.Msg {
 		return flashClearMsg{}
 	})
 }
 
-// extractSelectedText returns the plain text covered by the current selection.
+// extractSelectedText returns the plain text covered by the current
+// selection. In scrollback (copy) mode the selection is over the frozen
+// history view rather than a pane's normal buffer, so that case is delegated
+// to extractRawScrollSelectedText, which builds its display lines from
+// m.rawScrollRows instead of buildDisplayLines.
 func (m Model) extractSelectedText() string {
 	if !m.selection.active {
 		return ""
+	}
+
+	if m.mode == modeRawScroll && m.selection.paneID == m.rawScrollPaneID {
+		return m.extractRawScrollSelectedText()
 	}
 
 	tab := m.activeTab()
@@ -349,16 +405,58 @@ func (m Model) extractSelectedText() string {
 		return ""
 	}
 
+	// An agents-board pane has no buffer: buildBoardPanel draws it from the
+	// board store, so the text must come from the same rows it drew. Reading
+	// buildDisplayLines here — the old behaviour — copied a buffer the pane
+	// never displays, which is why mouse copy did nothing in a board pane.
+	if pane.PaneType == domain.PaneTypeAgentsBoard {
+		return m.extractBoardSelectedText(*pane, *rect)
+	}
+
 	height := rect.h
 	textWidth := max(1, rect.w)
 	// Extract using each pane's OWN input mode (not only the active pane's), so
 	// copying from a background chat/prompt/rysh pane pulls from the buffer that
 	// is actually displayed — mirroring buildDisplayLines in the renderer.
 	fsMode := m.paneInputModeFor(pane.ID)
-	displayLines := buildDisplayLines(*pane, *tab, textWidth, height, m.inputValueFor(pane.ID), m.scrollOffset(pane.ID), fsMode)
+	displayLines := m.buildDisplayLines(*pane, *tab, textWidth, height, m.inputValueFor(pane.ID), m.scrollOffset(pane.ID), fsMode)
 
 	startRow, startCol, endRow, endCol := m.selection.normalized()
+	return joinSelectedText(displayLines, startRow, startCol, endRow, endCol)
+}
 
+// extractRawScrollSelectedText is extractSelectedText's counterpart for
+// scrollback (copy) mode: same row/col selection math, sourced from
+// rawScrollDisplayLines (the frozen history window) instead of a pane's live
+// buffer.
+func (m Model) extractRawScrollSelectedText() string {
+	var rect *paneRect
+	for i := range m.paneRects {
+		if m.paneRects[i].paneID == m.selection.paneID {
+			rect = &m.paneRects[i]
+			break
+		}
+	}
+	if rect == nil {
+		return ""
+	}
+	pane := m.findPaneInSnapshot(m.selection.paneID)
+	if pane == nil {
+		return ""
+	}
+
+	displayLines := m.rawScrollDisplayLines(*pane, max(1, rect.w), rect.h)
+	startRow, startCol, endRow, endCol := m.selection.normalized()
+	return joinSelectedText(displayLines, startRow, startCol, endRow, endCol)
+}
+
+// joinSelectedText extracts the plain text spanned by a normalized selection
+// range (startRow <= endRow) from a set of display lines — one entry per
+// screen row, ANSI-stripped and width-padded so rune indices line up with
+// on-screen columns. Shared by extractSelectedText and
+// extractRawScrollSelectedText, which differ only in how displayLines is
+// built.
+func joinSelectedText(displayLines []string, startRow, startCol, endRow, endCol int) string {
 	if startRow >= len(displayLines) {
 		return ""
 	}

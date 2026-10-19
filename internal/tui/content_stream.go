@@ -526,7 +526,10 @@ func (m Model) fetchPaneContentCmd(paneID string) tea.Cmd {
 	nc := m.bus.Conn()
 	subject := msgpkg.T("pane", paneID, "snapshot")
 	return func() tea.Msg {
-		payload, _ := json.Marshal(&msgpkg.MsgGetPaneSnapshot{}) // LayoutOnly=false
+		// LayoutOnly=false for the content; NoHistories because arrow-key recall
+		// reads history from the layout snapshot, never from this reply, and
+		// this runs per visible pane on every reconcile tick.
+		payload, _ := json.Marshal(&msgpkg.MsgGetPaneSnapshot{NoHistories: true})
 		envData, _ := json.Marshal(msgpkg.NATSEnvelope{TypeTag: msgpkg.TagGetPaneSnapshot, Payload: payload})
 		reply, err := nc.Request(subject, envData, 2*time.Second)
 		if err != nil {
@@ -999,6 +1002,48 @@ func (m *Model) syncPaneContentSet() (visible, needBackfill []string) {
 			delete(m.paneVTHash, id)
 		}
 	}
+	// And the wrap cache, which holds a copy of the pane's whole buffer plus
+	// its wrapped rows. Dropping an entry for a pane that is merely missing
+	// from one snapshot costs a single re-wrap, never correctness.
+	for id := range m.paneWrapCache {
+		if !present[id] {
+			delete(m.paneWrapCache, id)
+		}
+	}
+	// State that cannot be re-fetched (an attention count) or that only a
+	// closed pane/tab would leave behind: pruned only from a complete snapshot,
+	// because a tab that timed out (Partial) lists none of its panes (F-71).
+	if !snapshotHasPartialTab(m.snapshot) {
+		for id := range m.attentionState {
+			if !present[id] {
+				delete(m.attentionState, id)
+			}
+		}
+		for id := range m.attentionLastBell {
+			if !present[id] {
+				delete(m.attentionLastBell, id)
+			}
+		}
+		for id := range m.mirrorVTSeq {
+			if !present[id] {
+				delete(m.mirrorVTSeq, id)
+			}
+		}
+		for id := range m.mirrorVTResync {
+			if !present[id] {
+				delete(m.mirrorVTResync, id)
+			}
+		}
+		tabs := make(map[string]bool, len(m.snapshot.Tabs))
+		for _, t := range m.snapshot.Tabs {
+			tabs[t.ID] = true
+		}
+		for id := range m.pipelineOutputs {
+			if !tabs[id] {
+				delete(m.pipelineOutputs, id)
+			}
+		}
+	}
 	// Prune raw-dirty entries for panes that vanished — otherwise the set
 	// would leak across pane lifetimes.
 	for id := range m.dirtyRawPanes {
@@ -1013,6 +1058,11 @@ func (m *Model) syncPaneContentSet() (visible, needBackfill []string) {
 	for id := range m.emailViews {
 		if !present[id] {
 			delete(m.emailViews, id)
+		}
+	}
+	for id := range m.companyViews {
+		if !present[id] {
+			delete(m.companyViews, id)
 		}
 	}
 	return visible, needBackfill
@@ -1049,6 +1099,9 @@ func (m Model) visibleRawPaneIDs() []string {
 	}
 	var ids []string
 	for _, lane := range tab.FlatLanes() {
+		if lane.Collapsed {
+			continue // a folded lane draws nothing; pulling its frames is waste
+		}
 		for _, p := range lane.VisiblePanes {
 			// Local raw panes (vim/htop) and panes viewing a remote interactive
 			// share both render a VT screen that replaces wholesale → pull frames.
@@ -1075,4 +1128,15 @@ func capTail(s string, max int) string {
 		s = s[i+1:]
 	}
 	return s
+}
+
+// snapshotHasPartialTab reports whether any tab in snap timed out during the
+// cascade, in which case its panes are missing and absence proves nothing.
+func snapshotHasPartialTab(snap domain.WorkspaceSnapshot) bool {
+	for _, t := range snap.Tabs {
+		if t.Partial {
+			return true
+		}
+	}
+	return false
 }

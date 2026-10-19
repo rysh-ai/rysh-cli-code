@@ -15,7 +15,16 @@ import (
 var sensitiveEnvPrefixes = []string{
 	"SECRET", "PASSWORD", "PASSWD", "TOKEN", "PRIVATE_KEY",
 	"AWS_SECRET", "CREDENTIALS",
+	"API_KEY", "APIKEY", "ACCESS_KEY",
 }
+
+// sensitiveEnvSegments must appear as a whole "_"-separated segment of the
+// name: a substring match on AUTH would also mask GIT_AUTHOR_NAME.
+var sensitiveEnvSegments = []string{"AUTH"}
+
+// sensitiveEnvSuffixes match the end of the name: "_KEY" masks SIGNING_KEY
+// but leaves MONKEY, HOTKEY and KEY_REPEAT alone.
+var sensitiveEnvSuffixes = []string{"_KEY"}
 
 // sensitiveEnvNames are exact names that should be redacted.
 var sensitiveEnvNames = map[string]bool{
@@ -147,6 +156,18 @@ func isSensitiveEnv(name string) bool {
 	for _, prefix := range sensitiveEnvPrefixes {
 		if strings.Contains(upper, prefix) {
 			return true
+		}
+	}
+	for _, suffix := range sensitiveEnvSuffixes {
+		if strings.HasSuffix(upper, suffix) {
+			return true
+		}
+	}
+	for _, seg := range strings.Split(upper, "_") {
+		for _, s := range sensitiveEnvSegments {
+			if seg == s {
+				return true
+			}
 		}
 	}
 	return false

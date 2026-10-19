@@ -346,10 +346,7 @@ func (s *Server) handleCompletionGet(c *wsClient, data json.RawMessage) {
 		}
 		// Targeted reply: only the asking client cares (and a broadcast would
 		// leak one user's input line to every connected viewer).
-		select {
-		case c.send <- reply:
-		default: // client too slow / gone — drop, the UI just gets no menu
-		}
+		c.trySend(reply) // dropped if the client is too slow or gone
 	}()
 }
 
@@ -418,10 +415,18 @@ func (s *Server) handleClientCommand(c *wsClient, action string, data json.RawMe
 		s.handleCompletionGet(c, data)
 	case "pane_resize":
 		s.handlePaneResize(c, data)
+	case "visible_panes":
+		s.handleVisiblePanes(c, data)
 	case "clipboard_copy":
 		s.handleClipboardCopy(c, data)
 	case "board_get":
 		s.handleBoardGet(c, data)
+	case "company_query":
+		s.handleCompanyQuery(c)
+	case "meeting_token":
+		s.handleMeetingToken(c, data)
+	case "meeting_command":
+		s.handleMeetingCommand(c, data)
 	case "webpane_open", "webpane_navigate", "webpane_back", "webpane_forward",
 		"webpane_reload", "webpane_close", "webpane_input":
 		s.handleWebPaneCommand(action, data)

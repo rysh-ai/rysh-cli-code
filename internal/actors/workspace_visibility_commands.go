@@ -5,8 +5,9 @@ package actors
 import "strings"
 
 // handlePublicCommand and handlePrivateCommand implement `##public` and
-// `##private`: printing the active pane's output either redacted (public) or
-// raw (private). They are deliberately kept as two near-identical handlers
+// `##private`: printing the active pane's output either from the public buffer
+// (the output as shown — NOT redacted: secret redaction is intentionally
+// disabled, see file_browse.go) or raw (private). They are deliberately kept as two near-identical handlers
 // rather than one parameterised by visibility — the two commands print
 // different things through different code paths, and the symmetry in their
 // argument handling is a coincidence of shape, not a shared abstraction.
@@ -30,13 +31,13 @@ func (w *WorkspaceActor) handlePublicCommand(out *strings.Builder, paneID string
 			w.cmdPublicPanePrint(out, paneID)
 		default:
 			ryshWriter(out).UnknownValue("action for ##public pane", action,
-				"##public pane print   print redacted (public) output of the active pane",
+				"##public pane print   print public output of the active pane (as shown, not filtered)",
 			)
 			w.failRyshUsage("unknown %s: %q", "action for ##public pane", action)
 		}
 	default:
 		ryshWriter(out).Unknown("public", sub,
-			"##public pane print   print redacted (public) output of the active pane",
+			"##public pane print   print public output of the active pane (as shown, not filtered)",
 		)
 		w.failRyshUsage("unknown subcommand for ##%s: %q", "public", sub)
 	}

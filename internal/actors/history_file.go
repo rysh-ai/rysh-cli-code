@@ -26,6 +26,7 @@ import (
 	"sync"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
+	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 )
 
 var historyFileMu sync.Mutex
@@ -139,4 +140,41 @@ func loadHistoryFile(cfg config.Config, limit int) []string {
 		_ = os.WriteFile(path, []byte(b.String()), 0o600)
 	}
 	return entries
+}
+
+// appendBounded appends entry to h and drops the oldest entries beyond limit
+// (limit <= 0 means unbounded). Every in-memory per-pane history goes through
+// it: shellHistorySize used to bound only the file SEED, while the live slices
+// — restored whole from KV on every restart — grew for the life of the
+// session, and every layout snapshot re-serialized them at each cascade level.
+//
+// Re-slicing rather than copying keeps an append O(1) amortized: once the
+// backing array is full, append reallocates and copies only the live window,
+// so the dropped prefix is released rather than pinned.
+func appendBounded(h []string, entry string, limit int) []string {
+	h = append(h, entry)
+	return lastNHistory(h, limit)
+}
+
+// lastNHistory returns the newest limit entries of h (limit <= 0: all of h).
+// Used to clamp a history restored from KV, which predates the cap.
+func lastNHistory(h []string, limit int) []string {
+	if limit > 0 && len(h) > limit {
+		return h[len(h)-limit:]
+	}
+	return h
+}
+
+// historyLimit is the per-pane, per-mode in-memory history cap. It reuses
+// shell_history_size so the live slice and the file seed agree on one bound.
+func (p *PaneActor) historyLimit() int { return shellHistorySize(p.cfg) }
+
+// snapshotWantsHistories reports whether a pane snapshot request asks this
+// pane for its command histories. HistoryPaneID narrows a cascade to one pane
+// (the TUI's active one), so every other pane leaves its histories off the bus.
+func snapshotWantsHistories(req *msg.MsgGetPaneSnapshot, paneID string) bool {
+	if req.NoHistories {
+		return false
+	}
+	return req.HistoryPaneID == "" || req.HistoryPaneID == paneID
 }

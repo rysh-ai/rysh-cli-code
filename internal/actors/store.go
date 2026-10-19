@@ -682,6 +682,34 @@ func (w *WorkspaceActor) handleNamedStoreSubcommand(out *strings.Builder, paneID
 		}
 		fmt.Fprintf(out, "\n[%s] %s = %s   [%s, %s]\n", label, name, v, src, w.secretScopeLabel(fromScope, wsScope, wsLabel))
 
+	case "demo":
+		// Secrets only: a variable is already visible, so there is nothing to hide.
+		if c.store.kind != secretKind {
+			ryshWriter(out).UnknownIn(label, sub)
+			w.failRyshUsage("unknown %s subcommand: %q", label, sub)
+			namedStoreHelp(out, c.store.kind)
+			return
+		}
+		if len(parts) < 2 {
+			ryshWriter(out).UsageLineIn(label, "##secret demo <NAME> [--tab <tab>]")
+			w.failRyshUsage("usage: %s", "##secret demo <NAME> [--tab <tab>]")
+			return
+		}
+		name := parts[1]
+		chain := []string{scope, wsScope}
+		if tabArg == "" {
+			chain = w.secretScopeChain(paneID)
+		}
+		v, src, fromScope, ok := c.store.GetLayered(chain, name)
+		if !ok {
+			fmt.Fprintf(out, "\n[%s] %q is not visible from this pane (tab/workspace session/persist/config) or the environment\n", label, name)
+			w.failRysh("%s %q is not visible from this pane or the environment", label, name)
+			return
+		}
+		// Never print v: only its fingerprint and a same-shaped decoy.
+		fmt.Fprintf(out, "\n[%s] %s = %s   [%s, %s]\n", label, name, fakeSecret(v), src, w.secretScopeLabel(fromScope, wsScope, wsLabel))
+		fmt.Fprintf(out, "  hash: %s   (demo value — not the real secret)\n", secretFingerprint(v))
+
 	case "delete", "rm", "del":
 		if len(parts) < 2 {
 			ryshWriter(out).UsageLineIn(label, fmt.Sprintf("##%s delete <NAME> [--tab <tab>]", label))
@@ -729,6 +757,9 @@ func namedStoreHelp(out *strings.Builder, kind storeKind) {
 	fmt.Fprintf(out, "                                          --no-persist keeps it in the session store only\n")
 	fmt.Fprintf(out, "  ##%s list [--tab <tab>]              list the workspace's (or a tab's) %ss\n", label, label)
 	fmt.Fprintf(out, "  ##%s get <NAME> [--tab <tab>]        resolve a %s as a skill here would\n", label, label)
+	if kind == secretKind {
+		fmt.Fprintf(out, "  ##%s demo <NAME> [--tab <tab>]       show a hash + a fake same-shaped value (screen-safe)\n", label)
+	}
 	fmt.Fprintf(out, "  ##%s delete <NAME> [--tab <tab>]     remove a session + persisted %s\n", label, label)
 	fmt.Fprintf(out, "  --tab takes a tab name, 1-based index, or id (see ##tab list); without it the\n")
 	fmt.Fprintf(out, "  workspace scope is used. workspace %ss are shared by every tab and persist\n", label)

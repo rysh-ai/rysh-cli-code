@@ -31,25 +31,26 @@ var ptylessCommands = map[string]bool{
 	"list-packages":  true,
 	// Registry operations, exactly the same class as install/list-packages:
 	// they read or write ~/.rysh and the package index and never touch a pane.
-	"search":         true,
-	"update":         true,
+	"search": true,
+	"update": true,
 	// `board` talks to a daemon over NATS — post, reply, tail — which is the
 	// case this list's own comment names for `send`. It was added after this
 	// map was written and never added to it, so native Windows refused
 	// `rysh board` with the session-start guidance, even for a session running
 	// in WSL. Caught the first time anything ever executed the Windows binary.
-	"board":          true,
-	"eval":           true,
-	"forge":          true,
-	"onboard":        true,
-	"doctor":         true,
-	"channel":        true,
-	"version":        true,
-	"--version":      true,
-	"-V":             true,
-	"help":           true,
-	"-h":             true,
-	"--help":         true,
+	"board":     true,
+	"eval":      true,
+	"forge":     true,
+	"onboard":   true,
+	"connect":   true,
+	"doctor":    true,
+	"channel":   true,
+	"version":   true,
+	"--version": true,
+	"-V":        true,
+	"help":      true,
+	"-h":        true,
+	"--help":    true,
 }
 
 // requirePTY refuses a session-opening command on a host with no PTY support.

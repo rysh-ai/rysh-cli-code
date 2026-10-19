@@ -33,6 +33,20 @@ type vtResponder struct {
 	cur    []string
 }
 
+// change swaps the screen AND publishes pane.<id>.rawDirty — what the daemon does
+// on every real VT change (actors/pane_shell.go raw flush, actors/pane.go remote
+// screen update). streamPaneVT fetches a signalled pane on its next 100ms tick;
+// an UNSIGNALLED change waits for the vtSweepInterval sweep, so a test that sets
+// r.screen directly and then expects the frame within ~1s races the sweep phase
+// (E-103). Only the sweep-fallback test changes a screen without the signal.
+func (r *vtResponder) change(screen []string) {
+	r.t.Helper()
+	r.screen <- screen
+	if err := msg.SendPaneRawDirty(msg.NewNATSPublisher(r.nc, msg.DefaultCodecRegistry()), r.paneID); err != nil {
+		r.t.Fatalf("publish rawDirty: %v", err)
+	}
+}
+
 func (r *vtResponder) current() []string {
 	select {
 	case s := <-r.screen:
@@ -136,7 +150,7 @@ func TestStreamPaneVTSkipsUnchangedFramesAndSendsChangedOnes(t *testing.T) {
 	}
 
 	// A real change must still get through promptly.
-	r.screen <- []string{"the screen changed"}
+	r.change([]string{"the screen changed"})
 	got, last := countFrames(client, time.Second)
 	if got == 0 {
 		t.Fatal("the pane's screen changed and no frame was sent — dedup is swallowing real updates")

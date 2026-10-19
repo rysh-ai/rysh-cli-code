@@ -247,7 +247,7 @@ func (g *PaneGroupActor) Receive(ctx actor.Context) {
 	case *msg.RequestEnvelope:
 		switch inner := m.Inner.(type) {
 		case *msg.MsgGetPaneGroupSnapshot:
-			snap := g.collectSnapshot(inner.LayoutOnly, inner.NoHistories)
+			snap := g.collectSnapshot(inner.LayoutOnly, inner.NoHistories, inner.HistoryPaneID)
 			_ = m.Reply(&msg.MsgPaneGroupSnapshotReply{Snapshot: snap})
 		case *msg.MsgGetPaneGroupActivePane:
 			paneID := ""
@@ -274,14 +274,7 @@ func (g *PaneGroupActor) createPane(ctx actor.Context, paneID, title string) {
 func (g *PaneGroupActor) createPaneTyped(ctx actor.Context, paneID, title, paneType string, meta map[string]string) {
 	pa := NewPaneActor(paneID, title, g.tabID, g.laneID, g.id, g.cfg, g.pub, g.nc, g.agSetup, g.kvStore, g.secrets)
 	pa.paneType = paneType
-	// Copied, not aliased: the caller's map is a message payload and a pane
-	// that shared it would see later edits to a message it already handled.
-	if len(meta) > 0 {
-		pa.meta = make(map[string]string, len(meta))
-		for k, v := range meta {
-			pa.meta[k] = v
-		}
-	}
+	applyBirthMeta(pa, meta)
 	paneProps := actor.PropsFromProducer(func() actor.Actor { return pa })
 	pid := spawnDetached(ctx, paneProps)
 
@@ -296,6 +289,28 @@ func (g *PaneGroupActor) createPaneTyped(ctx actor.Context, paneID, title, paneT
 	}
 	g.paneRefs = append(g.paneRefs, ref)
 	g.activePane = len(g.paneRefs) - 1
+}
+
+// applyBirthMeta gives a new pane the meta it is born with (design 028) and
+// writes it to the durable-meta sidecar at once (F-54). Copied, not aliased:
+// the caller's map is a message payload, and a pane that shared it would see
+// later edits to a message it already handled.
+//
+// The sidecar write is the point. Birth meta used to live only in memory and
+// in the debounced big snapshot, which a shell-less pane may never write — so
+// an agents-board pane opened with `##board open --fleet X` came back from a
+// daemon restart with no board.id and silently showed the session board
+// ("no fleet members on this board"). Only a later `##pane meta set` had ever
+// reached the sidecar.
+func applyBirthMeta(pa *PaneActor, meta map[string]string) {
+	if len(meta) == 0 {
+		return
+	}
+	pa.meta = make(map[string]string, len(meta))
+	for k, v := range meta {
+		pa.meta[k] = v
+	}
+	pa.persistDurableMeta()
 }
 
 // spawnRestoredPane spawns a PaneActor for a restored pane (KV restore path).
@@ -594,7 +609,7 @@ func (g *PaneGroupActor) moveStackedPaneDown() {
 // Snapshot
 // ---------------------------------------------------------------------------
 
-func (g *PaneGroupActor) collectSnapshot(layoutOnly, noHistories bool) domain.PaneGroupSnapshot {
+func (g *PaneGroupActor) collectSnapshot(layoutOnly, noHistories bool, historyPane string) domain.PaneGroupSnapshot {
 	snap := domain.PaneGroupSnapshot{
 		ID: g.id,
 	}
@@ -618,7 +633,7 @@ func (g *PaneGroupActor) collectSnapshot(layoutOnly, noHistories bool) domain.Pa
 	fetch := func(i int, id, title string) {
 		reply, err := g.pub.Request(
 			msg.T("pane", id, "snapshot"),
-			&msg.MsgGetPaneSnapshot{LayoutOnly: layoutOnly, NoHistories: noHistories},
+			&msg.MsgGetPaneSnapshot{LayoutOnly: layoutOnly, NoHistories: noHistories, HistoryPaneID: historyPane},
 			time.Second,
 		)
 		if err != nil {

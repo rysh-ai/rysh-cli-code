@@ -107,6 +107,31 @@ func channelCredFields(channel string) []credField {
 		return []credField{
 			{Key: "db_path", Label: "chat.db path (empty = ~/Library/Messages/chat.db)"},
 		}
+	case "wechat":
+		return []credField{
+			{Key: "app_id", Label: "WeChat AppID (公众号 appid)"},
+			{Key: "app_secret", Label: "WeChat AppSecret", EnvName: "WECHAT_APP_SECRET"},
+			// Collected rather than left to hand-editing because it is what
+			// authenticates inbound: without it the endpoint would accept any
+			// POST that reached the port.
+			{Key: "verify_token", Label: "server-config Token (signs inbound)", EnvName: "WECHAT_TOKEN"},
+		}
+	case "wecom":
+		return []credField{
+			{Key: "app_id", Label: "WeCom corpid"},
+			{Key: "app_secret", Label: "WeCom app corpsecret", EnvName: "WECOM_APP_SECRET"},
+			{Key: "agent_id", Label: "WeCom agentid (which app is sending)"},
+			{Key: "verify_token", Label: "callback Token (signs inbound)", EnvName: "WECOM_TOKEN"},
+			// Required, not optional: WeCom encrypts the verification handshake
+			// itself, so without this the callback URL can never be validated.
+			{Key: "encoding_aes_key", Label: "EncodingAESKey (43 chars, required)", EnvName: "WECOM_AES_KEY"},
+		}
+	case "googlechat":
+		return []credField{
+			{Key: "credentials_json", Label: "service account key JSON", EnvName: "GOOGLECHAT_CREDENTIALS"},
+			{Key: "subscription", Label: "Pub/Sub pull subscription id"},
+			{Key: "app_id", Label: "GCP project id (empty = read from the key file)"},
+		}
 	case "teams":
 		return []credField{
 			{Key: "app_id", Label: "Azure Bot Microsoft App ID"},

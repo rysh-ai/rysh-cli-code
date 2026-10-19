@@ -4,13 +4,13 @@ package actors
 
 import (
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
+	"github.com/rysh-ai/rysh-cli-code/internal/upstream"
 )
 
 // dialUpstream opens a NATS connection to the upstream server's workspace
@@ -34,9 +34,6 @@ func dialUpstream(cfg config.UpstreamConfig, name string, opts ...nats.Option) (
 	}
 
 	proxyPath := "/workspaces/" + workspace + "/nats?connection_type=share"
-	if cfg.APIKey != "" {
-		proxyPath += "&api_key=" + url.QueryEscape(cfg.APIKey)
-	}
 
 	maxReconnects := cfg.MaxReconnectAttempts
 	if maxReconnects == 0 {
@@ -46,6 +43,7 @@ func dialUpstream(cfg config.UpstreamConfig, name string, opts ...nats.Option) (
 	base := []nats.Option{
 		nats.Name(name),
 		nats.ProxyPath(proxyPath),
+		upstream.NATSAPIKeyHeader(cfg.APIKey), // the key rides in a header, not the URL (F-86)
 		nats.MaxReconnects(maxReconnects),
 		nats.Token(cfg.APIKey),
 		// Bound the initial connect so a misconfigured / unreachable upstream fails

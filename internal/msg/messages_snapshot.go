@@ -43,6 +43,13 @@ type MsgGetWorkspaceSnapshot struct {
 	// server's streamPaneVT reads only ids and the RawMode/RemoteInteractive
 	// flags, so it sets it.
 	NoHistories bool `json:"no_histories,omitempty"`
+	// ActiveHistoryOnly keeps command history for the workspace's ACTIVE pane
+	// only. It is what the TUI sets: activeHistory() reads the history of
+	// snapshot.ActivePaneID and nothing else, yet a plain layout fetch carried
+	// every pane's copy — measured at 94% of a 651 KB layout reply on a 22-pane,
+	// 45-day session, fetched on every reconcile tick and every layoutDirty.
+	// Ignored when NoHistories is set.
+	ActiveHistoryOnly bool `json:"active_history_only,omitempty"`
 }
 
 // MsgWorkspaceSnapshotReply carries the workspace snapshot reply.
@@ -56,6 +63,11 @@ type MsgWorkspaceSnapshotReply struct {
 type MsgGetTabSnapshot struct {
 	LayoutOnly  bool `json:"layout_only,omitempty"`
 	NoHistories bool `json:"no_histories,omitempty"`
+	// HistoryPaneID narrows the histories NoHistories would otherwise keep to
+	// the one pane with this id; every other pane in the cascade omits them.
+	// Empty means all panes (the prior behaviour). See
+	// MsgGetWorkspaceSnapshot.ActiveHistoryOnly.
+	HistoryPaneID string `json:"history_pane_id,omitempty"`
 }
 
 // MsgTabSnapshotReply carries the tab snapshot reply.
@@ -72,6 +84,11 @@ type MsgTabSnapshotReply struct {
 type MsgGetPaneSnapshot struct {
 	LayoutOnly  bool `json:"layout_only,omitempty"`
 	NoHistories bool `json:"no_histories,omitempty"`
+	// HistoryPaneID narrows the histories NoHistories would otherwise keep to
+	// the one pane with this id; every other pane in the cascade omits them.
+	// Empty means all panes (the prior behaviour). See
+	// MsgGetWorkspaceSnapshot.ActiveHistoryOnly.
+	HistoryPaneID string `json:"history_pane_id,omitempty"`
 }
 
 // MsgPaneSnapshotReply carries the pane snapshot reply.

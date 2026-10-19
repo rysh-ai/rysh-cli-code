@@ -15,10 +15,10 @@ import (
 
 	sharedtools "github.com/rysh-ai/rysh-cli-shared/tools"
 
-	"github.com/rysh-ai/rysh-cli-code/internal/forge/ingest"
-	"github.com/rysh-ai/rysh-cli-code/internal/forge/ir"
-	"github.com/rysh-ai/rysh-cli-code/internal/forge/runtime"
-	"github.com/rysh-ai/rysh-cli-code/internal/forge/toolpack"
+	"github.com/rysh-ai/rysh-cli-shared/forge/ingest"
+	"github.com/rysh-ai/rysh-cli-shared/forge/ir"
+	"github.com/rysh-ai/rysh-cli-shared/forge/runtime"
+	"github.com/rysh-ai/rysh-cli-shared/forge/toolpack"
 )
 
 // Manager owns the live, per-session set of enabled integrations and registers
@@ -226,19 +226,16 @@ func (m *Manager) enable(_ context.Context, def Integration, persist bool, targe
 	if baseURL == "" {
 		baseURL = api.BaseURL()
 	}
-	cred := runtime.Credential{}
-	if def.CredentialEnv != "" {
-		cred.APIKey = os.Getenv(def.CredentialEnv)
-	}
-	if def.BasicUserEnv != "" {
-		cred.Username = os.Getenv(def.BasicUserEnv)
-	}
-	if def.BasicPassEnv != "" {
-		cred.Password = os.Getenv(def.BasicPassEnv)
-	}
+	cred := credentialFor(def)
 	opts := runtime.Options{Redact: m.redact}
 	if err := applyAuthOptions(def, &opts); err != nil {
 		return 0, "", err
+	}
+	if def.source() == SourceGRPC {
+		if err := ValidateGRPCProtocol(def.GRPCProtocol, SourceGRPC); err != nil {
+			return 0, "", fmt.Errorf("integration %q: %w", def.Name, err)
+		}
+		opts.StreamProtocol = def.GRPCProtocol
 	}
 	exec := runtime.NewHTTPExecutor(baseURL, api.Auth, cred, opts)
 
@@ -299,16 +296,7 @@ func (m *Manager) enableGraphQL(def Integration, spec []byte, persist bool, targ
 	if endpoint == "" || endpoint == "/graphql" {
 		return 0, "", fmt.Errorf("graphql integration %q needs a full endpoint URL; set it with --base-url", def.Name)
 	}
-	cred := runtime.Credential{}
-	if def.CredentialEnv != "" {
-		cred.APIKey = os.Getenv(def.CredentialEnv)
-	}
-	if def.BasicUserEnv != "" {
-		cred.Username = os.Getenv(def.BasicUserEnv)
-	}
-	if def.BasicPassEnv != "" {
-		cred.Password = os.Getenv(def.BasicPassEnv)
-	}
+	cred := credentialFor(def)
 	opts := runtime.Options{Redact: m.redact}
 	if err := applyAuthOptions(def, &opts); err != nil {
 		return 0, "", err
@@ -639,6 +627,34 @@ func (m *Manager) saveStore(defs []Integration) error {
 	m.storeMu.Lock()
 	defer m.storeMu.Unlock()
 	return SaveStore(m.workDir, defs)
+}
+
+// credentialFor resolves an integration's STATIC credential — the material
+// InjectAuth applies per request for apiKey, http bearer and http basic
+// schemes. Token flows (jwt_login, oauth2_*) are separate and handled by
+// applyAuthOptions below.
+//
+// The integration stores env-var NAMES, never secret values (store.go); the
+// values are read here, at enable time, and held only in memory. An env var
+// that is unset yields an empty field rather than its own name, so a
+// mis-typed name fails as "no credential" instead of authenticating as the
+// literal string "MY_API_KEY".
+//
+// This was written out inline at both enable() call sites — REST and GraphQL —
+// which meant a newly bound mode could reach one and silently miss the other.
+// One implementation now serves both.
+func credentialFor(def Integration) runtime.Credential {
+	var cred runtime.Credential
+	if def.CredentialEnv != "" {
+		cred.APIKey = os.Getenv(def.CredentialEnv)
+	}
+	if def.BasicUserEnv != "" {
+		cred.Username = os.Getenv(def.BasicUserEnv)
+	}
+	if def.BasicPassEnv != "" {
+		cred.Password = os.Getenv(def.BasicPassEnv)
+	}
+	return cred
 }
 
 // applyAuthOptions builds a TokenManager from the integration's Auth config (if

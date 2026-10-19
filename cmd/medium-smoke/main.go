@@ -7,7 +7,7 @@
 // Run (profile must already be logged in — the test STOPS on a login wall):
 //
 //	cd rysh-cli && GOWORK=off go run ./cmd/medium-smoke \
-//	  -profile /path/to/.rysh/browser-instances/halilagin-medium/headless
+//	  -profile /path/to/.rysh/browser-instances/alice-medium/headless
 //
 // Assertions (PASS/FAIL each; exit 1 on any FAIL):
 //  1. editor reached, no login wall

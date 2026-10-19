@@ -5,6 +5,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -24,6 +25,11 @@ type Hub struct {
 	// poll, which is expensive enough (a whole workspace's pane content) that
 	// pollSnapshots checks this before building one at all.
 	plainCount atomic.Int32
+	// streamMu guards streamSet, the registered stream clients. clients is
+	// owned by the hub goroutine; streamPaneVT runs on its own and needs to ask
+	// which panes any client is looking at, so it reads this copy instead.
+	streamMu  sync.Mutex
+	streamSet map[*wsClient]struct{}
 	// onCount, when set (before run starts), is invoked with the new total
 	// client count on every register/unregister transition. Runs on the hub
 	// goroutine — keep it cheap (the session-record presence update is a
@@ -50,6 +56,7 @@ type hubMessage struct {
 func newHub() *Hub {
 	return &Hub{
 		clients:    make(map[*wsClient]bool),
+		streamSet:  make(map[*wsClient]struct{}),
 		broadcast:  make(chan hubMessage, 64),
 		register:   make(chan *wsClient),
 		unregister: make(chan *wsClient),
@@ -71,11 +78,29 @@ func (h *Hub) hasStream() bool { return h.streamCount.Load() > 0 }
 // (i.e. did NOT opt into the content plane).
 func (h *Hub) hasPlain() bool { return h.plainCount.Load() > 0 }
 
+// streamClients returns the registered stream clients. Safe from any goroutine.
+func (h *Hub) streamClients() []*wsClient {
+	h.streamMu.Lock()
+	defer h.streamMu.Unlock()
+	out := make([]*wsClient, 0, len(h.streamSet))
+	for c := range h.streamSet {
+		out = append(out, c)
+	}
+	return out
+}
+
 // countClient adjusts the per-kind client counters by delta. Every add/remove
 // of a client goes through here so the two counters cannot drift apart.
 func (h *Hub) countClient(c *wsClient, delta int32) {
 	if c.streamContent {
 		h.streamCount.Add(delta)
+		h.streamMu.Lock()
+		if delta > 0 {
+			h.streamSet[c] = struct{}{}
+		} else {
+			delete(h.streamSet, c)
+		}
+		h.streamMu.Unlock()
 		return
 	}
 	h.plainCount.Add(delta)
@@ -86,7 +111,7 @@ func (h *Hub) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			for client := range h.clients {
-				close(client.send)
+				client.closeSend()
 				delete(h.clients, client)
 			}
 			return
@@ -97,7 +122,7 @@ func (h *Hub) run(ctx context.Context) {
 		case client := <-h.unregister:
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
-				close(client.send)
+				client.closeSend()
 				h.countClient(client, -1)
 				h.notifyCount()
 			}
@@ -107,12 +132,10 @@ func (h *Hub) run(ctx context.Context) {
 				if message.to != nil && !message.to(client) {
 					continue
 				}
-				select {
-				case client.send <- message.data:
-				default:
+				if !client.trySend(message.data) {
 					// Client too slow — disconnect.
 					delete(h.clients, client)
-					close(client.send)
+					client.closeSend()
 					h.countClient(client, -1)
 					dropped = true
 				}
@@ -155,6 +178,43 @@ type wsClient struct {
 	// the ONLY thing that stops a closed window from clamping a pane forever.
 	// Written from the read pump and read on disconnect.
 	sizedPanes map[string]bool
+	// sendMu guards send against close. The hub closes send when a client
+	// disconnects or falls behind, while request handlers (board_get,
+	// completion, clipboard) reply from other goroutines — an unguarded
+	// `c.send <- frame` after the close panics with "send on closed channel"
+	// and takes the whole daemon down. The hub closes only via closeSend, and
+	// every targeted reply goes through trySend.
+	sendMu     sync.Mutex
+	sendClosed bool
+	// vt is which panes' live VT frames this client wants (see visible_panes.go).
+	vt vtFilter
+}
+
+// trySend hands one frame to this connection without blocking. It reports
+// false — and drops the frame — when the connection is gone or its buffer is
+// full; callers reply to a polling client, so a dropped frame costs one refresh.
+func (c *wsClient) trySend(frame []byte) bool {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if c.sendClosed {
+		return false
+	}
+	select {
+	case c.send <- frame:
+		return true
+	default:
+		return false
+	}
+}
+
+// closeSend closes the send channel exactly once, after which trySend drops.
+func (c *wsClient) closeSend() {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if !c.sendClosed {
+		c.sendClosed = true
+		close(c.send)
+	}
 }
 
 // writePump pumps messages from the hub to the WebSocket connection.
@@ -174,6 +234,8 @@ func (c *wsClient) writePump() {
 				_ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
+			// A no-op unless permessage-deflate was negotiated at upgrade.
+			c.conn.EnableWriteCompression(len(message) >= compressMinBytes)
 			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				return
 			}

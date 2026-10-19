@@ -310,6 +310,12 @@ func (w *WorkspaceActor) handlePaneCommand(ctx actor.Context, out *strings.Build
 			w.failRyshUsage("unknown subcommand for ##pane meta: %q", sub)
 		}
 
+	case "sync":
+		// ##pane sync [on|off] [--pane <ref> | --all | --tab <tab>] — whether
+		// web clients receive this pane's live repaint stream. See
+		// workspace_pane_sync.go.
+		w.handlePaneSyncCommand(out, paneID, args[1:])
+
 	case "listen":
 		if len(args) < 2 {
 			ryshWriter(out).UsageLine("##pane listen <pane-id | pane-alias>")
@@ -433,6 +439,7 @@ func (w *WorkspaceActor) handlePaneCommand(ctx actor.Context, out *strings.Build
 			"##pane new [--worktree [branch]]",
 			"##pane list [--tab <tab-id>]",
 			"##pane name <name>",
+			"##pane sync [on|off] [--pane <ref> | --all | --tab <tab>] | list",
 			"##pane listen <id|alias>",
 			"##pane unlisten",
 			"##pane provider [name [model]]",

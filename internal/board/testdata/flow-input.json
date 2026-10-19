@@ -1,0 +1,256 @@
+{
+  "board": "fleet-x",
+  "threads": [
+    {
+      "key": "c0000000-0000-4000-8000-000000000002/1",
+      "root": {
+        "pane_id": "c0000000-0000-4000-8000-000000000002",
+        "persona": "mgr-a",
+        "kind": "milestone",
+        "text": "\u001b[32mstarted\u001b[0m the unit\nmore detail",
+        "ts": 1000,
+        "thread_id": "c0000000-0000-4000-8000-000000000002/1"
+      },
+      "replies": [],
+      "provisional": false
+    },
+    {
+      "key": "c0000000-0000-4000-8000-000000000001/msg-0001",
+      "root": {
+        "pane_id": "c0000000-0000-4000-8000-000000000001",
+        "persona": "ceo",
+        "kind": "cmd",
+        "text": "[FLEET fleet-x | WORK ORDER | FROM ceo]\nbuild the parser",
+        "ts": 2000,
+        "thread_id": "c0000000-0000-4000-8000-000000000001/msg-0001",
+        "to_pane_id": "c0000000-0000-4000-8000-000000000002",
+        "to_persona": "mgr-a",
+        "cmd_id": "msg-0001"
+      },
+      "replies": [
+        {
+          "pane_id": "c0000000-0000-4000-8000-000000000002",
+          "persona": "mgr-a",
+          "kind": "ack",
+          "text": "ack",
+          "ts": 4000,
+          "thread_id": "c0000000-0000-4000-8000-000000000001/msg-0001",
+          "cmd_id": "msg-0001"
+        }
+      ],
+      "provisional": false
+    },
+    {
+      "key": "c0000000-0000-4000-8000-000000000002/msg-0002",
+      "root": {
+        "pane_id": "c0000000-0000-4000-8000-000000000002",
+        "persona": "mgr-a",
+        "kind": "cmd",
+        "text": "write the lexer",
+        "ts": 5000,
+        "thread_id": "c0000000-0000-4000-8000-000000000002/msg-0002",
+        "to_pane_id": "c0000000-0000-4000-8000-000000000003",
+        "to_persona": "wk-a1",
+        "cmd_id": "msg-0002"
+      },
+      "replies": [
+        {
+          "pane_id": "listener",
+          "persona": "listener",
+          "kind": "undelivered",
+          "text": "pane not answering after 9m",
+          "ts": 6000,
+          "thread_id": "c0000000-0000-4000-8000-000000000002/msg-0002"
+        }
+      ],
+      "provisional": false
+    },
+    {
+      "key": "c0000000-0000-4000-8000-000000000003/1",
+      "root": {
+        "pane_id": "c0000000-0000-4000-8000-000000000003",
+        "persona": "wk-a1",
+        "kind": "task-done",
+        "text": "task finished — all 42 tests green, branch feat-parser is ready for review by the manager today, see PR",
+        "ts": 7000,
+        "thread_id": "c0000000-0000-4000-8000-000000000003/1"
+      },
+      "replies": [],
+      "provisional": false
+    },
+    {
+      "key": "c0000000-0000-4000-8000-000000000002/msg-0003",
+      "root": {
+        "pane_id": "c0000000-0000-4000-8000-000000000002",
+        "persona": "mgr-a",
+        "kind": "cmd",
+        "text": "\nwrite the parser",
+        "ts": 8000,
+        "thread_id": "c0000000-0000-4000-8000-000000000002/msg-0003",
+        "to_pane_id": "c0000000-0000-4000-8000-000000000003",
+        "to_persona": "wk-a1",
+        "cmd_id": "msg-0003"
+      },
+      "replies": [
+        {
+          "pane_id": "c0000000-0000-4000-8000-000000000003",
+          "persona": "wk-a1",
+          "kind": "reply",
+          "text": "on it",
+          "ts": 9000,
+          "thread_id": "c0000000-0000-4000-8000-000000000002/msg-0003"
+        }
+      ],
+      "provisional": false
+    },
+    {
+      "key": "c0000000-0000-4000-8000-000000000001/msg-0004",
+      "root": {
+        "pane_id": "c0000000-0000-4000-8000-000000000001",
+        "persona": "ceo",
+        "kind": "cmd",
+        "text": "review the parser",
+        "ts": 10000,
+        "thread_id": "c0000000-0000-4000-8000-000000000001/msg-0004",
+        "to_pane_id": "c0000000-0000-4000-8000-000000000004",
+        "to_persona": "wk-a2",
+        "cmd_id": "msg-0004"
+      },
+      "replies": [
+        {
+          "pane_id": "c0000000-0000-4000-8000-000000000001",
+          "persona": "ceo",
+          "kind": "cmd",
+          "text": "review the parser",
+          "ts": 11000,
+          "thread_id": "c0000000-0000-4000-8000-000000000001/msg-0004",
+          "to_pane_id": "c0000000-0000-4000-8000-000000000004",
+          "to_persona": "wk-a2",
+          "cmd_id": "msg-0004"
+        }
+      ],
+      "provisional": false
+    },
+    {
+      "key": "c0000000-0000-4000-8000-000000000003/2",
+      "root": {
+        "pane_id": "c0000000-0000-4000-8000-000000000003",
+        "persona": "wk-a1",
+        "kind": "cmd",
+        "text": "orphan order",
+        "ts": 12000,
+        "thread_id": "c0000000-0000-4000-8000-000000000003/2",
+        "cmd_id": "msg-0009"
+      },
+      "replies": [],
+      "provisional": false
+    },
+    {
+      "key": "fleet/ci-0001",
+      "root": {
+        "pane_id": "fleet",
+        "persona": "fleet",
+        "kind": "cmd",
+        "text": "[FLEET fleet-x | CHECK-IN | FROM fleet-actor | TO worker wk-a3 (pane c0000000) | ci-0001]\nStatus check (stalled).",
+        "ts": 13000,
+        "thread_id": "fleet/ci-0001",
+        "to_pane_id": "c0000000-0000-4000-8000-000000000005",
+        "to_persona": "wk-a3",
+        "cmd_id": "ci-0001"
+      },
+      "replies": [
+        {
+          "pane_id": "c0000000-0000-4000-8000-000000000005",
+          "persona": "wk-a3",
+          "kind": "progress",
+          "text": "status progress: tests\nwaiting on a long build",
+          "ts": 14500,
+          "thread_id": "fleet/ci-0001"
+        }
+      ],
+      "provisional": false
+    },
+    {
+      "key": "fleet/1",
+      "root": {
+        "pane_id": "fleet",
+        "persona": "fleet",
+        "kind": "fleet-alert",
+        "text": "wk-a3 is STALLED: says progress (tests) but its pane has been idle since 10:00:00",
+        "ts": 12500,
+        "thread_id": "fleet/1"
+      },
+      "replies": [],
+      "provisional": false
+    }
+  ],
+  "panes": [
+    {
+      "id": "c0000000-0000-4000-8000-000000000001",
+      "name": "ceo",
+      "meta": {
+        "fleet.role": "ceo",
+        "fleet.comm": "queue",
+        "board.id": "fleet-x"
+      }
+    },
+    {
+      "id": "c0000000-0000-4000-8000-000000000002",
+      "name": "mgr-a",
+      "meta": {
+        "fleet.role": "manager",
+        "fleet.parent": "c0000000-0000-4000-8000-000000000001",
+        "fleet.comm": "queue",
+        "board.id": "fleet-x",
+        "fleet.work": "progress",
+        "fleet.task": "plan the parser",
+        "fleet.activity": "working",
+        "fleet.health": "ok"
+      }
+    },
+    {
+      "id": "c0000000-0000-4000-8000-000000000003",
+      "name": "wk-a1",
+      "meta": {
+        "fleet.role": "worker",
+        "fleet.parent": "c0000000-0000-4000-8000-000000000002",
+        "fleet.comm": "polling-stream",
+        "board.id": "fleet-x",
+        "fleet.work": "blocked",
+        "fleet.task": "parser",
+        "fleet.blocked_by": "c0000000-0000-4000-8000-000000000002,human",
+        "fleet.activity": "idle",
+        "fleet.health": "ok"
+      }
+    },
+    {
+      "id": "c0000000-0000-4000-8000-000000000004",
+      "name": "wk-a2",
+      "meta": {
+        "fleet.role": "worker",
+        "fleet.parent": "c0000000-0000-4000-8000-000000000002",
+        "fleet.comm": "queue",
+        "board.id": "fleet-x"
+      }
+    },
+    {
+      "id": "c0000000-0000-4000-8000-000000000005",
+      "name": "wk-a3",
+      "meta": {
+        "fleet.role": "worker",
+        "fleet.parent": "c0000000-0000-4000-8000-000000000002",
+        "fleet.comm": "queue",
+        "board.id": "fleet-x",
+        "fleet.work": "progress",
+        "fleet.task": "tests \u001b[31mred\u001b[0m",
+        "fleet.activity": "idle",
+        "fleet.health": "stalled"
+      }
+    },
+    {
+      "id": "d0000000-0000-4000-8000-000000000009",
+      "name": "shell",
+      "meta": {}
+    }
+  ]
+}

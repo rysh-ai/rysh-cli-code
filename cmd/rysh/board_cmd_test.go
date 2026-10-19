@@ -363,3 +363,29 @@ func TestBoardTailStillRefusesARealPositional(t *testing.T) {
 		t.Fatal("an illegal board id was accepted")
 	}
 }
+
+// Design 052: `board tail --view flow` parses, and the renderer prints the
+// model's counts, edges and events.
+func TestBoardTailViewFlow(t *testing.T) {
+	b, err := parseBoardArgs([]string{"tail", "--view", "flow", "--json"})
+	if err != nil || b.view != board.ViewFlow || !b.jsonOut {
+		t.Fatalf("parse = %+v, %v", b, err)
+	}
+	if !strings.Contains(boardUsage, "--view status|prompt|all|flow|team") {
+		t.Errorf("usage must document --view flow:\n%s", boardUsage)
+	}
+	c := msg.NewBoardPost("aaaaaaaa-1", "ceo", msg.BoardKindCmd, "build it", 1000)
+	c.ToPaneID, c.CmdID, c.ThreadID = "bbbbbbbb-2", "msg-0001", msg.CmdThreadID("aaaaaaaa-1", "msg-0001")
+	s := board.New(0)
+	s.Apply(c)
+	out := renderBoardFlow(board.BuildFlow("fleet-x", s.Threads(), []board.FlowPane{{ID: "bbbbbbbb-2", Name: "wk"}}))
+	for _, want := range []string{
+		"AGENTS-BOARD fleet-x | flow · 2 panes · 1 prompts (0 answered · 0 undelivered · 1 open) · 0 status",
+		"prompt      ceo → wk  ×1  (0 answered · 0 undelivered · 1 open)",
+		"prompt      ceo → wk msg-0001  build it",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("render missing %q:\n%s", want, out)
+		}
+	}
+}

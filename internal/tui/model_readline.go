@@ -222,9 +222,15 @@ func (m Model) reverseSearchView(width int) string {
 	return ansi.Truncate(line, max(12, width), "")
 }
 
-// newPaneTickCmd mirrors the ctrl+n refresh cadence for prefix-created panes.
+// newPaneRefreshMsg asks for one more layout refresh shortly after a pane
+// create, once the daemon has had time to spawn it.
+type newPaneRefreshMsg struct{}
+
+// newPaneTickCmd is the refresh cadence after a pane create (Ctrl+N and the
+// prefix `n`): refresh now, and once more 100ms later. The delayed one is a
+// newPaneRefreshMsg, never a tickMsg — see the handler in model_update.go.
 func (m Model) newPaneTickCmd() tea.Cmd {
 	return tea.Batch(m.refreshCmd(), tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
-		return tickMsg(time.Now())
+		return newPaneRefreshMsg{}
 	}))
 }

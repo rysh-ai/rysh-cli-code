@@ -28,6 +28,7 @@ type agentKV struct {
 	WorktreeBranch string `json:"worktree_branch,omitempty"`
 	WorktreePath   string `json:"worktree_path,omitempty"`
 	AutoApprove    *bool  `json:"auto_approve,omitempty"`
+	SkillPath      string `json:"skill_path,omitempty"`
 }
 
 // agentEntry tracks a single autonomous agent in the registry.
@@ -39,7 +40,8 @@ type agentEntry struct {
 	registeredPanes map[string]string // paneID -> paneName
 	worktreeBranch  string            // isolation worktree (design 008); "" = shared checkout
 	worktreePath    string
-	autoApprove     *bool // skill-file auto_approve:; nil = default (true)
+	autoApprove     *bool  // skill-file auto_approve:; nil = default (true)
+	skillPath       string // skill file spawned from; "" = inline
 }
 
 // AgentRegistryActor manages all autonomous agents in the workspace.
@@ -103,6 +105,7 @@ func (r *AgentRegistryActor) Receive(ctx actor.Context) {
 		if ent, ok := r.agents[m.Name]; ok {
 			ent.worktreeBranch = m.WorktreeBranch
 			ent.worktreePath = m.WorktreePath
+			ent.skillPath = m.SkillPath
 		}
 		r.persistToKV()
 
@@ -257,6 +260,7 @@ func (r *AgentRegistryActor) getAgentInfos() []msg.AgentInfo {
 			SystemPrompt:    entry.systemPrompt,
 			RegisteredPanes: paneNames,
 			WorktreePath:    entry.worktreePath,
+			SkillPath:       entry.skillPath,
 		})
 	}
 	return infos
@@ -283,6 +287,7 @@ func (r *AgentRegistryActor) persistToKV() {
 			WorktreeBranch:  entry.worktreeBranch,
 			WorktreePath:    entry.worktreePath,
 			AutoApprove:     entry.autoApprove,
+			SkillPath:       entry.skillPath,
 		}
 	}
 	data, err := json.Marshal(entries)
@@ -312,6 +317,7 @@ func (r *AgentRegistryActor) restoreFromKV(ctx actor.Context) {
 			ent.registeredPanes = akv.RegisteredPanes
 			ent.worktreeBranch = akv.WorktreeBranch
 			ent.worktreePath = akv.WorktreePath
+			ent.skillPath = akv.SkillPath
 			if !akv.Active {
 				ctx.Send(ent.pid, &msg.MsgAgentDeactivate{Name: akv.Name})
 			}

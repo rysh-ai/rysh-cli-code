@@ -83,6 +83,20 @@ type AgentFleetActor struct {
 	// reconciledAt is unix millis of the last successful membership check. Read
 	// from the query goroutine, written by the reconcile loop.
 	reconciledAt atomic.Int64
+
+	// watch is the status ledger's observer and messenger (design 054,
+	// fleet_watch.go).
+	watch *fleetWatch
+
+	// goals supervises one goal executor per up fleet (design 055,
+	// fleet_goal_executor.go).
+	goals *goalSupervisor
+
+	// The status scout (design 056, fleet_scout.go): the claude CLI it runs,
+	// members with a scout in flight, and the concurrency bound.
+	scoutCmd  string
+	scoutBusy map[string]bool
+	scoutSem  chan struct{}
 }
 
 // NewAgentFleetActor builds the registry actor. A nil conn or nil kv is
@@ -96,6 +110,8 @@ func NewAgentFleetActor(nc *nats.Conn, codecs *msg.CodecRegistry, kv nats.KeyVal
 		kv:     kv,
 		reg:    fleet.New(),
 		done:   make(chan struct{}),
+		watch:  newFleetWatch(),
+		goals:  newGoalSupervisor(),
 	}
 }
 
@@ -138,13 +154,29 @@ func (a *AgentFleetActor) Start() {
 	// Every accepted write is persisted immediately rather than on a timer.
 	// A fleet recorded in memory and lost on restart is the failure this actor
 	// exists to fix, and a flush interval is just a smaller window for it.
-	if sub, err := fleet.ServeUpdates(a.nc, reg, func(op string, f *fleet.Fleet, name string) {
-		switch op {
+	if sub, err := fleet.ServeUpdates(a.nc, reg, func(u fleet.Update, reply fleet.UpdateReply) {
+		switch u.Op {
 		case fleet.OpForget:
-			_ = persist.Delete(name)
+			_ = persist.Delete(u.Name)
 		default:
-			if f != nil {
-				_ = persist.Save(f)
+			if reply.Fleet != nil {
+				_ = persist.Save(reply.Fleet)
+			}
+		}
+		if u.Op == fleet.OpStatus {
+			a.onStatus(u, reply)
+		}
+		// The goal executors (design 055): a fleet coming up or going down,
+		// or its executor switched, starts or stops one; a declaration or a
+		// goal change kicks its fleet's executor (debounced there).
+		switch u.Op {
+		case fleet.OpRegister, fleet.OpState, fleet.OpForget, fleet.OpGoalExec:
+			a.syncGoalExecutors()
+		}
+		switch u.Op {
+		case fleet.OpStatus, fleet.OpGoal, fleet.OpGoalExec, fleet.OpMemberUpsert, fleet.OpMemberRemove:
+			if reply.Fleet != nil {
+				a.kickGoalExecutor(reply.Fleet.Name)
 			}
 		}
 	}); err == nil {
@@ -154,6 +186,10 @@ func (a *AgentFleetActor) Start() {
 	}
 
 	go a.reconcileLoop(done)
+	go a.watchLoop(done)
+	// A restored fleet that was up gets its executor back now, not at the
+	// first watch tick.
+	a.syncGoalExecutors()
 }
 
 // reconcileLoop drops members whose panes have gone.
@@ -271,6 +307,7 @@ func (a *AgentFleetActor) Stop() {
 	}
 	a.mu.Unlock()
 
+	a.stopGoalExecutors()
 	if done != nil {
 		close(done)
 	}

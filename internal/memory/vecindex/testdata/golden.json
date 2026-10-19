@@ -1,0 +1,16 @@
+[
+  {"query": "how do I bake sourdough bread with a starter", "k": 3, "min_score": 0.1,
+   "want": ["kitchen.md#Sourdough bread"]},
+  {"query": "gateway daemons", "k": 3, "min_score": 0.1,
+   "want": ["gateway.md#Gateway", "gateway.md#Token ceiling", "gateway.md#Lease grant"]},
+  {"query": "gateway daemons", "k": 1, "min_score": 0.1,
+   "want": ["gateway.md#Gateway"]},
+  {"query": "CLI binary version installer", "k": 3, "min_score": 0.1,
+   "want": ["strict.md#CLI identity", "strict.md#Strict mode"]},
+  {"query": "tomato garlic soup", "k": 3, "min_score": 0.1,
+   "want": ["kitchen.md#Tomato soup"]},
+  {"query": "policy etag 304", "k": 3, "min_score": 0.1,
+   "want": ["gateway.md#Policy document"]},
+  {"query": "quantum chromodynamics", "k": 3, "min_score": 0.1,
+   "want": []}
+]

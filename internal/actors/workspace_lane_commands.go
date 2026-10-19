@@ -45,6 +45,11 @@ func (w *WorkspaceActor) handleLaneCommand(out *strings.Builder, paneID string, 
 				w.failRysh("no active lane to rename")
 			}
 		}
+	case "collapse", "expand", "toggle":
+		// ##lane collapse [<lane>]   fold to a strip; the open lanes share its width
+		// ##lane expand [<lane>|all] open it again
+		// ##lane toggle [<lane>]
+		w.cmdLaneCollapse(out, sub, args[1:])
 	case "delete":
 		// ##lane delete <lane-id>  -> delete the lane with that id (see ##lane list)
 		if len(args) < 2 {
@@ -65,6 +70,9 @@ func (w *WorkspaceActor) handleLaneCommand(out *strings.Builder, paneID string, 
 			"##lane info [<lane>]   the caller's lane, or the one named (id, index or name)",
 			"##lane name <lane-name>",
 			"##lane model [<provider>/<name>]  bind the lane's LLM model",
+			"##lane collapse [<lane>]   fold a lane to a strip; the open lanes share its width",
+			"##lane expand [<lane>|all]",
+			"##lane toggle [<lane>]",
 			"##lane delete <lane-id>",
 		)
 		w.failRyshUsage("unknown subcommand for ##%s: %q", "lane", sub)

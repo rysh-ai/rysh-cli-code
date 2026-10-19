@@ -18,6 +18,16 @@ type EmailChannelConfig struct {
 	SMTPPort   int    `json:"smtp_port,omitempty" yaml:"smtp_port"`
 	Username   string `json:"username,omitempty" yaml:"username"`
 	Password   string `json:"password,omitempty" yaml:"password"`
+	// Read-only safety guard (founder ruling U-6/H-5): Safety "read_only"
+	// turns it on; only mail whose subject carries SubjectTag is fetched or
+	// sent; AuditLog is the local file every IMAP command is recorded in.
+	Safety     string `json:"safety,omitempty" yaml:"safety"`
+	SubjectTag string `json:"subject_tag,omitempty" yaml:"subject_tag"`
+	AuditLog   string `json:"audit_log,omitempty" yaml:"audit_log"`
+	// AllowFrom is the guard's sender allow-list (root-0320): under read_only
+	// a mail is fetched only if its From addr-spec is listed. Empty ⇒ the
+	// account's own username.
+	AllowFrom []string `json:"allow_from,omitempty" yaml:"allow_from"`
 }
 
 // ChannelConfig describes the configuration for a single communication channel.
@@ -135,6 +145,51 @@ type ChannelConfig struct {
 	// closed; TemplateLang is its language code (e.g. "en_US").
 	DefaultTemplate string `json:"default_template,omitempty" yaml:"default_template"`
 	TemplateLang    string `json:"template_lang,omitempty" yaml:"template_lang"`
+
+	// WeChat Official Account (公众号, api.weixin.qq.com). It reuses the fields it
+	// shares with other channels rather than adding near-duplicates, the same way
+	// Teams reuses AppSecret — a contacts block only ever means one channel:
+	//
+	//	AppID       → WeChat appid
+	//	AppSecret   → WeChat appsecret
+	//	VerifyToken → the console's "Token", which the inbound signature is
+	//	              computed over (sha1 of token/timestamp/nonce sorted)
+	//
+	// Only the encryption key has no existing counterpart. When set, the account
+	// is in "safe mode" and message bodies are AES-256-CBC encrypted.
+	//
+	// Unlike WhatsApp's static Graph token, WeChat's access_token EXPIRES (<=7200s)
+	// and must be refetched, so the stored credential is AppSecret, not a token;
+	// the adapter mints and caches the token itself.
+	//
+	// WeChat only accepts a callback URL on port 80/443 of a filed domain, so
+	// direct mode is unusable for most operators and Relay (above) is the
+	// practical transport: rysh-server owns the URL and the credentials.
+	EncodingAESKey string `json:"encoding_aes_key,omitempty" yaml:"encoding_aes_key"`
+
+	// WeCom / WeChat Work (企业微信, qyapi.weixin.qq.com). It reuses AppID as the
+	// corpid, AppSecret as the corpsecret and VerifyToken as the callback Token,
+	// on the same "a block only means one channel" rule as above. AgentID has no
+	// counterpart: it names WHICH app inside the corp is sending, and the send
+	// API rejects a payload without it.
+	//
+	// EncodingAESKey above is REQUIRED here, not optional: WeCom encrypts every
+	// callback, including the URL-verification echostr, so a WeCom channel
+	// without a key cannot complete the handshake at all.
+	AgentID string `json:"agent_id,omitempty" yaml:"agent_id"`
+
+	// Google Chat (Workspace) over Cloud Pub/Sub PULL. There is no bot token:
+	// the app authenticates as a SERVICE ACCOUNT, so CredentialsJSON holds the
+	// downloaded key file's contents (put it behind a ${SECRET} — it carries a
+	// private key) and Subscription names the pull subscription Chat publishes
+	// events to. AppID is reused as the GCP project id and may be omitted, in
+	// which case the project_id inside the key file is used.
+	//
+	// Pull means this process dials OUT, so unlike WhatsApp/WeChat/Teams no
+	// public endpoint, tunnel or filed domain is involved. Channels, shared
+	// with Slack/Discord, allow-lists space names ("spaces/AAAA...").
+	CredentialsJSON string `json:"credentials_json,omitempty" yaml:"credentials_json"`
+	Subscription    string `json:"subscription,omitempty" yaml:"subscription"`
 
 	// Signal (signal-cli sidecar). SidecarAddr is the JSON-RPC endpoint of a
 	// signal-cli daemon (UNIX socket path or host:port); SidecarCmd optionally

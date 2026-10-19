@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/agentenv"
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 )
 
@@ -70,6 +71,8 @@ const (
 	// metaCodexSessionID is the id RECOVERED after launch, because codex issues
 	// its own — see discoverCodexSession.
 	metaCodexSessionID = "codex.session_id"
+	// agent.prompt_from (metaAgentPromptFrom) lives with the one-shot prompt
+	// code in native_agent_prompt.go.
 )
 
 // nativeAgentSpec is one agent invocation. Kept as a struct rather than a long
@@ -88,21 +91,11 @@ type nativeAgentSpec struct {
 	Cwd string
 	// Resume selects the resume verb instead of the launch one.
 	Resume bool
-}
-
-// claudeEnvScrub is the `env -u …` prefix that stops a claude started from
-// inside another claude from coming up as a nested child of the conversation
-// that launched it. The daemon inherits its environment from wherever rysh was
-// started — which, for anyone driving rysh from an agent, is a claude session —
-// and every pane shell inherits it in turn.
-func claudeEnvScrub() string {
-	var b strings.Builder
-	b.WriteString("env")
-	for _, v := range claudeCleanEnv {
-		b.WriteString(" -u ")
-		b.WriteString(v)
-	}
-	return b.String()
+	// PromptFile, when set, is a staged one-shot prompt handed to the agent
+	// as its first message (native_agent_prompt.go). ONLY the launch path in
+	// handleNativeAgentCommand sets it: it is never derived from pane meta, so
+	// no restore path — nativeResumePlan, `##ansa resume` — can replay it.
+	PromptFile string
 }
 
 // AUTONOMY BY DEFAULT. A pane opened with `##claude` / `##codex` is an agent
@@ -239,20 +232,99 @@ func nativeAgentCommand(s nativeAgentSpec) string {
 	default: // claude, and anything unknown — see nativeAgentKind
 		switch {
 		case s.Resume && sid != "":
-			cmd = claudeEnvScrub() + " claude --resume " + sid + args
+			cmd = "claude --resume " + sid + args
 		case s.Resume:
-			cmd = claudeEnvScrub() + " claude --continue" + args
+			cmd = "claude --continue" + args
 		case sid != "":
-			cmd = claudeEnvScrub() + " claude --session-id " + sid + args
+			cmd = "claude --session-id " + sid + args
 		default:
-			cmd = claudeEnvScrub() + " claude" + args
+			cmd = "claude" + args
 		}
 	}
 
+	// The prompt argument goes INSIDE the agent command, before the scrub wraps
+	// it: the scrubbed line has two branches (exec-clean, and the static
+	// fallback for a host without rysh), and each must carry the prompt.
+	f := strings.TrimSpace(s.PromptFile)
+	if f != "" {
+		cmd += ` "$` + nativeAgentPromptVar + `"`
+	}
+	cmd = nativeAgentScrubbed(s.Kind, cmd)
 	if dir := strings.TrimSpace(s.Cwd); dir != "" {
-		cmd = "cd " + shellQuote(dir) + " && " + cmd
+		cmd = nativeAgentInDir(dir, nativeAgentKind(s.Kind), cmd)
+	}
+	if f != "" {
+		cmd = nativeAgentWithPrompt(cmd, f)
 	}
 	return cmd
+}
+
+// nativeAgentScrubbed applies agentenv's one definition to an agent line.
+// claude runs through `rysh exec-clean` (patterns + exact names, per-agent
+// KEEPs). codex is NOT yet verified against a real codex binary (none on the
+// build host, ORDER-64), so it gets the GENERATED static prefix — the exact
+// DENY names only — until it is; that is still more than it had (nothing).
+func nativeAgentScrubbed(kind, cmd string) string {
+	if nativeAgentKind(kind) == nativeAgentCodex {
+		return agentenv.StaticPrefix() + " " + cmd
+	}
+	return agentenv.TypedLine(agentenv.Claude, cmd)
+}
+
+// nativeAgentInDir runs cmd in dir, or prints ONE line saying what to do when
+// dir cannot be entered (design 029 §7) — the commonest cause is a worktree
+// that was removed while the pane was down, and the shell's own `cd: no such
+// file or directory` tells the user nothing about how to get their agent back.
+//
+// THE CHECK IS IN THE LINE, NOT IN THE DAEMON. The pane's shell may be on
+// another host, so a daemon-side stat would answer for the wrong machine.
+//
+// ONE FORM FOR EVERY PANE SHELL. rysh runs sh, bash, zsh and fish panes
+// (history_expand.go), and fish has no `if …; then …; fi` — an earlier form of
+// this line was a parse error there for EVERY resume with a cwd. So the line
+// uses only what all of them share — simple commands, `;`, `&&`, `||`,
+// redirections, single quotes — and reads, in each:
+//
+//	test -d D || printf <hint> >&2; test -d D && cd D && cmd
+//
+// A missing D prints the hint once and stops at the second `test`, so the agent
+// never starts elsewhere and the line ends non-zero. A present D runs cmd and
+// the line's status is cmd's own — the hint is decided by the directory, never
+// by the agent's exit, which `cd … && cmd || echo …` would get wrong. cd keeps
+// its stderr: a D that exists but cannot be entered (no search permission, or
+// removed between the two tests) is rare, and its own error is better than
+// silence.
+func nativeAgentInDir(dir, kind, cmd string) string {
+	q := shellQuoteAnyShell(dir)
+	hint := "rysh: cannot resume " + kind + ": its directory " + dir +
+		" is missing — re-create it, e.g. the removed worktree, " +
+		"or run ##" + kind + " new from another directory"
+	return "test -d " + q + " || printf '%s\\n' " + shellQuoteAnyShell(hint) + " >&2; " +
+		"test -d " + q + " && cd " + q + " && " + cmd
+}
+
+// shellQuoteAnyShell quotes s as ONE word with the same meaning in sh, bash,
+// zsh, dash and fish. shellQuote's close-escape-reopen form is right for POSIX
+// shells, and for an embedded quote under fish too, but fish gives `\\` and `\'`
+// meaning INSIDE single quotes, so a path holding a backslash — `/a\` above
+// all, whose `\'` swallows the closing quote — parses differently there. Both
+// characters are therefore put OUTSIDE the quotes, as `\'` and `\\`, which
+// every one of these shells reads as the literal character.
+func shellQuoteAnyShell(s string) string {
+	var b strings.Builder
+	b.WriteByte('\'')
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\'':
+			b.WriteString(`'\''`)
+		case '\\':
+			b.WriteString(`'\\'`)
+		default:
+			b.WriteByte(s[i])
+		}
+	}
+	b.WriteByte('\'')
+	return b.String()
 }
 
 // nativeAgentKind normalises a pane's recorded agent kind.

@@ -80,6 +80,16 @@
       ]
     },
     {
+      "type": "company_snapshot",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "snapshot"
+      ]
+    },
+    {
       "type": "completion_result",
       "envelope": [
         "data",
@@ -153,6 +163,37 @@
       "data_fields": [
         "cookies",
         "profile"
+      ]
+    },
+    {
+      "type": "meeting_reply",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "error",
+        "id",
+        "reply",
+        "verb"
+      ]
+    },
+    {
+      "type": "meeting_token",
+      "envelope": [
+        "data",
+        "type"
+      ],
+      "data_fields": [
+        "pane_id",
+        "room"
+      ],
+      "data_fields_optional": [
+        "error",
+        "expires_at",
+        "identity",
+        "token",
+        "url"
       ]
     },
     {
@@ -420,6 +461,7 @@
     {
       "action": "approval_response",
       "params": [
+        "choice_idx",
         "decision",
         "pane_id",
         "reason",
@@ -458,6 +500,12 @@
     },
     {
       "action": "close_pane"
+    },
+    {
+      "action": "company_query"
+    },
+    {
+      "action": "company_refresh"
     },
     {
       "action": "completion_get",
@@ -636,6 +684,28 @@
       ]
     },
     {
+      "action": "lane_collapse",
+      "params": [
+        "lane",
+        "verb"
+      ]
+    },
+    {
+      "action": "meeting_command",
+      "params": [
+        "id",
+        "turn_id",
+        "verb"
+      ]
+    },
+    {
+      "action": "meeting_token",
+      "params": [
+        "pane_id",
+        "room"
+      ]
+    },
+    {
       "action": "move_tab",
       "params": [
         "direction"
@@ -795,6 +865,12 @@
       "action": "unshare_entity",
       "params": [
         "entity_id"
+      ]
+    },
+    {
+      "action": "visible_panes",
+      "params": [
+        "pane_ids"
       ]
     },
     {

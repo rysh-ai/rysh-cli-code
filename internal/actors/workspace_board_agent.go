@@ -53,8 +53,20 @@ const boardAgentClaudeArgs = "--dangerously-skip-permissions"
 
 // boardAgentPanes returns every pane called `board`, across every tab.
 func (w *WorkspaceActor) boardAgentPanes(boardID string) []domain.PaneSnapshot {
+	found, _ := w.scanBoardAgentPanes(boardID)
+	return found
+}
+
+// scanBoardAgentPanes returns the panes named exactly as the board claude of
+// boardID, and — from the same pass over the tabs, so a miss costs no second
+// round of snapshots — the panes whose name is only a near miss for it.
+//
+// The near misses exist for the error path alone. They are NEVER resolved to:
+// a pane called `etl-fix-board` is a human's guess at the convention, not the
+// board claude, and addressing it would be the guessing 026 §5.1 forbids. They
+// are named in the refusal so the human sees why the lookup failed.
+func (w *WorkspaceActor) scanBoardAgentPanes(boardID string) (found, near []domain.PaneSnapshot) {
 	want := boardAgentNameFor(boardID)
-	var found []domain.PaneSnapshot
 	for _, info := range w.tabs {
 		tabSnap := w.queryTabSnapshot(info.id)
 		if tabSnap == nil {
@@ -64,13 +76,47 @@ func (w *WorkspaceActor) boardAgentPanes(boardID string) []domain.PaneSnapshot {
 			continue
 		}
 		for p := range domain.PanesInTab(tabSnap) {
-			if p.GivenName == want {
+			switch {
+			case p.GivenName == want:
 				found = append(found, *p)
+			case isNearBoardAgentName(p.GivenName, want):
+				near = append(near, *p)
 			}
 		}
 	}
 	sort.Slice(found, func(i, j int) bool { return found[i].ID < found[j].ID })
-	return found
+	sort.Slice(near, func(i, j int) bool { return near[i].ID < near[j].ID })
+	return found, near
+}
+
+// isNearBoardAgentName reports whether name is the board claude's name with its
+// words reordered, recased or re-separated — `etl-fix-board`, `Board_etl_fix`
+// for `board-etl-fix`. Deliberately narrow: same words, nothing added or
+// dropped, so a hint never points at an unrelated pane that merely mentions a
+// board.
+func isNearBoardAgentName(name, want string) bool {
+	if name == "" || name == want {
+		return false
+	}
+	a, b := nameWords(name), nameWords(want)
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// nameWords splits a given-name into sorted, lower-cased words.
+func nameWords(name string) []string {
+	words := strings.FieldsFunc(strings.ToLower(name), func(r rune) bool {
+		return r == '-' || r == '_' || r == ' ' || r == '.'
+	})
+	sort.Strings(words)
+	return words
 }
 
 // tabOfPane returns the id of the tab holding paneID, or "".
@@ -89,7 +135,8 @@ func (w *WorkspaceActor) tabOfPane(paneID string) string {
 
 // resolveBoardAgent finds the single board claude, or explains why it cannot.
 func (w *WorkspaceActor) resolveBoardAgent(boardID string) (domain.PaneSnapshot, error) {
-	return resolveBoardAgentNamed(w.boardAgentPanes(boardID), boardAgentNameFor(boardID))
+	found, near := w.scanBoardAgentPanes(boardID)
+	return resolveBoardAgentHinted(found, near, boardAgentNameFor(boardID))
 }
 
 // resolveBoardAgentFrom is the addressing rule, split out from the lookup so it
@@ -104,10 +151,18 @@ func resolveBoardAgentFrom(panes []domain.PaneSnapshot) (domain.PaneSnapshot, er
 // refusal can say which name it was looking for — with several fleets running,
 // "no pane named board" would be true and useless.
 func resolveBoardAgentNamed(panes []domain.PaneSnapshot, want string) (domain.PaneSnapshot, error) {
+	return resolveBoardAgentHinted(panes, nil, want)
+}
+
+// resolveBoardAgentHinted is resolveBoardAgentNamed with the near misses from
+// scanBoardAgentPanes: when nothing resolves, the refusal names them, because
+// "not running" next to a pane the human can see called `etl-fix-board` reads
+// as a bug rather than as a naming mismatch.
+func resolveBoardAgentHinted(panes, near []domain.PaneSnapshot, want string) (domain.PaneSnapshot, error) {
 	switch len(panes) {
 	case 0:
 		return domain.PaneSnapshot{}, fmt.Errorf(
-			"no pane named %q — that board's claude is not running", want)
+			"no pane named %q — that board's claude is not running%s", want, nearMissHint(near, want))
 	case 1:
 		return panes[0], nil
 	default:
@@ -119,6 +174,22 @@ func resolveBoardAgentNamed(panes []domain.PaneSnapshot, want string) (domain.Pa
 			"%d panes are named %q (%s) — refusing to guess which one is the board claude",
 			len(panes), want, strings.Join(ids, ", "))
 	}
+}
+
+// nearMissHint renders the near misses as a did-you-mean suffix, or "" when
+// there are none. It names the pane id too, since given-names are not unique
+// per session.
+func nearMissHint(near []domain.PaneSnapshot, want string) string {
+	if len(near) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(near))
+	for _, p := range near {
+		names = append(names, fmt.Sprintf("%q (pane %s)", p.GivenName, shortID(p.ID)))
+	}
+	return fmt.Sprintf(" — did you mean %s? The board claude must be named exactly %q: "+
+		"rename that pane, or start one with ##board agent up",
+		strings.Join(names, " or "), want)
 }
 
 // handleBoardAgentCommand implements `##board agent visible|invisible|status`.
@@ -191,9 +262,9 @@ func (w *WorkspaceActor) setBoardAgentHidden(out *strings.Builder, boardID strin
 // own belief as the world's state.
 func (w *WorkspaceActor) boardAgentStatus(out *strings.Builder, boardID string) error {
 	name := boardAgentNameFor(boardID)
-	panes := w.boardAgentPanes(boardID)
+	panes, near := w.scanBoardAgentPanes(boardID)
 	if len(panes) == 0 {
-		fmt.Fprintf(out, "board agent: not running (no pane named %q)\n", name)
+		fmt.Fprintf(out, "board agent: not running (no pane named %q)%s\n", name, nearMissHint(near, name))
 		return nil
 	}
 	for _, p := range panes {
@@ -206,6 +277,9 @@ func (w *WorkspaceActor) boardAgentStatus(out *strings.Builder, boardID string) 
 			program = "(no foreground program — at a shell prompt)"
 		}
 		fmt.Fprintf(out, "board agent: pane %s  %s  running %s\n", shortID(p.ID), where, program)
+		if p.Program == "" {
+			fmt.Fprintf(out, "  prompts to it are refused until claude is back: %s\n", boardAgentUpCommand(boardID))
+		}
 	}
 	if len(panes) > 1 {
 		fmt.Fprintf(out, "  WARNING: %d panes share the name %q; visible/invisible will refuse until that is fixed\n",
@@ -249,6 +323,16 @@ func (w *WorkspaceActor) handleBoardAgentPrompt(m *msg.MsgBoardAgentPrompt) *msg
 		return &msg.MsgCLIResponse{OK: false, Error: err.Error()}
 	}
 
+	// A pane at its shell prompt is not a board claude, whatever it is called.
+	// The router would deliver the line as a SHELL COMMAND there (an empty
+	// mode is shell mode), so "are you alive" runs in bash and the board
+	// reports a send. Refuse, and say how to bring the claude back.
+	if w.boardAgentAtShell(pane.ID) {
+		return &msg.MsgCLIResponse{OK: false, Error: fmt.Sprintf(
+			"the board claude's pane %s is at a shell prompt — its claude is not running, nothing was sent; restart it with %s",
+			shortID(pane.ID), boardAgentUpCommand(m.Board))}
+	}
+
 	// The sender is the board claude's own pane rather than the human's: the
 	// board pane is shell-less and cannot be a sender, and inventing an ambient
 	// one would be a lie about who is talking (workspace_ansa.go).
@@ -261,6 +345,76 @@ func (w *WorkspaceActor) handleBoardAgentPrompt(m *msg.MsgBoardAgentPrompt) *msg
 		ID:     res.TargetPaneID,
 		Output: fmt.Sprintf("sent to the board claude (pane %s)", shortID(res.TargetPaneID)),
 	}
+}
+
+// boardAgentAtShell reports whether the pane is sitting at a bare shell prompt.
+//
+// A pane that cannot be probed is NOT reported as at a shell: "I could not
+// look" is not "nothing is there", and the router's own probe turns an
+// unreachable pane into a refusal with its own code a moment later.
+func (w *WorkspaceActor) boardAgentAtShell(paneID string) bool {
+	prog, err := w.ansaRouterFor().tr.Probe(paneID)
+	return err == nil && strings.TrimSpace(prog) == ""
+}
+
+// boardAgentUpCommand is the command that starts (or restarts) one board's
+// claude, as the human would type it.
+func boardAgentUpCommand(boardID string) string {
+	if msg.IsDefaultBoard(boardID) {
+		return "##board agent up"
+	}
+	return "##board agent up --board " + msg.NormalizeBoardID(boardID)
+}
+
+// boardAgentRestart brings the board claude back in its existing pane.
+//
+// RESUME WHEN THERE IS A CONVERSATION TO RESUME: what the board claude has
+// accumulated is the point of it (design 027 §5.2, "you accumulate"), so a
+// restart that started it over would silently throw that away. Only when
+// claude holds no session under the pane's id does it start fresh, re-briefed.
+// Either way the pane is stamped native, so the NEXT restart resumes it on its
+// own.
+func (w *WorkspaceActor) boardAgentRestart(out *strings.Builder, pane domain.PaneSnapshot, boardID string) error {
+	meta := func(key string) string { return strings.TrimSpace(pane.Meta[key]) }
+	sid := meta(metaClaudeSessionID)
+	cwd := meta(metaAgentCwd)
+	if cwd == "" {
+		cwd, _ = nativeAgentCwd(&pane)
+	}
+
+	var command string
+	if sid != "" && claudeSessionExists(sid) {
+		command = nativeAgentCommand(nativeAgentSpec{
+			Kind: nativeAgentClaude, SessionID: sid, Args: boardAgentClaudeArgs, Cwd: cwd, Resume: true,
+		})
+		fmt.Fprintf(out, "board agent %s: claude was not running in pane %s — resuming session %s\n",
+			boardAgentNameFor(boardID), shortID(pane.ID), sid)
+	} else {
+		sid = uuid.NewString()
+		promptFile, err := w.writeClaudePrompt(sid, boardAgentBriefFor(boardID))
+		if err != nil {
+			w.failRysh("board agent: %v", err)
+			fmt.Fprintf(out, "board agent: %v\n", err)
+			return err
+		}
+		command = claudeLaunchCommand(sid, promptFile, boardAgentClaudeArgs)
+		if cwd != "" {
+			command = "cd " + shellQuote(cwd) + " && " + command
+		}
+		_ = w.pub.Send(msg.T("pane", pane.ID, "inbox"), &msg.MsgPaneSetMeta{
+			Key: "claude.prompt_file", Value: promptFile,
+		})
+		fmt.Fprintf(out, "board agent %s: claude was not running in pane %s and had no session to resume — starting fresh as %s\n",
+			boardAgentNameFor(boardID), shortID(pane.ID), sid)
+	}
+
+	w.stampNativeAgentMeta(pane.ID, nativeAgentClaude, cwd, boardAgentClaudeArgs, sid, false, "")
+	if err := w.sendPaneExec(pane.ID, command); err != nil {
+		w.failRysh("board agent: %v", err)
+		fmt.Fprintf(out, "board agent: could not start claude in pane %s: %v\n", shortID(pane.ID), err)
+		return err
+	}
+	return nil
 }
 
 // boardAgentBrief is the prompt the board claude comes up with.
@@ -352,6 +506,14 @@ func (w *WorkspaceActor) boardAgentUp(out *strings.Builder, curPane, boardID str
 	// one mind per fleet, because one mind in the path of twenty-five boards is
 	// a queue whose failure is silent.
 	if existing := w.boardAgentPanes(boardID); len(existing) > 0 {
+		// A pane with the name but no claude in it — what a daemon restart
+		// leaves behind for a board claude launched before it was stamped for
+		// the resume sweep — is brought back IN PLACE rather than reported as
+		// running. Creating a second pane would give the board two panes
+		// with one name, which resolveBoardAgent refuses to address.
+		if len(existing) == 1 && w.boardAgentAtShell(existing[0].ID) {
+			return w.boardAgentRestart(out, existing[0], boardID)
+		}
 		fmt.Fprintf(out, "board agent %s: already running in pane %s\n",
 			boardAgentNameFor(boardID), shortID(existing[0].ID))
 		return nil
@@ -396,8 +558,21 @@ func (w *WorkspaceActor) boardAgentUp(out *strings.Builder, curPane, boardID str
 	// with the approval pane missing. Founder ruling 2 makes its JUDGEMENT the
 	// guardrail; a guardrail that needs permission for every act is a second
 	// prompt, not a guardrail. The cost is a named limit in design 027 §7.2.
-	w.scheduleClaudeLaunchWith(alias, sessionID, promptFile, boardAgentNameFor(boardID),
-		boardAgentClaudeArgs, true, claudeLaunchRetries)
+	//
+	// NATIVE, so a daemon stop/start resumes it (design 029's sweep). Without
+	// the stamp the restart kills the claude and restores the pane as a bare
+	// shell under the board claude's name — the lookup still resolves, and
+	// every prompt typed into the board lands in bash.
+	w.scheduleClaudeLaunchMsg(msg.MsgLaunchClaudeInPane{
+		Alias:      alias,
+		SessionID:  sessionID,
+		PromptFile: promptFile,
+		GivenName:  boardAgentNameFor(boardID),
+		Hidden:     true,
+		ExtraArgs:  boardAgentClaudeArgs,
+		Retries:    claudeLaunchRetries,
+		Native:     true,
+	})
 
 	fmt.Fprintf(out, "board agent: starting claude as %q for board %s, hidden\n",
 		boardAgentNameFor(boardID), boardLabel(boardID))

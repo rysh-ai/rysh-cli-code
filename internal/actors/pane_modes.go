@@ -31,7 +31,7 @@ func (p *PaneActor) notifyLayoutDirty() {
 // canonicalModeOrder is the fixed display/cycle order for input modes. enabledModes
 // is always kept sorted by this order so every frontend cycles deterministically
 // regardless of the order modes were enabled in.
-var canonicalModeOrder = []string{"shell", "prompt", "rysh", "chat", "external", "email", "web"}
+var canonicalModeOrder = []string{"shell", "prompt", "rysh", "chat", "external", "email", "company", "web"}
 
 // validPaneModes is the set of modes that can be enabled/disabled via ##mode.
 // "email" is a rich, interactive mode (a three-column inbox client rendered in the
@@ -39,7 +39,7 @@ var canonicalModeOrder = []string{"shell", "prompt", "rysh", "chat", "external",
 // registered pane; like "web" it has a dedicated render surface rather than a
 // plain output buffer.
 var validPaneModes = map[string]bool{
-	"shell": true, "prompt": true, "rysh": true, "chat": true, "external": true, "email": true, "web": true,
+	"shell": true, "prompt": true, "rysh": true, "chat": true, "external": true, "email": true, "company": true, "web": true,
 }
 
 // webPaneState is the lock-free mirror of a pane's web-mode binding, stored
@@ -135,7 +135,7 @@ func (p *PaneActor) handleEnableMode(mode, webProfile, webURL string, humanoid b
 			return
 		}
 		_ = p.pub.SendPaneRyshOutput(p.id,
-			fmt.Sprintf("[rysh] error: invalid mode %q (valid: shell, prompt, rysh, chat, external, email, web)\n", mode))
+			fmt.Sprintf("[rysh] error: invalid mode %q (valid: shell, prompt, rysh, chat, external, email, company, web)\n", mode))
 		return
 	}
 
@@ -188,6 +188,25 @@ func (p *PaneActor) handleEnableMode(mode, webProfile, webURL string, humanoid b
 
 // handleDisableMode removes a mode from the pane's enabled set. "shell" can never
 // be disabled. If the pane's current mode is removed, it snaps back to "shell".
+// releaseHumanoid handles MsgPaneReleaseHumanoid: the humanoid that left this
+// pane takes its binding and its visible surface mode with it (design 020
+// §5.7) — but only if it is still the pane's humanoid; a pane re-registered
+// to another humanoid in the meantime keeps that one's binding and mode.
+func (p *PaneActor) releaseHumanoid(m *msg.MsgPaneReleaseHumanoid) {
+	if m.Humanoid == "" || p.registeredHumanoid != m.Humanoid {
+		return
+	}
+	p.registeredHumanoid = ""
+	if m.Surface != "" && m.Surface != "shell" {
+		for _, mode := range p.enabledModes {
+			if mode == m.Surface {
+				p.handleDisableMode(m.Surface, false)
+				break
+			}
+		}
+	}
+}
+
 func (p *PaneActor) handleDisableMode(mode string, humanoid bool) {
 	if mode == "shell" {
 		_ = p.pub.SendPaneRyshOutput(p.id, "[rysh] error: shell mode cannot be disabled\n")
@@ -198,7 +217,7 @@ func (p *PaneActor) handleDisableMode(mode string, humanoid bool) {
 	dynamic := humanoid || p.humanoidModes[mode]
 	if !validPaneModes[mode] && !dynamic {
 		_ = p.pub.SendPaneRyshOutput(p.id,
-			fmt.Sprintf("[rysh] error: invalid mode %q (valid: prompt, rysh, chat, external, email, web)\n", mode))
+			fmt.Sprintf("[rysh] error: invalid mode %q (valid: prompt, rysh, chat, external, email, company, web)\n", mode))
 		return
 	}
 

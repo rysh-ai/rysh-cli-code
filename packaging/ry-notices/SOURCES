@@ -1,0 +1,6 @@
+# packaging/ry-notices — verbatim copies shipped inside the private ry packages (E12 order 15b).
+# Do not edit these files; re-copy from the source. check-ry-notices.sh pins them.
+# <file> <sha256> <source>
+LICENSE dffc21d5d28d33a5600abd683db3656c2343cea6930540d34510d10ed5b2229e rysh-ai monorepo root: scripts/oss-assets/LICENSE
+NOTICE 65478453f86dd65a6139e938082911a407f948472882e0282b7b8aace9630288 rysh-ai monorepo root: scripts/oss-assets/NOTICE-code
+vt10x-LICENSE 1607f32fc8a4d8c4e86cc570f2f23e7a5fd449a7c4e9c4bb2ad30a42b54e8de9 rysh-cli: third_party/vt10x/LICENSE

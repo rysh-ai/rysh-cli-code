@@ -16,10 +16,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 
+	"github.com/rysh-ai/rysh-cli-shared/forge/runtime"
 	"github.com/rysh-ai/rysh-cli-code/internal/agentic"
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
 	"github.com/rysh-ai/rysh-cli-code/internal/forge"
-	"github.com/rysh-ai/rysh-cli-code/internal/forge/runtime"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 	"github.com/rysh-ai/rysh-cli-code/internal/tools"
 )

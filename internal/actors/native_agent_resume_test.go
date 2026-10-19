@@ -41,9 +41,7 @@ func TestOnlyRyshLaunchedAgentsAreResumed(t *testing.T) {
 		}),
 		agentPane("hand-typed", map[string]string{}),
 		agentPane("a-plain-shell", nil),
-		// A fleet pane: fleetctl stamps fleet.agent, never agent.native. It is
-		// resumed by `##ansa resume` on purpose, so the sweep must not also
-		// drive it — two resumes of one session id is the bug this avoids.
+		// A fleet role with no launch args is not an agent to relaunch.
 		agentPane("fleet-worker", map[string]string{"fleet.agent": "claude", "fleet.role": "worker"}),
 	}
 
@@ -71,7 +69,7 @@ func TestARestoredClaudePaneResumesItsOwnSessionInItsOwnDirectory(t *testing.T) 
 	}
 	cmd := deliveries[0].Command
 
-	if !strings.HasPrefix(cmd, "cd '/Users/x/project' && ") {
+	if !strings.Contains(cmd, "cd '/Users/x/project' && ") {
 		t.Errorf("must cd into the agent's directory: %q", cmd)
 	}
 	// No stamped id: the pane id IS the session id (fleetctl's invariant).
@@ -97,7 +95,8 @@ func TestARestoredCodexPaneResumesTheDiscoveredSession(t *testing.T) {
 	if len(deliveries) != 1 {
 		t.Fatalf("want 1 delivery, got %d", len(deliveries))
 	}
-	want := "cd '/srv/app' && codex resume " + codexAutonomyFlag + " 019e60f7-d058-7ac1-9cd0-eb7be5280af2"
+	want := nativeAgentInDir("/srv/app", nativeAgentCodex,
+		nativeAgentScrubbed(nativeAgentCodex, "codex resume "+codexAutonomyFlag+" 019e60f7-d058-7ac1-9cd0-eb7be5280af2"))
 	if deliveries[0].Command != want {
 		t.Errorf("got %q, want %q", deliveries[0].Command, want)
 	}
@@ -136,7 +135,7 @@ func TestACodexPaneWithNoDiscoveredSessionStartsFreshRatherThanGuessing(t *testi
 	if len(deliveries) != 1 {
 		t.Fatalf("want 1 delivery, got %d", len(deliveries))
 	}
-	if got := deliveries[0].Command; got != "cd '/w' && codex "+codexAutonomyFlag {
+	if got := deliveries[0].Command; got != nativeAgentInDir("/w", nativeAgentCodex, nativeAgentScrubbed(nativeAgentCodex, "codex "+codexAutonomyFlag)) {
 		t.Errorf("must start codex fresh, got %q", got)
 	}
 }
@@ -235,6 +234,27 @@ func TestAPaneThatCannotBeProbedIsRetriedRatherThanSkipped(t *testing.T) {
 	for _, id := range settled {
 		if id == "slow" {
 			t.Error("a pane that never answered must not be settled")
+		}
+	}
+}
+
+// A fleet agent has no agent.native, but its agent.args carries the --settings
+// file the board courier needs. The sweep must resume it WITH that flag, in its
+// worktree.
+func TestAFleetClaudeIsResumedWithItsSettingsAfterARestart(t *testing.T) {
+	panes := []ansaPane{agentPane("fleet-pane-1", map[string]string{
+		"fleet.agent":    "claude",
+		"fleet.worktree": "/wt/x",
+		metaAgentArgs:    "--dangerously-skip-permissions --settings /ws/.rysh/fanout/fleet-settings-abcd.json",
+	})}
+	deliveries, _, _ := nativeResumePlan(panes, idleProbe, sessionAlwaysExists, nil)
+	if len(deliveries) != 1 {
+		t.Fatalf("fleet agent not resumed: %+v", deliveries)
+	}
+	cmd := deliveries[0].Command
+	for _, needle := range []string{"cd '/wt/x' && ", "claude --resume fleet-pane-1", "--settings /ws/.rysh/fanout/fleet-settings-abcd.json"} {
+		if !strings.Contains(cmd, needle) {
+			t.Errorf("missing %q in %s", needle, cmd)
 		}
 	}
 }

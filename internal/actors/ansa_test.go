@@ -59,6 +59,8 @@ type fakeAnsaTransport struct {
 	screens    [][]string
 	screenCall int
 	screenErr  error
+	// metaSet records every SetMeta as "pane key=value", in order.
+	metaSet []string
 	// killed records every Kill on the wire; killSurvives fakes a group that
 	// ignores SIGTERM (dies only on hard); killErr fakes a transport failure.
 	killed        []string
@@ -476,6 +478,13 @@ func TestAnsaPersonaGuardsTheApprovalPaneOverload(t *testing.T) {
 // Kill records the signal and, by default, makes the NEXT Probe report the
 // program gone — a fake of a process group that dies on SIGTERM. Set
 // killSurvives to fake a group that ignores SIGTERM until the SIGKILL.
+func (f *fakeAnsaTransport) SetMeta(paneID, key, value string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.metaSet = append(f.metaSet, fmt.Sprintf("%s %s=%s", paneID, key, value))
+	return nil
+}
+
 func (f *fakeAnsaTransport) Kill(paneID string, hard bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

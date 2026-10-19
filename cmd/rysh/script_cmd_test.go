@@ -20,7 +20,7 @@ import (
 // the ## lines inert — which is the property that breaks silently the moment
 // someone writes a ## line as the only statement of an if or for body.
 func TestShippedExamplesAreValid(t *testing.T) {
-	matches, err := filepath.Glob(filepath.Join("..", "..", "examples", "scripts", "*.rysh"))
+	matches, err := shippedExampleScripts()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,10 @@ func TestShippedExamplesRunUnderPlainBash(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}
-	matches, _ := filepath.Glob(filepath.Join("..", "..", "examples", "scripts", "*.rysh"))
+	matches, err := shippedExampleScripts()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, path := range matches {
 		abs, err := filepath.Abs(path)
 		if err != nil {
@@ -83,6 +86,20 @@ func TestShippedExamplesRunUnderPlainBash(t *testing.T) {
 			}
 		})
 	}
+}
+
+// shippedExampleScripts is every .rysh file under examples/ that the export
+// publishes. Add a directory here when an example directory gains scripts.
+func shippedExampleScripts() ([]string, error) {
+	var all []string
+	for _, dir := range []string{"scripts", "fleet"} {
+		matches, err := filepath.Glob(filepath.Join("..", "..", "examples", dir, "*.rysh"))
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, matches...)
+	}
+	return all, nil
 }
 
 func runBashParse(src string) error {

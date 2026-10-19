@@ -73,7 +73,35 @@ func (m *Model) exitRawScroll() {
 	m.rawScrollRows = nil
 	m.rawScrollPaneID = ""
 	m.rawScrollOffset = 0
+	// Drop any in-progress/finished selection with it — its coordinates are
+	// only meaningful against the frozen scrollback layout (see
+	// rawScrollDisplayLines) and would misread as normal-mode coordinates.
+	m.selection = mouseSelection{}
 	m.syncPaneInputFocus()
+}
+
+// paneNeedsScrollFallback reports whether a wheel/PageUp scroll gesture over
+// this pane should escalate into rysh's own frozen scrollback (copy) mode
+// rather than being forwarded to the pane (a key) or left to update a scroll
+// offset the live VT render never looks at (the wheel — see buildPanePanel's
+// RawMode branch, which draws pane.VTScreen directly).
+//
+// True for a remote/mirror interactive share, which has no local PTY to
+// forward to, and for a local interactive pane whose foreground program never
+// enabled its own mouse tracking (IsMouseEnabled in vterm.go) — such a
+// program (e.g. codex, which repaints via cursor addressing and never sends
+// \x1b[?1000h and friends) has no way to receive or react to these gestures
+// itself, so without this fallback they are simply dead. A program that DOES
+// claim mouse tracking (e.g. claude) is left alone: it keeps receiving wheel
+// and pgup/shift+up directly and is already handling its own scrollback.
+func paneNeedsScrollFallback(pane *domain.PaneSnapshot) bool {
+	if pane == nil {
+		return false
+	}
+	if pane.RemoteInteractive {
+		return true
+	}
+	return pane.RawMode && !pane.MouseEnabled
 }
 
 // enterRawScroll switches the active interactive pane into frozen scrollback
@@ -94,6 +122,11 @@ func (m *Model) enterRawScroll(paneID string, initialOffset int) (bool, tea.Cmd)
 	m.rawScrollPaneID = paneID
 	m.rawScrollOffset = initialOffset
 	m.rawScrollRows = nil
+	// A mouse gesture (wheel-up on a live pane) can enter this mode without
+	// going through the KeyMsg handler that normally clears a stale
+	// selection — clear it explicitly so an old normal-mode selection can't
+	// be misread against the frozen scrollback layout.
+	m.selection = mouseSelection{}
 	m.syncPaneInputFocus()
 	return true, m.fetchScrollbackCmd(paneID)
 }
@@ -129,22 +162,85 @@ func (m Model) updateRawScrollMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleRawScrollMouse handles mouse wheel events while in scrollback mode.
+// handleRawScrollMouse handles mouse events while viewing a frozen
+// interactive-pane scrollback (modeRawScroll): the wheel scrolls the frozen
+// view, and a left-button drag selects text for copy — the same
+// press/motion/release state machine handleMouse runs for a normal pane,
+// confined to the one pane the scrollback is frozen on (no click-to-focus:
+// this mode is modal, so a click elsewhere just drops any selection).
 func (m Model) handleRawScrollMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	const step = 3
-	switch msg.Button {
-	case tea.MouseButtonWheelUp:
-		m.rawScrollOffset += step
-	case tea.MouseButtonWheelDown:
-		m.rawScrollOffset -= step
-	default:
+	if msg.Action == tea.MouseActionPress &&
+		(msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown) {
+		const step = 3
+		if msg.Button == tea.MouseButtonWheelUp {
+			m.rawScrollOffset += step
+		} else {
+			m.rawScrollOffset -= step
+		}
+		if maxOff := m.rawScrollMaxOffset(); m.rawScrollOffset > maxOff {
+			m.rawScrollOffset = maxOff
+		}
+		if m.rawScrollOffset < 0 {
+			m.rawScrollOffset = 0
+		}
 		return m, nil
 	}
-	if maxOff := m.rawScrollMaxOffset(); m.rawScrollOffset > maxOff {
-		m.rawScrollOffset = maxOff
-	}
-	if m.rawScrollOffset < 0 {
-		m.rawScrollOffset = 0
+
+	switch msg.Action {
+	case tea.MouseActionPress:
+		if msg.Button == tea.MouseButtonRight {
+			if m.selection.active {
+				return m, m.copySelectionToClipboard()
+			}
+			return m, nil
+		}
+		if msg.Button != tea.MouseButtonLeft {
+			return m, nil
+		}
+		paneID, localX, localY := m.hitTestPane(msg.X, msg.Y)
+		if paneID == "" || paneID != m.rawScrollPaneID {
+			m.selection = mouseSelection{}
+			return m, nil
+		}
+		m.selection = mouseSelection{
+			dragging: true,
+			paneID:   paneID,
+			startX:   localX,
+			startY:   localY,
+			endX:     localX,
+			endY:     localY,
+		}
+		return m, nil
+
+	case tea.MouseActionMotion:
+		if !m.selection.dragging {
+			return m, nil
+		}
+		m.selection.active = true
+		m.selection.dragged = true
+		localX, localY := m.clampToPane(msg.X, msg.Y, m.selection.paneID)
+		m.selection.endX = localX
+		m.selection.endY = localY
+		return m, nil
+
+	case tea.MouseActionRelease:
+		if !m.selection.dragging {
+			return m, nil
+		}
+		m.selection.dragging = false
+		// Some terminals only send press + release (no motion) — capture the
+		// final position here too, same as handleMouse.
+		localX, localY := m.clampToPane(msg.X, msg.Y, m.selection.paneID)
+		m.selection.endX = localX
+		m.selection.endY = localY
+		positionMoved := localX != m.selection.startX || localY != m.selection.startY
+		if m.selection.dragged || positionMoved {
+			m.selection.active = true
+			m.selection.dragged = true
+			return m, m.copySelectionToClipboard()
+		}
+		m.selection = mouseSelection{}
+		return m, nil
 	}
 	return m, nil
 }
@@ -282,6 +378,12 @@ func (m *Model) sendPaneResizes() {
 			continue
 		}
 		colWidth := colWidths[c]
+		if colWidth == collapsedLaneWidth && lane.Collapsed {
+			// A folded lane's programs keep the size they had: squeezing them
+			// to one column would make every TUI in it reflow to garbage, and
+			// opening the lane resizes them back from here anyway.
+			continue
+		}
 
 		// Separate expanded and collapsed panes for height calculation.
 		var expandedPanes []domain.PaneSnapshot
@@ -424,6 +526,7 @@ func (m *Model) syncRawMode() tea.Cmd {
 	// Keep the email-client mode in sync on the same snapshot ticks. An email pane
 	// is never a live-app (raw) pane, so the two transitions never contend.
 	m.syncEmailMode()
+	m.syncCompanyMode()
 	pane := m.findPaneInSnapshot(m.snapshot.ActivePaneID)
 	if pane == nil {
 		return nil

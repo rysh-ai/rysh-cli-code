@@ -114,7 +114,8 @@ type TabSnapshot struct {
 type LaneSnapshot struct {
 	ID           string              `json:"id"`
 	Flex         int                 `json:"flex"`
-	Name         string              `json:"name,omitempty"` // lane name; defaults to the tab's pipeline name
+	Name         string              `json:"name,omitempty"`      // lane name; defaults to the tab's pipeline name
+	Collapsed    bool                `json:"collapsed,omitempty"` // folded to a thin strip; its width goes to the open lanes
 	PaneGroups   []PaneGroupSnapshot `json:"pane_groups"`
 	ActivePaneID string              `json:"active_pane_id"`
 }
@@ -124,7 +125,8 @@ type LaneSnapshot struct {
 type LaneRenderInfo struct {
 	LaneID       string         `json:"lane_id"`
 	Flex         int            `json:"flex"`
-	Name         string         `json:"name,omitempty"` // lane name (effective, with pipeline-name fallback applied)
+	Name         string         `json:"name,omitempty"`      // lane name (effective, with pipeline-name fallback applied)
+	Collapsed    bool           `json:"collapsed,omitempty"` // drawn as a thin strip with the name running down it
 	VisiblePanes []PaneSnapshot `json:"visible_panes"`
 }
 
@@ -137,9 +139,10 @@ func (ts TabSnapshot) FlatLanes() []LaneRenderInfo {
 	var lanes []LaneRenderInfo
 	for _, lane := range ts.Lanes {
 		lr := LaneRenderInfo{
-			LaneID: lane.ID,
-			Flex:   lane.Flex,
-			Name:   lane.Name,
+			LaneID:    lane.ID,
+			Flex:      lane.Flex,
+			Name:      lane.Name,
+			Collapsed: lane.Collapsed,
 		}
 		for _, g := range lane.PaneGroups {
 			for _, flat := range drawnPanesInGroup(g) {
@@ -251,6 +254,11 @@ type PaneSnapshot struct {
 	// query over structure, rather than by rendering each pane's screen and
 	// looking for a TUI's box-drawing characters.
 	Program string `json:"program,omitempty"`
+	// ProgramPGID is the foreground process group of Program, 0 when Program
+	// is empty. A program started from the shell leads its own group, so this
+	// is its pid — which is how the board courier (design 050) finds a claude's
+	// inbox socket, /tmp/cc-socks/<pid>.sock, when no hook has stamped it.
+	ProgramPGID int `json:"program_pgid,omitempty"`
 	// Meta is free-form per-pane metadata owned by whoever is driving the pane
 	// (`##pane meta`). rysh never interprets it; it persists it, so a
 	// supervisor's notes about a pane outlive the supervisor.

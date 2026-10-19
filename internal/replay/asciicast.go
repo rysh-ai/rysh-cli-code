@@ -6,8 +6,10 @@
 //
 // This package provides the asciicast v2 writer (pure), an in-session output
 // Capture, and JetStream-backed durable capture (durable.go): a per-session
-// stream on the pane output subject so export survives a daemon restart. Full
-// scrubbing playback into a read-only replay pane is a later increment.
+// stream on the pane output subject so export survives a daemon restart.
+// Playback (player.go) replays a recording into a dedicated read-only replay
+// pane with pause, seek and speed controls; its REPLAY badge shows a position
+// bar and the wall-clock time of the current frame.
 package replay
 
 import (

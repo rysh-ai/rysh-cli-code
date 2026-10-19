@@ -29,12 +29,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/browserinstance"
 	"github.com/rysh-ai/rysh-cli-code/internal/cdp"
+	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 )
 
 // webPaneFrameInterval is how often a live server-side pane pushes a frame
@@ -252,28 +254,86 @@ func (w *webPaneSession) close() {
 	}
 }
 
+// A server-side browser used to live until an explicit webpane_close or the
+// web server stopping — and no client sends webpane_close (remounts must not
+// relaunch the page), so deleting the pane or closing every browser tab left a
+// headless Chromium and this loop running for the life of the daemon (F-71).
+// The loop now ends its session when the pane is gone, or when no stream
+// client has been connected for webPaneIdleTimeout. Both are safe: clients
+// re-send webpane_open on every mount and reconnect, which relaunches it, and
+// the profile directory keeps cookies across the relaunch.
+const (
+	webPaneIdleTimeout = 10 * time.Minute
+	webPaneCheckEvery  = 30 * time.Second
+)
+
 // webPaneFrameLoop pushes a frame roughly once a second while any stream
-// client is connected, until the session closes.
+// client is connected, until the session closes or is reaped.
 func (s *Server) webPaneFrameLoop(ctx context.Context, sess *webPaneSession) {
 	ticker := time.NewTicker(webPaneFrameInterval)
 	defer ticker.Stop()
+	lastViewer := time.Now()
+	lastCheck := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case now := <-ticker.C:
 			sess.mu.Lock()
 			gone := sess.browser == nil
 			sess.mu.Unlock()
 			if gone {
 				return
 			}
+			if now.Sub(lastCheck) >= webPaneCheckEvery {
+				lastCheck = now
+				if reason := s.webPaneReapReason(sess.paneID, now.Sub(lastViewer)); reason != "" {
+					slog.Info("webpane: closing server-side browser", "pane", sess.paneID, "reason", reason)
+					s.webPaneCloseSession(sess)
+					return
+				}
+			}
 			if !s.hub.hasStream() {
 				continue
 			}
+			lastViewer = now
 			s.pushWebPaneFrame(sess)
 		}
 	}
+}
+
+// webPaneReapReason reports why a pane's server-side browser should close, or
+// "" to keep it. A snapshot with a Partial tab cannot prove the pane is gone.
+func (s *Server) webPaneReapReason(paneID string, unwatched time.Duration) string {
+	if unwatched >= webPaneIdleTimeout {
+		return "no viewer"
+	}
+	snap := s.snapshotMessageStructural()
+	if snap == nil {
+		return ""
+	}
+	for _, t := range snap.Tabs {
+		if t.Partial {
+			return ""
+		}
+	}
+	for p := range domain.PanesInWorkspace(snap) {
+		if p.ID == paneID {
+			return ""
+		}
+	}
+	return "pane closed"
+}
+
+// webPaneCloseSession closes sess and forgets it, unless the pane has since
+// been reopened onto a different session.
+func (s *Server) webPaneCloseSession(sess *webPaneSession) {
+	s.webPaneMu.Lock()
+	if s.webPanes[sess.paneID] == sess {
+		delete(s.webPanes, sess.paneID)
+	}
+	s.webPaneMu.Unlock()
+	sess.close()
 }
 
 // pushWebPaneFrame captures url/title + a JPEG screenshot and broadcasts a

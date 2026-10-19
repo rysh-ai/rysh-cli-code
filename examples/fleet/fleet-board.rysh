@@ -1,0 +1,145 @@
+#!/usr/bin/env rysh-script
+#
+# A three-pane fleet with a board of its own: register -> board -> tail.
+#
+#   rysh create demo -d
+#   rysh script examples/fleet/fleet-board.rysh --session demo
+#   rysh board tail --fleet demo-fleet --session demo     # read it back any time
+#
+# Or in a throwaway session that is gone when the script ends:
+#
+#   rysh script examples/fleet/fleet-board.rysh --ephemeral
+#
+# Run it against a FRESH session, one pane and nothing else: it refuses a
+# session with other panes in the lane, and a fleet name that is already
+# registered. Pass a different name as the first argument to run it again.
+# No provider key is needed. The panes run plain shells, and each one posts to
+# the fleet's board as itself. The agent version of the same shape is at the
+# bottom of this file.
+#
+# What a fleet is, in the terms this script uses:
+#
+#   * a NAME in the session's fleet registry. Registering opens no panes.
+#   * a BOARD. A fleet's board is named after it, so its stream is separate
+#     from the session's own board.
+#   * MEMBERS, which are ordinary panes with a role and a label attached.
+#
+# Everything here is one session on one machine.
+
+set -euo pipefail
+
+FLEET="${1:-demo-fleet}"
+ROLES=(lead worker worker)
+LABELS=(lead worker-a worker-b)
+
+# ---------------------------------------------------------------------------
+# 1. Register the fleet, with a board of its own.
+# ---------------------------------------------------------------------------
+
+# Refuse before changing anything. Step 4 fans out to the whole lane, so the
+# lane must hold the session's one starting pane and nothing else, or other
+# panes would post to this fleet's board too.
+##pane list
+# Count pane rows ("[1] name  id=..."), not every id: the header line that
+# names the tab carries an id too.
+lane_panes=$(printf '%s\n' "${RYSH_OUT:-}" | grep -c '\[[0-9]*\].*id=[0-9a-f-]\{36\}' || true)
+if [[ -n "${RYSH_SCRIPT_VERSION:-}" && "$lane_panes" -ne 1 ]]; then
+  echo "expected 1 pane in the lane, found $lane_panes; run this in a fresh session" >&2
+  exit 1
+fi
+
+# `rysh fleet show` exits 0 either way; its JSON lists the fleet only if it exists.
+if [[ -n "${RYSH_SCRIPT_VERSION:-}" ]] && rysh fleet show "$FLEET" --json | grep -q "\"name\": \"$FLEET\""; then
+  echo "fleet $FLEET is already registered; pass another name as the first argument" >&2
+  exit 1
+fi
+
+echo "== registering fleet $FLEET =="
+##fleet register $FLEET --board $FLEET
+
+# ---------------------------------------------------------------------------
+# 2. Three panes in one stack, one per member.
+#
+# `##new stack 2` puts two more panes under the one the session started with.
+# `##pane list` prints ids, and bash picks the three newest out of the text.
+# ---------------------------------------------------------------------------
+
+##new stack 2
+##pane list
+IDS=()
+while IFS= read -r id; do
+  IDS+=("$id")
+done < <(printf '%s\n' "${RYSH_OUT:-}" | grep -o 'id=[0-9a-f-]\{36\}' | sed 's/^id=//' | tail -n 3)
+
+if [[ -n "${RYSH_SCRIPT_VERSION:-}" && ${#IDS[@]} -ne 3 ]]; then
+  echo "expected 3 panes after the stack, found ${#IDS[@]}" >&2
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Make them members: a role, a label, and the pane's name.
+# ---------------------------------------------------------------------------
+
+i=0
+for id in ${IDS[@]+"${IDS[@]}"}; do
+  : ##pane name "$id" "${LABELS[$i]}" || echo "  (name ${LABELS[$i]} is taken in this lane; keeping the old one)"
+  rysh fleet member add "$FLEET" --pane "$id" --role "${ROLES[$i]}" --label "${LABELS[$i]}"
+  i=$((i + 1))
+done
+##fleet state $FLEET up
+##fleet show $FLEET
+
+# ---------------------------------------------------------------------------
+# 4. Every member posts to the fleet's board, from its own pane.
+#
+# ##cmd types the command into each pane of the lane. Inside a pane, $RYSH_PANE
+# is that pane's id, so each post is signed by the pane that made it and not
+# by this script.
+# ---------------------------------------------------------------------------
+
+since=$(( $(date +%s) * 1000 ))
+##cmd lane rysh board post --fleet $FLEET -- 'ready'
+
+# ---------------------------------------------------------------------------
+# 5. Read the fleet's board back.
+#
+# The posts arrive asynchronously, one per pane, so wait for them. Only posts
+# newer than the fan-out count. The wait is bounded, and a board that never
+# fills is a failure, not a hang.
+# ---------------------------------------------------------------------------
+
+if [[ -n "${RYSH_SCRIPT_VERSION:-}" ]]; then
+  posts=0
+  for _ in $(seq 1 30); do
+    posts=$(rysh board tail --fleet "$FLEET" --since "$since" --json | grep -o '"ready"' | wc -l | tr -d ' ')
+    [[ "$posts" -ge 3 ]] && break
+    sleep 1
+  done
+  if [[ "$posts" -lt 3 ]]; then
+    echo "only $posts of 3 members posted to board $FLEET" >&2
+    exit 1
+  fi
+  rysh board tail --fleet "$FLEET"
+  echo "== fleet $FLEET: 3 members, 3 posts on its board =="
+else
+  echo "== plain bash: the ## lines were comments, so no fleet was built =="
+fi
+
+# ---------------------------------------------------------------------------
+# The same shape with agents in it.
+#
+# Nothing below runs. It is the next step, typed by hand, and it needs the
+# claude (or codex) CLI installed.
+#
+#   In each member pane, in rysh mode:     ##claude        (or ##codex)
+#   Tell each one its role and that it reports with:
+#       rysh board post --fleet demo-fleet -- '<what I finished>'
+#   From the lead, hand a worker a task:
+#       rysh ansa prompt @worker-a -- 'build the parser; post on the board when done'
+#   Watch it from outside the session:
+#       rysh board tail --fleet demo-fleet --session demo
+#
+# Orders go to a pane as prompts, and results come back on the board.
+#
+#   ##fleet forget demo-fleet     drop the registration; the panes keep running
+# ---------------------------------------------------------------------------
