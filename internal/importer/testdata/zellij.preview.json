@@ -1,0 +1,57 @@
+{
+  "source": "zellij",
+  "name": "web",
+  "inputs": [
+    "testdata/zellij"
+  ],
+  "tabs": [
+    {
+      "name": "code",
+      "lanes": [
+        {
+          "panes": [
+            {
+              "cwd": "$HOME/src/web",
+              "command": "nvim ."
+            }
+          ]
+        },
+        {
+          "panes": [
+            {
+              "cwd": "$HOME/src/web/frontend",
+              "command": "npm run dev"
+            },
+            {
+              "name": "scratch",
+              "cwd": "$HOME/src/web"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "logs",
+      "lanes": [
+        {
+          "panes": [
+            {
+              "cwd": "/var/log",
+              "command": "tail -f 'system log.txt'"
+            },
+            {
+              "cwd": "/var/log",
+              "command": "${EDITOR:-vi} notes.md"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "notes": [
+    "tab \"logs\": a plugin pane was skipped (rysh has no Zellij plugins)"
+  ],
+  "writes": [
+    ".rysh/imports/zellij-web.rysh"
+  ]
+}

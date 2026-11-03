@@ -96,6 +96,14 @@ func (w *WorkspaceActor) handleWebAuth(out *strings.Builder, args []string) {
 
 	switch {
 	case parsed.Clear:
+		// A running UI outside control mode needs its login: without one it
+		// refuses everyone, which reads as broken. Refuse here instead, before
+		// anything is removed. Control mode's own loopback door needs no login.
+		if w.webServer != nil && w.webServer.IsRunning() && !w.webServer.ControlEnabled() {
+			fmt.Fprintf(out, "\n[rysh] the web UI is running and needs its login — stop it first (##rysh web stop), then clear the login\n")
+			w.failRysh("web login not cleared: the web UI is running")
+			return
+		}
 		removed, err := web.ClearCredentialsFor(w.credentialsRef())
 		if err != nil {
 			fmt.Fprintf(out, "\n[rysh] %v\n", err)
@@ -103,8 +111,8 @@ func (w *WorkspaceActor) handleWebAuth(out *strings.Builder, args []string) {
 			return
 		}
 		// Applied to the live server too, so the login stops working now
-		// rather than at the next restart. Removing a gate never locks anyone
-		// out, so this needs no control-mode exception.
+		// rather than at the next restart. Only reached when the server is
+		// stopped or in control mode (refused above otherwise).
 		if w.webServer != nil {
 			w.webServer.SetCredentials(nil)
 		}

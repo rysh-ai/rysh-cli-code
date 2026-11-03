@@ -107,7 +107,8 @@ func NewTeamsAdapter(config msg.ChannelConfig) *TeamsAdapter {
 	}
 	port := defaultTeamsWebhookPort
 	if s := strings.TrimSpace(config.WebhookPort); s != "" {
-		if p, err := strconv.Atoi(s); err == nil && p > 0 {
+		// "0" = any free port (LocalWebhookURL reports the one bound).
+		if p, err := strconv.Atoi(s); err == nil && p >= 0 {
 			port = p
 		}
 	}
@@ -179,6 +180,11 @@ func (t *TeamsAdapter) Start(ctx context.Context) error {
 		t.setState(false, err.Error())
 		return fmt.Errorf("teams: messaging endpoint listen on %s: %w", addr, err)
 	}
+	if tcp, ok := ln.Addr().(*net.TCPAddr); ok {
+		t.mu.Lock()
+		t.port = tcp.Port
+		t.mu.Unlock()
+	}
 
 	mux := http.NewServeMux()
 	// Mount at the root so the operator can map any external path (Azure's
@@ -209,6 +215,14 @@ func (t *TeamsAdapter) Start(ctx context.Context) error {
 		"webhook_port", t.port,
 		"known_conversations", len(t.serviceURLs))
 	return nil
+}
+
+// LocalWebhookURL is the messaging endpoint on this host, once Start has bound
+// it (the operator's tunnel forwards Azure's Messaging Endpoint here).
+func (t *TeamsAdapter) LocalWebhookURL() string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return fmt.Sprintf("http://127.0.0.1:%d/", t.port)
 }
 
 // checkConfig reports the first missing credential, naming the skill-file key.
@@ -437,6 +451,10 @@ func (t *TeamsAdapter) activityToInbound(act teamsActivity) (InboundMessage, boo
 	}
 	if mention {
 		metadata["mention"] = "true"
+	}
+	if strings.EqualFold(act.Conversation.ConversationType, "personal") {
+		// A 1:1 chat with the bot is a DM (E33 G1).
+		tagDirectMessage(metadata)
 	}
 	if replyMode == "mentions" && !mention {
 		// Non-mention in mentions-only mode: forward as observe_only so the

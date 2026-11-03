@@ -8,8 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
-	"path/filepath"
+	"github.com/rysh-ai/rysh-cli-code/internal/web"
 	"strconv"
 	"strings"
 	"time"
@@ -86,7 +85,8 @@ func paneShellEnv() []string {
 		case strings.HasPrefix(kv, "RYSH_WEB_CONTROL="),
 			strings.HasPrefix(kv, "RYSH_WEB_AUTO_START="),
 			strings.HasPrefix(kv, "RYSH_WEB_PORT="),
-			strings.HasPrefix(kv, "RYSH_WEB_HOST="):
+			strings.HasPrefix(kv, "RYSH_WEB_HOST="),
+			strings.HasPrefix(kv, web.EnvControlSecretFile+"="):
 			continue
 		}
 		kept = append(kept, kv)
@@ -143,23 +143,19 @@ func (p *PaneActor) startShell() {
 	// user's rc files (~/.bashrc, ~/.zshrc) — making aliases, functions, shell
 	// options, and the user's real prompt available, just like a normal
 	// terminal. In legacy mode the shell is launched plainly and rysh forces a
-	// minimal "$ " prompt that it then strips from the output.
-	var cmd *exec.Cmd
-	if p.cfg.InteractiveShell {
-		cmd = exec.Command(p.cfg.DefaultShell, "-i")
-	} else {
-		cmd = exec.Command(p.cfg.DefaultShell)
-	}
-	cmd.Env = append(paneShellEnv(),
+	// minimal "$ " prompt that it then strips from the output. The argv and the
+	// prompt settings are per-OS (paneShellCommand); extras is what every pane
+	// shell gets on top of the inherited environment.
+	extras := []string{
 		"BASH_SILENCE_DEPRECATION_WARNING=1",
 		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
 		"COLORFGBG=15;0",
-	)
+	}
 	// Tell the program in the pane WHICH pane it is in. Appended after the
 	// inherited environment so a value carried in from an outer session cannot
 	// make a pane claim to be its parent.
-	cmd.Env = append(cmd.Env,
+	extras = append(extras,
 		paneIdentityEnv(p.cfg.SessionName, p.tabID, p.laneID, p.groupID, p.id)...)
 	// Governance proxy (design 001): when the loopback proxy is running, route
 	// this pane's third-party-CLI provider traffic through it by base-URL env
@@ -171,7 +167,7 @@ func (p *PaneActor) startShell() {
 		if srv := proxy.Current(); srv != nil {
 			srv.NotePane(p.id)
 		}
-		cmd.Env = append(cmd.Env,
+		extras = append(extras,
 			"ANTHROPIC_BASE_URL="+base+"/anthropic/"+p.id,
 			"OPENAI_BASE_URL="+base+"/openai/"+p.id,
 			"GEMINI_BASE_URL="+base+"/gemini/"+p.id,
@@ -190,7 +186,7 @@ func (p *PaneActor) startShell() {
 				{"gemini", "GEMINI_API_KEY"},
 			} {
 				if p.cfg.ProxyKeyFor(d.dialect) != "" {
-					cmd.Env = append(cmd.Env, d.env+"="+config.ProxyDummyKey)
+					extras = append(extras, d.env+"="+config.ProxyDummyKey)
 				}
 			}
 		}
@@ -199,37 +195,23 @@ func (p *PaneActor) startShell() {
 		// around the proxy entirely — so an opted-in CLI gets the extra
 		// environment that actually forces it through. Opt-in because the
 		// adapter can change how the CLI authenticates.
-		cmd.Env = append(cmd.Env, p.proxyAdapterEnv(base)...)
-	}
-	if p.cfg.InteractiveShell && strings.Contains(filepath.Base(p.cfg.DefaultShell), "bash") {
-		// OSC 7 cwd reporting: bash emits its working directory before every
-		// prompt; rawReadLoop parses it (osc7Scanner) so tab-completion and
-		// the shell prompt always know the live cwd — push-based and exact,
-		// unlike the lsof/proc polling fallback. Best-effort: a bashrc that
-		// overwrites PROMPT_COMMAND silently disables it (fallback remains).
-		cmd.Env = append(cmd.Env,
-			`PROMPT_COMMAND=printf '\033]7;file://%s%s\033\\' "$HOSTNAME" "$PWD"`)
-	}
-	if !p.cfg.InteractiveShell {
-		// Legacy: force a minimal prompt because rysh synthesizes its own
-		// "$ <cmd>" echo and strips PTY prompt lines. In interactive mode we
-		// leave PS1 untouched so the user's real prompt shows through.
-		cmd.Env = append(cmd.Env, "PS1=$ ")
+		extras = append(extras, p.proxyAdapterEnv(base)...)
 	}
 
 	// Start the pane's shell in the configured working directory. If the
 	// directory is unset or invalid, fall back to the daemon's working
-	// directory (cmd.Dir == "").
+	// directory (dir == "").
+	var dir string
 	if wd := strings.TrimSpace(p.cfg.WorkingDirectory); wd != "" {
 		if info, err := os.Stat(wd); err == nil && info.IsDir() {
-			cmd.Dir = wd
+			dir = wd
 			// Also export PWD=wd so the shell reports the CONFIGURED path, not the
-			// symlink-resolved one. cmd.Dir performs a chdir, whose physical cwd is
+			// symlink-resolved one. The start's chdir, whose physical cwd is
 			// the resolved target (e.g. "rysh-ai" -> "agentic-zellij"); without a
 			// matching PWD, bash recomputes it via getcwd() and shows the target.
 			// Setting PWD to wd mirrors how an interactive `cd <symlink>` keeps the
 			// logical path. Appended last so it overrides the inherited PWD.
-			cmd.Env = append(cmd.Env, "PWD="+wd)
+			extras = append(extras, "PWD="+wd)
 		}
 	}
 
@@ -245,7 +227,18 @@ func (p *PaneActor) startShell() {
 		return
 	}
 
-	f, err := pty.Start(cmd)
+	// Initial terminal size (default 80x24, will be updated by TUI resize).
+	p.ptyRows = 24
+	p.ptyCols = 80
+
+	argv, env, err := paneShellCommand(p.cfg.DefaultShell, p.cfg.InteractiveShell, extras)
+	var f paneTerm
+	var proc paneShellProc
+	if err == nil {
+		f, proc, err = startPaneShell(paneShellSpec{
+			Argv: argv, Env: env, Dir: dir, Rows: p.ptyRows, Cols: p.ptyCols,
+		})
+	}
 	if err != nil {
 		errText := fmt.Sprintf("failed to start shell: %v\n", err)
 		p.appendOutput(errText)
@@ -253,28 +246,15 @@ func (p *PaneActor) startShell() {
 		p.status = "error"
 		return
 	}
-	// Pollable, so read deadlines and Close reach a pending Read (F-68).
-	f = pollablePTY(f)
 	p.ptyFile = f
-	p.cmd = cmd
-	// Reap the shell. Nothing else ever Waits on it, so every shell that
-	// exited — a closed pane, an `exit`, a pane actor restart — stayed a
-	// zombie, holding its pidfd, for the rest of the daemon's life (a 45-day
-	// daemon had seven). Kill in stopShell is still safe after this returns.
-	go func() { _ = cmd.Wait() }()
-	if cmd.Process != nil {
-		// pty.Start runs the shell with Setsid, so it leads its own process
-		// group. Record it to detect when foreground commands are running.
-		p.shellPgid = processPgid(cmd.Process.Pid)
-		// Publish the PID for the agentic cwd resolver (lock-free cross-goroutine
-		// read) so AI-mode tools can follow the shell's cwd after a `cd`.
-		p.shellPIDAtomic.Store(int64(cmd.Process.Pid))
-	}
-
-	// Initialize PTY size (default 80x24, will be updated by TUI resize).
-	p.ptyRows = 24
-	p.ptyCols = 80
-	_ = setPTYSize(f, &pty.Winsize{Rows: p.ptyRows, Cols: p.ptyCols})
+	p.shellProc = proc
+	// On Unix pty.Start runs the shell with Setsid, so it leads its own process
+	// group; on Windows the "group" is the shell's pid. Record it to detect when
+	// foreground commands are running.
+	p.shellPgid = processPgid(proc.Pid())
+	// Publish the PID for the agentic cwd resolver (lock-free cross-goroutine
+	// read) so AI-mode tools can follow the shell's cwd after a `cd`.
+	p.shellPIDAtomic.Store(int64(proc.Pid()))
 
 	// Initialize virtual terminal emulator.
 	p.vtermEmu = vterm.NewWithWriter(int(p.ptyRows), int(p.ptyCols), terminalResponseWriter{
@@ -300,6 +280,7 @@ func (p *PaneActor) startShell() {
 		}
 		if p.ptyFile != nil && len(m.Data) > 0 {
 			_, _ = p.ptyFile.Write(m.Data)
+			p.lastInputNano.Store(time.Now().UnixNano())
 		}
 	})
 
@@ -307,6 +288,7 @@ func (p *PaneActor) startShell() {
 	// is local so a later startShell cannot race with this one's goroutines.
 	foregroundStop := make(chan struct{})
 	go p.watchForeground(f, foregroundStop)
+	go p.watchAttention(p.vtermEmu, foregroundStop)
 	go func() {
 		p.rawReadLoop(f)
 		close(foregroundStop)
@@ -324,8 +306,8 @@ func (p *PaneActor) stopShell() {
 		_ = p.ptyFile.Close()
 		p.ptyFile = nil
 	}
-	if p.cmd != nil && p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
+	if p.shellProc != nil {
+		_ = p.shellProc.Kill()
 	}
 	// Clear the published PID so the cwd resolver falls back to the startup dir
 	// rather than probing a dead (or recycled) PID.
@@ -516,7 +498,8 @@ func (p *PaneActor) rawReadLoop(r io.Reader) {
 	// toggles cursor visibility rather than the alt screen) leaves the pane
 	// stuck in raw mode rendering the shell's redrawn PS1 until the next
 	// keystroke, instead of snapping back to the rysh pane prompt. The PTY is
-	// an *os.File, whose read deadline is supported on Unix; if r does not
+	// a pollable *os.File on Unix and a ConPTY console whose output pipe is
+	// overlapped on Windows, and both support read deadlines; if r does not
 	// support it we fall back to the (event-driven) behaviour.
 	type readDeadliner interface{ SetReadDeadline(time.Time) error }
 	rd, canDeadline := r.(readDeadliner)
@@ -555,8 +538,8 @@ func (p *PaneActor) rawReadLoop(r io.Reader) {
 	// gives no terminal signal, but it rewrites the screen in place (moves the
 	// cursor up), whereas ls/make/cat only append. All state here is local to
 	// this goroutine. p.shellPgid is set before the goroutine starts, so
-	// reading it is safe; ptyFile is the same *os.File passed in as r.
-	ptyFile, _ := r.(*os.File)
+	// reading it is safe; term is the same paneTerm passed in as r.
+	term, _ := r.(paneTerm)
 	lastFg := -2
 	fgRedrew := false
 
@@ -569,6 +552,7 @@ func (p *PaneActor) rawReadLoop(r io.Reader) {
 		n, err := r.Read(buf)
 		if n > 0 {
 			chunk := buf[:n]
+			p.lastOutputNano.Store(time.Now().UnixNano())
 
 			if cwd, ok := osc7.feed(chunk); ok {
 				p.shellCwdAtomic.Store(cwd)
@@ -577,8 +561,8 @@ func (p *PaneActor) rawReadLoop(r io.Reader) {
 			// Determine the current foreground program; reset the redraw flag
 			// whenever it changes (new program, or back to the shell).
 			fg := -1
-			if ptyFile != nil {
-				fg = foregroundPgrp(ptyFile)
+			if term != nil {
+				fg = foregroundPgrp(term)
 			}
 			childFg := fg > 0 && p.shellPgid > 0 && fg != p.shellPgid
 			if fg != lastFg {
@@ -1078,10 +1062,19 @@ func (p *PaneActor) releasePaneSize(clientID string) {
 // than the PTY has to truncate or wrap it — which turns a full-screen app's
 // display into garbage. Sizing to the minimum is the only choice where every
 // attached viewport can render what the PTY produces.
+//
+// A terminal UI nobody is typing into is not counted while another one is in
+// use (see idleViewportClaims): a window left open on another screen would
+// otherwise hold the pane to its size for as long as it stays attached.
 func (p *PaneActor) effectivePaneSize() (rows, cols int, ok bool) {
 	p.pruneDeadSizeClaims()
+	idle := p.idleViewportClaims()
+	p.sizeIdle = idle
 
-	for _, c := range p.sizeClaims {
+	for id, c := range p.sizeClaims {
+		if idle[id] {
+			continue
+		}
 		if rows == 0 || c.rows < rows {
 			rows = c.rows
 		}
@@ -1093,6 +1086,72 @@ func (p *PaneActor) effectivePaneSize() (rows, cols int, ok bool) {
 		return 0, 0, false
 	}
 	return rows, cols, true
+}
+
+// viewportIdleWindow is how far a terminal UI's last keystroke may trail the
+// most recent one among the pane's other terminal UIs before its claim stops
+// counting. It is a margin, not a timeout: the terminal UI typed into most
+// recently always counts, however long ago that was, so a pane being watched
+// without typing keeps its size. 15s clears Linux's 8s tty-timestamp
+// granularity and bounds how long a pane waits to grow back after the user
+// moves from a small window to a large one.
+const viewportIdleWindow = 15 * time.Second
+
+// idleViewportClaims returns the "tui:<pid>" claims whose terminal has had no
+// input for viewportIdleWindow longer than the pane's most recently used one.
+//
+// Smallest-wins assumes every viewport is being looked at. A terminal UI left
+// attached in a window nobody uses — a Terminal.app window on the Mac mini's
+// own screen while the user works over ssh — broke that: every pane it showed
+// was held to its 120x30 layout (46x11) inside a 287x73 window. Like tmux's
+// window-size latest, the size follows the terminal in use; unlike it, two
+// terminals both typed into within the window still get the smallest of the
+// two, so two people at two screens keep a grid both can render.
+//
+// Input time is the controlling tty's access time (ttyLastInput), which the
+// kernel bumps when the terminal UI reads a keystroke — what `w` prints as
+// IDLE. It needs nothing from the client, so terminal UIs of any version are
+// covered. Web claims and anonymous claims are never idle: the daemon cannot
+// see their input, and they keep the smallest-wins rule exactly as before. A
+// terminal UI whose tty cannot be read counts as in use, for the same reason.
+func (p *PaneActor) idleViewportClaims() map[string]bool {
+	if len(p.sizeClaims) < 2 {
+		return nil
+	}
+	lastInput := p.viewportLastInput
+	if lastInput == nil {
+		lastInput = ttyLastInput
+	}
+	inputs := make(map[string]time.Time, len(p.sizeClaims))
+	var newest time.Time
+	for id := range p.sizeClaims {
+		pidStr, ok := strings.CutPrefix(id, tuiClaimPrefix)
+		if !ok {
+			continue
+		}
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil || pid <= 0 {
+			continue
+		}
+		at, ok := lastInput(pid)
+		if !ok {
+			continue
+		}
+		inputs[id] = at
+		if at.After(newest) {
+			newest = at
+		}
+	}
+	var idle map[string]bool
+	for id, at := range inputs {
+		if newest.Sub(at) > viewportIdleWindow {
+			if idle == nil {
+				idle = make(map[string]bool, len(inputs))
+			}
+			idle[id] = true
+		}
+	}
+	return idle
 }
 
 // paneSizeSettleWindow is how long a NARROWING is held before it reaches the
@@ -1221,6 +1280,12 @@ const sizeClaimReapInterval = 2 * time.Second
 // a resize when ITS layout changes, and a terminal dying elsewhere does not
 // change the app's layout.
 //
+// The same goes for a viewport that is alive but no longer used: typing in
+// another terminal UI sends no claim, so the sweep also re-runs the
+// arbitration when the set of idle terminal UIs has changed since the last one
+// (see idleViewportClaims). Only then: an Override resize stands until the
+// claim set really moves.
+//
 // It is skipped below two claims because that is the only case where a stale
 // claim changes the answer: with one claim there is nothing else to fall back
 // to, and dropping it would resize the pane for no viewport at all.
@@ -1236,9 +1301,22 @@ func (p *PaneActor) reapStaleSizeClaims() {
 
 	before := len(p.sizeClaims)
 	p.pruneDeadSizeClaims()
-	if len(p.sizeClaims) != before {
+	if len(p.sizeClaims) != before || !sameClaimIDs(p.idleViewportClaims(), p.sizeIdle) {
 		p.applyEffectivePaneSize()
 	}
+}
+
+// sameClaimIDs reports whether two claim-id sets hold the same ids.
+func sameClaimIDs(a, b map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for id := range a {
+		if !b[id] {
+			return false
+		}
+	}
+	return true
 }
 
 // pruneDeadSizeClaims drops claims whose owner is provably gone.

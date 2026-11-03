@@ -11,8 +11,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 
@@ -38,7 +40,16 @@ type DiscordAdapter struct {
 	// allowedChannels is the channel-ID allow list built from config.Channels.
 	// An empty map means all channels are allowed (same semantics as Slack).
 	allowedChannels map[string]bool
+	// apiBase is the REST root Validate calls, overridable in tests so no
+	// test ever talks to the real discord.com.
+	apiBase string
+	// apiClient serves the non-binding Validate REST calls only; the Gateway
+	// session has its own transport inside discordgo.
+	apiClient *http.Client
 }
+
+// discordAPIBase is the production REST endpoint (API v10).
+const discordAPIBase = "https://discord.com/api/v10"
 
 // NewDiscordAdapter creates a Discord channel adapter from the config.
 func NewDiscordAdapter(config msg.ChannelConfig) *DiscordAdapter {
@@ -46,10 +57,16 @@ func NewDiscordAdapter(config msg.ChannelConfig) *DiscordAdapter {
 	if rm == "" {
 		rm = "messages"
 	}
+	apiBase := discordAPIBase
+	if b := strings.TrimSpace(config.APIBase); b != "" {
+		apiBase = strings.TrimSuffix(b, "/") + "/api/v10"
+	}
 	return &DiscordAdapter{
 		config:    config,
 		inbound:   make(chan InboundMessage, 100),
 		replyMode: rm,
+		apiBase:   apiBase,
+		apiClient: &http.Client{Timeout: 15 * time.Second},
 	}
 }
 
@@ -73,10 +90,22 @@ func (d *DiscordAdapter) Start(ctx context.Context) error {
 	if d.config.BotToken == "" {
 		return fmt.Errorf("discord: bot_token is required")
 	}
+	if err := ValidateDiscordChannelIDs(d.config.Channels); err != nil {
+		return err
+	}
 
 	dg, err := discordgo.New("Bot " + d.config.BotToken)
 	if err != nil {
 		return fmt.Errorf("discord: create session: %w", err)
+	}
+	// api_base (gap05): REST and Gateway discovery go to another root — a
+	// local fake platform in tests. Production (empty) is untouched.
+	if base := strings.TrimSpace(d.config.APIBase); base != "" {
+		rt, err := newDiscordAPIBaseTransport(base, nil)
+		if err != nil {
+			return fmt.Errorf("discord: %w", err)
+		}
+		dg.Client = &http.Client{Timeout: 20 * time.Second, Transport: rt}
 	}
 
 	// MessageContent is a privileged intent — without it m.Content arrives
@@ -88,11 +117,9 @@ func (d *DiscordAdapter) Start(ctx context.Context) error {
 
 	// Build the channel-ID allow list. Empty list = allow all channels,
 	// mirroring Slack's filter semantics. Discord config carries numeric
-	// channel IDs (no name resolution needed, unlike Slack channel names).
-	allowed := make(map[string]bool)
-	for _, ch := range d.config.Channels {
-		allowed[strings.TrimSpace(ch)] = true
-	}
+	// channel IDs (no name resolution, unlike Slack channel names); names
+	// were refused above, before any connection.
+	allowed := discordAllowedChannels(d.config.Channels)
 
 	// Register handlers before Open so no early events are missed.
 	dg.AddHandler(d.onMessageCreate)
@@ -277,11 +304,14 @@ func discordInboundToMessage(m *discordgo.MessageCreate, botID string, allowed m
 	// mention=true; in mentions-only mode a non-mention is still forwarded
 	// but tagged observe_only=true so the HumanoidActor can echo it to the
 	// external buffer without triggering the LLM.
+	// A message with no guild is a 1:1 DM and is addressed by definition
+	// (direct_message.go).
 	isMention := containsDiscordMention(m.Content, botID)
 	if isMention {
 		metadata["mention"] = "true"
 	}
-	if replyMode == "mentions" && !isMention {
+	addressedDM := m.GuildID == "" && tagDirectMessage(metadata)
+	if replyMode == "mentions" && !isMention && !addressedDM {
 		metadata["observe_only"] = "true"
 	}
 
@@ -295,6 +325,38 @@ func discordInboundToMessage(m *discordgo.MessageCreate, botID string, allowed m
 		ThreadID: m.ChannelID,
 		Metadata: metadata,
 	}, ""
+}
+
+// discordAllowedChannels builds the channel-ID allow list from config
+// entries. An empty map admits every channel.
+func discordAllowedChannels(entries []string) map[string]bool {
+	allowed := make(map[string]bool)
+	for _, ch := range entries {
+		if c := strings.TrimSpace(ch); c != "" {
+			allowed[c] = true
+		}
+	}
+	return allowed
+}
+
+// ValidateDiscordChannelIDs refuses allow-list entries that are not numeric
+// channel ids. Discord compares raw ids, so "#support" or "general" would be
+// accepted and then match nothing — every message dropped, nothing said.
+func ValidateDiscordChannelIDs(entries []string) error {
+	for _, ch := range entries {
+		c := strings.TrimSpace(ch)
+		if c == "" {
+			continue
+		}
+		for _, r := range c {
+			if r < '0' || r > '9' {
+				return fmt.Errorf("discord: channels entry %q is not a channel ID — Discord matches numeric ids only. "+
+					"In Discord: Settings → Advanced → Developer Mode on, then right-click the channel → Copy Channel ID "+
+					"(or leave channels empty: DMs and every channel the bot can see)", c)
+			}
+		}
+	}
+	return nil
 }
 
 // containsDiscordMention reports whether content mentions the bot. Discord
@@ -327,9 +389,9 @@ func splitDiscordMessage(content string) []string {
 	return splitMessage(content, discordMaxMessageLen)
 }
 
-// Send delivers an outbound message to a Discord channel. The recipient is
-// the channel (or thread) ID; when RecipientID is empty it falls back to
-// ThreadID, which HumanoidActor sets from the inbound message.
+// Send delivers an outbound message to a Discord channel. The target is the
+// channel (or thread) ID in ThreadID, which HumanoidActor sets from the
+// inbound message; when ThreadID is empty it falls back to RecipientID.
 func (d *DiscordAdapter) Send(_ context.Context, outbound OutboundMessage) error {
 	d.mu.RLock()
 	dg := d.session
@@ -343,9 +405,12 @@ func (d *DiscordAdapter) Send(_ context.Context, outbound OutboundMessage) error
 		return fmt.Errorf("discord: not connected")
 	}
 
-	target := outbound.RecipientID
+	// ThreadID first: the humanoid sets it to the inbound channel id, while
+	// RecipientID is the author's user id, and Discord posts to channels,
+	// never to user ids (gap05; same order as telegram.go).
+	target := outbound.ThreadID
 	if target == "" {
-		target = outbound.ThreadID
+		target = outbound.RecipientID
 	}
 	if target == "" {
 		return fmt.Errorf("discord: no recipient channel (RecipientID and ThreadID both empty)")

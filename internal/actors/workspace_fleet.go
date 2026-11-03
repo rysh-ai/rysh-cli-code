@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/fleet"
+	"github.com/rysh-ai/rysh-cli-code/internal/fleetboard"
 )
 
 // The `##fleet` verb — the human's window onto the registry (design 028 §6.5).
@@ -34,7 +35,7 @@ import (
 // the lookup.
 const fleetQueryTimeout = 2 * time.Second
 
-// handleFleetCommand is `##fleet list|show|register|forget|state`.
+// handleFleetCommand is `##fleet list|show|board|register|forget|state|status|watch`.
 func (w *WorkspaceActor) handleFleetCommand(out *strings.Builder, paneID string, args []string) error {
 	sub := ""
 	if len(args) > 0 {
@@ -57,6 +58,9 @@ func (w *WorkspaceActor) handleFleetCommand(out *strings.Builder, paneID string,
 		}
 		return w.fleetUpdate(out, fleet.Update{Op: fleet.OpForget, Name: args[1]},
 			fmt.Sprintf("fleet %s forgotten — its panes are untouched and still running\n", args[1]))
+	case "board":
+		// The fleet board: one row per fleet (design 030 W2/W4).
+		return w.fleetBoardText(out)
 	case "status":
 		return w.fleetStatus(out, paneID, args[1:])
 	case "watch":
@@ -71,6 +75,19 @@ func (w *WorkspaceActor) handleFleetCommand(out *strings.Builder, paneID string,
 	default:
 		return w.fleetUsage(out, fmt.Sprintf("unknown ##fleet subcommand: %q", sub))
 	}
+}
+
+// fleetBoardText is `##fleet board`: the FleetBoardActor's rows as text.
+func (w *WorkspaceActor) fleetBoardText(out *strings.Builder) error {
+	reply, err := fleetboard.Ask(w.nc, fleetQueryTimeout)
+	if err != nil {
+		w.failRysh("%v", err)
+		fmt.Fprintf(out, "##fleet board: %v\nthe fleet board is kept by the session daemon; a daemon older "+
+			"than this build has none\n", err)
+		return err
+	}
+	out.WriteString(fleetboard.RenderText(reply))
+	return nil
 }
 
 func (w *WorkspaceActor) fleetList(out *strings.Builder) error {
@@ -233,6 +250,7 @@ func (w *WorkspaceActor) fleetUsage(out *strings.Builder, why string) error {
 	fmt.Fprintf(out, "%s\n", why)
 	out.WriteString("  ##fleet list                      the fleets this session knows about\n")
 	out.WriteString("  ##fleet show <name>               one fleet and its members\n")
+	out.WriteString("  ##fleet board                     the fleet board: one row per fleet (health, status)\n")
 	out.WriteString("  ##fleet register <name> [--board <id>] [--source <path>] [--roadmap <dir>] [--tab <id>]\n")
 	out.WriteString("  ##fleet state <name> registered|up|down\n")
 	out.WriteString("  ##fleet forget <name>             drop it from the registry (panes keep running)\n")

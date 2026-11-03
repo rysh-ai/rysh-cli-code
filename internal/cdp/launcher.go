@@ -95,6 +95,15 @@ func launchArgs(o LaunchOptions) []string {
 		"--window-size=1280,900",
 		"--remote-allow-origins=*",
 	}
+	if isThrowawayProfile(o.UserDataDir) {
+		// A fresh profile asks the macOS keychain for a "Chrome Safe Storage"
+		// key. From a pane that cannot reach the login keychain, that shows the
+		// "A keychain cannot be found" dialog, once per test launch. A profile
+		// in the temp dir is deleted afterwards, so it has nothing to protect.
+		// Saved profiles keep the real keychain: their cookies were encrypted
+		// with that key, and switching would log the user out.
+		args = append(args, "--use-mock-keychain", "--password-store=basic")
+	}
 	if o.Headless {
 		args = append(args, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--mute-audio")
 		// Container/CI survival flags. Headless-only: a headed launch is a real
@@ -107,6 +116,34 @@ func launchArgs(o LaunchOptions) []string {
 	// the target URL here instead is what made every CDP-injected key repeat
 	// forever (F-46).
 	return append(args, "about:blank")
+}
+
+// isThrowawayProfile reports whether dir sits inside the system temp dir
+// (os.TempDir, symlinks resolved: on macOS /var is /private/var).
+func isThrowawayProfile(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	resolve := func(p string) string {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return ""
+		}
+		if r, err := filepath.EvalSymlinks(abs); err == nil {
+			return r
+		}
+		// The profile dir may not exist yet: resolve its parent instead.
+		if r, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
+			return filepath.Join(r, filepath.Base(abs))
+		}
+		return abs
+	}
+	tmp, d := resolve(os.TempDir()), resolve(dir)
+	if tmp == "" || d == "" {
+		return false
+	}
+	rel, err := filepath.Rel(tmp, d)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // Launch starts Chromium and connects to its DevTools WebSocket. The caller
@@ -156,6 +193,10 @@ func Launch(ctx context.Context, o LaunchOptions) (*Browser, error) {
 	// Chromium prints "DevTools listening on ws://127.0.0.1:PORT/devtools/browser/UUID"
 	// to stderr once the debugging endpoint is up.
 	wsCh := make(chan string, 1)
+	// gone closes when stderr reaches EOF before the DevTools line: Chromium
+	// (and every helper holding its stderr) has exited, so waiting out the
+	// full timeout would only hide the failure.
+	gone := make(chan struct{})
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
@@ -165,22 +206,26 @@ func Launch(ctx context.Context, o LaunchOptions) (*Browser, error) {
 				case wsCh <- strings.TrimSpace(line[idx+len("DevTools listening on "):]):
 				default:
 				}
-				break
+				// Drain the remainder so Chromium never blocks on a full stderr pipe.
+				for scanner.Scan() {
+				}
+				return
 			}
 		}
-		// Drain the remainder so Chromium never blocks on a full stderr pipe.
-		for scanner.Scan() {
-		}
+		close(gone)
 	}()
 
 	var wsURL string
 	select {
 	case wsURL = <-wsCh:
+	case <-gone:
+		killAndReap(cmd)
+		return nil, fmt.Errorf("chromium exited before its DevTools endpoint came up (%s)", filepath.Base(bin))
 	case <-time.After(devtoolsWaitTimeout(o)):
-		_ = cmd.Process.Kill()
+		killAndReap(cmd)
 		return nil, fmt.Errorf("timed out waiting for Chromium DevTools endpoint (%v)", devtoolsWaitTimeout(o))
 	case <-ctx.Done():
-		_ = cmd.Process.Kill()
+		killAndReap(cmd)
 		return nil, ctx.Err()
 	}
 
@@ -220,6 +265,13 @@ func Launch(ctx context.Context, o LaunchOptions) (*Browser, error) {
 		writeHeadlessPidFile(o.UserDataDir, cmd.Process.Pid)
 	}
 	return b, nil
+}
+
+// killAndReap kills a browser that never came up and reaps it, so a failed
+// launch leaves no zombie and its profile is free for a retry.
+func killAndReap(cmd *exec.Cmd) {
+	_ = cmd.Process.Kill()
+	_, _ = cmd.Process.Wait()
 }
 
 // LaunchInteractive starts a HEADED Chromium on the profile directory without

@@ -126,6 +126,7 @@ func newTestTeams(t *testing.T, s *teamsSigner, cfg msg.ChannelConfig) *TeamsAda
 	t.Helper()
 	a := NewTeamsAdapter(cfg)
 	a.auth.openIDConfigURL = s.jwksServer(t).URL + "/openid"
+	allowTeamsLoopbackSeam(t)
 	a.retryBaseDelay = time.Millisecond
 	return a
 }
@@ -737,6 +738,7 @@ func TestTeamsStartFailsOnRejectedCredentials(t *testing.T) {
 
 	a := NewTeamsAdapter(teamsCfg())
 	a.auth.tokenURL = srv.URL
+	allowTeamsLoopbackSeam(t)
 
 	err := a.Start(context.Background())
 	if err == nil {
@@ -761,6 +763,7 @@ func TestTeamsValidateChecksCredentialsWithoutBinding(t *testing.T) {
 
 	a := NewTeamsAdapter(teamsCfg())
 	a.auth.tokenURL = srv.URL
+	allowTeamsLoopbackSeam(t)
 	if err := a.Validate(context.Background()); err != nil {
 		t.Errorf("valid credentials should pass, got %v", err)
 	}

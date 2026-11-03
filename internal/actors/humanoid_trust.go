@@ -141,10 +141,12 @@ func (h *HumanoidActor) replyToInbound(m *msg.MsgHumanoidInboundMessage, text st
 }
 
 // trustAutoApprove releases a held approval under an active grant, reporting
-// what was released. It returns false when no grant is in force, in which case
-// the caller falls back to the normal draft-and-confirm path.
+// what was released. It returns false when no grant is in force, or when the
+// policy gated the request (design 013: no auto-approval un-gates a policy
+// gate), in which case the caller falls back to the normal draft-and-confirm
+// path.
 func (h *HumanoidActor) trustAutoApprove(req *msg.MsgApprovalRequest) bool {
-	if !h.trustActive() {
+	if !h.trustActive() || isPolicyGatedApproval(req) {
 		return false
 	}
 	h.trustAutoApproved++

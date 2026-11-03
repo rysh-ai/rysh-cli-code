@@ -97,10 +97,7 @@ func (t *AgentsListTool) Execute(ctx context.Context, params json.RawMessage) (*
 			if alias == "" {
 				alias = "(none)"
 			}
-			status := p.Status
-			if status == "" {
-				status = "idle"
-			}
+			status := paneListStatus(p)
 			active := ""
 			if p.ID == ws.ActivePaneID {
 				active = " *"

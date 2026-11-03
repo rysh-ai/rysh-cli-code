@@ -274,9 +274,9 @@ func TestPhoneSendFallsBackToThreadID(t *testing.T) {
 func TestPhoneRoundTrip(t *testing.T) {
 	t.Chdir(t.TempDir())
 	fake, srv := newFakeTwilio(t, nil)
-	p := connectedPhone(srv.URL, phoneCfg())
+	p := connectedPhone(srv.URL, signedPhoneCfg())
 
-	postForm(p, inboundForm("SM-rt", "+15550142", "are you there?"), "")
+	postSigned(p, inboundForm("SM-rt", "+15550142", "are you there?"))
 	got := drainPhone(p)
 	if len(got) != 1 {
 		t.Fatalf("received %d messages, want 1", len(got))

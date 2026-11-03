@@ -68,6 +68,13 @@ type Policy struct {
 	ProxyStrict bool
 	// SNATRequired names registered secrets that must be present.
 	SNATRequired []string
+	// FS is the fs: section (design 068); OrgFS the org file's, set by Merge.
+	FS    FSSpec
+	OrgFS FSSpec
+	// Memory is the memory: section (design 010 §3a); OrgMemory the org
+	// file's, set by Merge. Read them through MemoryRules.
+	Memory    MemorySpec
+	OrgMemory MemorySpec
 
 	// Org overlay (design 013 §1), populated by Merge when an org policy is
 	// active. Restrictive org rules are evaluated before any project rule;
@@ -112,6 +119,8 @@ type yamlPolicy struct {
 	SNAT struct {
 		Required []string `yaml:"required"`
 	} `yaml:"snat"`
+	FS     yaml.Node `yaml:"fs"`     // decoded strictly by parseFS (design 068)
+	Memory yaml.Node `yaml:"memory"` // decoded strictly by parseMemory (design 010 §3a)
 }
 
 // Empty returns an empty policy (no file present).
@@ -180,7 +189,17 @@ func parse(data []byte, path string) (*Policy, error) {
 	if err := yaml.Unmarshal(data, &yp); err != nil {
 		return nil, err
 	}
+	fs, err := parseFS(&yp.FS)
+	if err != nil {
+		return nil, err
+	}
+	mem, err := parseMemory(&yp.Memory)
+	if err != nil {
+		return nil, err
+	}
 	p := &Policy{
+		FS:             fs,
+		Memory:         mem,
 		BashAllow:      yp.Bash.Allow,
 		BashDeny:       yp.Bash.Deny,
 		AutoApprove:    yp.Approval.AutoApprove,
@@ -240,6 +259,10 @@ func Merge(org, project *Policy) *Policy {
 		// switch off an org's strict mode by omitting it.
 		ProxyStrict:   org.ProxyStrict || project.ProxyStrict,
 		SNATRequired:  unionStrings(org.SNATRequired, project.SNATRequired),
+		FS:            project.FS,
+		OrgFS:         org.FS,
+		Memory:        project.Memory,
+		OrgMemory:     org.Memory,
 		Path:          project.Path,
 		Loaded:        true,
 		OrgPath:       org.Path,
@@ -315,10 +338,14 @@ func (p *Policy) Summary() string {
 	}
 	if p.ProxyStrict {
 		out += "  proxy strict:  ON (an ungoverned agent CLI is stopped, not just warned)\n"
+		out += "                 covers the allowed CLIs at their known install locations, by real executable;\n"
+		out += "                 not an anti-evasion boundary: a copy elsewhere is unknown and not watched\n"
 	}
 	if len(p.SNATRequired) > 0 {
 		out += fmt.Sprintf("  snat required: %v\n", p.SNATRequired)
 	}
+	out += p.fsSummary()
+	out += p.memorySummary()
 	if p.OrgActive {
 		if len(p.OrgBashAllow) > 0 {
 			out += fmt.Sprintf("  org bash allow:   %v (intersected with project allow)\n", p.OrgBashAllow)

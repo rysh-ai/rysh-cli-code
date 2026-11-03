@@ -176,7 +176,7 @@ func MakePlan(a Assessment, in Input, mem *Memory) Plan {
 	for _, c := range cands {
 		key := ladderKey(c)
 		rung := mem.Ladder[key]
-		level := 1
+		var level int
 		switch {
 		case rung == nil || rung.Fingerprint != c.fp:
 			level = 1

@@ -28,6 +28,12 @@ type EmailChannelConfig struct {
 	// a mail is fetched only if its From addr-spec is listed. Empty ⇒ the
 	// account's own username.
 	AllowFrom []string `json:"allow_from,omitempty" yaml:"allow_from"`
+	// AuthservID is the receiving server's authserv-id in its own
+	// Authentication-Results header (e.g. "mx.google.com"). An emailed
+	// approval answer counts only when the topmost such header shows
+	// dmarc=pass or aligned dkim=pass (security-lead E6). Empty: email
+	// approvals are off; mail is still delivered as messages.
+	AuthservID string `json:"authserv_id,omitempty" yaml:"authserv_id"`
 }
 
 // ChannelConfig describes the configuration for a single communication channel.
@@ -39,16 +45,21 @@ type ChannelConfig struct {
 	// WhatsApp (Meta Cloud API). Phone is the numeric phone_number_id (NOT the
 	// display number); APIKey is the Graph API access token. Inbound arrives via
 	// a local webhook server the adapter runs on WebhookPort: VerifyToken answers
-	// Meta's GET verification handshake (hub.verify_token) and AppSecret, when
-	// set, validates the X-Hub-Signature-256 HMAC on inbound POSTs. GraphVersion
-	// overrides the default Graph API version. (AppSecret is also the Teams bot
-	// client secret — see the Teams block below.)
+	// Meta's GET verification handshake (hub.verify_token) and AppSecret
+	// validates the X-Hub-Signature-256 HMAC on every inbound POST; it is
+	// required in direct mode, and the adapter refuses to start without it.
+	// The listener binds 127.0.0.1 unless WebhookBind names another host (an
+	// IP address or "localhost"); a tunnel or reverse proxy forwards to it.
+	// WeChat and WeCom follow the same WebhookPort/WebhookBind rule.
+	// GraphVersion overrides the default Graph API version. (AppSecret is also
+	// the Teams bot client secret — see the Teams block below.)
 	Phone        string `json:"phone,omitempty" yaml:"phone"`
 	APIKey       string `json:"api_key,omitempty" yaml:"api_key"`
 	BusinessID   string `json:"business_id,omitempty" yaml:"business_id"`
 	VerifyToken  string `json:"verify_token,omitempty" yaml:"verify_token"`
 	AppSecret    string `json:"app_secret,omitempty" yaml:"app_secret"`
 	WebhookPort  string `json:"webhook_port,omitempty" yaml:"webhook_port"` // string so it can hold a ${SECRET}; parsed to int by the adapter
+	WebhookBind  string `json:"webhook_bind,omitempty" yaml:"webhook_bind"`
 	GraphVersion string `json:"graph_version,omitempty" yaml:"graph_version"`
 	// Governance controls inbound handling: "ai" (default, auto-reply) or "human"
 	// (inbound is displayed only; the human drives list/read/draft/approve/send via
@@ -68,6 +79,14 @@ type ChannelConfig struct {
 	RelayWorkspace    string `json:"relay_workspace,omitempty" yaml:"relay_workspace"`
 	RelayWorkspaceID  string `json:"relay_workspace_id,omitempty" yaml:"relay_workspace_id"`
 	RelayConnectionID string `json:"relay_connection_id,omitempty" yaml:"relay_connection_id"`
+
+	// APIBase overrides the platform API root (gap05): a self-hosted Telegram
+	// Bot API server, or a local fake platform in tests. Empty = production.
+	// Must be https, or http on a loopback host (channels.ValidateAPIBase,
+	// checked where each adapter builds its requests). Read by telegram,
+	// discord, line and slack; any other adapter that honours it must call the
+	// same check.
+	APIBase string `json:"api_base,omitempty" yaml:"api_base"`
 
 	// Slack
 	BotToken string   `json:"bot_token,omitempty" yaml:"bot_token"`
@@ -105,6 +124,23 @@ type ChannelConfig struct {
 	// switch to turn that off.
 	AppID    string `json:"app_id,omitempty" yaml:"app_id"`
 	TenantID string `json:"tenant_id,omitempty" yaml:"tenant_id"`
+
+	// GitHub (gap04, G16: "@rysh on an issue or PR → the session's agent
+	// replies on the thread"). Like WeChat/WeCom it reuses the fields it shares
+	// with other channels, on the "a block only means one channel" rule:
+	//
+	//	BotToken    → the token replies are posted with (a fine-grained token
+	//	              today; an App installation token once the App exists)
+	//	AppSecret   → the repo/App webhook secret; REQUIRED, every delivery's
+	//	              X-Hub-Signature-256 is verified and there is no switch off
+	//	WebhookPort → the loopback port the operator's tunnel forwards to
+	//	Channels    → the "owner/name" repositories it answers in; REQUIRED
+	//
+	// BotLogin is the handle that triggers it (required, no default: G-4) and the
+	// account whose own comments it never answers. The shared APIBase field
+	// above overrides https://api.github.com (GitHub Enterprise Server:
+	// https://HOST/api/v3).
+	BotLogin string `json:"bot_login,omitempty" yaml:"bot_login"`
 
 	// Chatbot (local HTTP server mode)
 	WebhookURL  string   `json:"webhook_url,omitempty" yaml:"webhook_url"`
@@ -165,6 +201,10 @@ type ChannelConfig struct {
 	// WeChat only accepts a callback URL on port 80/443 of a filed domain, so
 	// direct mode is unusable for most operators and Relay (above) is the
 	// practical transport: rysh-server owns the URL and the credentials.
+	//
+	// The direct-mode webhook (WeChat and WeCom) binds 127.0.0.1 on WebhookPort
+	// unless WebhookBind names another host, as for WhatsApp; a reverse proxy on
+	// another machine needs webhook_bind set (e.g. "0.0.0.0").
 	EncodingAESKey string `json:"encoding_aes_key,omitempty" yaml:"encoding_aes_key"`
 
 	// WeCom / WeChat Work (企业微信, qyapi.weixin.qq.com). It reuses AppID as the
@@ -230,6 +270,10 @@ type ChannelStatus struct {
 	Connected bool   `json:"connected"`
 	Error     string `json:"error,omitempty"`
 	Details   string `json:"details,omitempty"` // e.g. "listening on #support, #engineering"
+	// Governance is the channel's configured ai|human mode as the registry
+	// knows it (design 067 list_channels). Advisory: the humanoid enforces
+	// its live mode at send time.
+	Governance string `json:"governance,omitempty"`
 }
 
 // MsgHumanoidCreate creates a new humanoid with optional channel configs.
@@ -515,4 +559,28 @@ type MsgChannelPairLink struct {
 	HumanoidName string `json:"humanoid_name"`
 	Channel      string `json:"channel"`
 	Force        bool   `json:"force,omitempty"`
+}
+
+// MsgHumanoidNotifyOwner asks a humanoid to tell its owner something about
+// their own session (E33 slice E1, design 086: a pane that needs them). Sent
+// as a request to rysh.humanoid.{name}.inbox; answered with
+// MsgHumanoidNotifyOwnerReply. The humanoid sends it only to the owner's last
+// 1:1 DM on a gated channel, never to a group or a stranger. It is a notice to
+// the owner, not a message to a third party, so human governance does not
+// hold it as a draft.
+type MsgHumanoidNotifyOwner struct {
+	Text string `json:"text"`
+}
+
+// Outcomes of MsgHumanoidNotifyOwnerReply.
+const (
+	NotifyOwnerSent   = "sent"
+	NotifyOwnerNoChat = "no_owner_chat" // no owner DM since the daemon started
+)
+
+// MsgHumanoidNotifyOwnerReply says what happened: an outcome, and an error
+// that says what to do when nothing was sent.
+type MsgHumanoidNotifyOwnerReply struct {
+	Outcome string `json:"outcome,omitempty"`
+	Error   string `json:"error,omitempty"`
 }

@@ -39,6 +39,11 @@ type EmailAdapter struct {
 	cancel    context.CancelFunc
 	relayConn *nats.Conn
 
+	// L1 latch for email approvals (email_approval_auth.go).
+	latchMu     sync.Mutex
+	latchLoaded bool
+	latch       emailApprovalLatch
+
 	// lastSubject tracks the most recent inbound email subject so outbound
 	// replies can include "Re: <subject>" even though OutboundMessage only
 	// carries ThreadID. Keyed by ThreadID (Message-ID).
@@ -55,7 +60,23 @@ type EmailAdapter struct {
 	// dialFn, when set, replaces the TLS dial (tests point it at a fake
 	// IMAP server so a whole short-lived session can be driven end to end).
 	dialFn func(addr string) (net.Conn, error)
+
+	// watcher tracks the IMAP watcher goroutine and sessConn (under mu) is its
+	// live connection, so Stop can wait for it and hang up a stuck one (F-STOP).
+	watcher  sync.WaitGroup
+	sessConn net.Conn
 }
+
+// emailBeforeDispatch is a test seam: when set, it runs just before a fetched
+// mail is handed to the inbound channel (F-STOP N1 tests inject a stop here).
+var emailBeforeDispatch func()
+
+// emailStopGrace is how long Stop lets the watcher log out cleanly before it
+// closes the connection; emailStopForce bounds the wait after that.
+var (
+	emailStopGrace = 2 * time.Second
+	emailStopForce = 3 * time.Second
+)
 
 // NewEmailAdapter creates a new Email adapter with the given configuration.
 func NewEmailAdapter(config msg.ChannelConfig) *EmailAdapter {
@@ -75,6 +96,18 @@ func NewEmailAdapter(config msg.ChannelConfig) *EmailAdapter {
 			e.uidByShort[id] = uid
 		}
 	}
+	return e
+}
+
+// NewEmailAdapterWithDialerForTest is for tests only: plaintext to loopback
+// fakes. It builds an email adapter whose IMAP connections come from dial
+// instead of the TLS dial, so the real adapter can run against a fake IMAP
+// server (the shared level-E scenario). No config reaches it, and there is
+// no config option for plaintext IMAP; TestEmailDialerSeamIsTestOnly fails if
+// any non-test file calls it (security-lead, 2026-11-01).
+func NewEmailAdapterWithDialerForTest(config msg.ChannelConfig, dial func(addr string) (net.Conn, error)) *EmailAdapter {
+	e := NewEmailAdapter(config)
+	e.dialFn = dial
 	return e
 }
 
@@ -185,8 +218,12 @@ func (e *EmailAdapter) Start(ctx context.Context) error {
 	slog.Info("email: adapter started", "address", cfg.Address,
 		"imap", cfg.IMAPHost, "smtp", cfg.SMTPHost)
 
-	// Start the IMAP IDLE monitoring loop in background.
-	go e.imapIdleLoop(ctx)
+	// Start the IMAP IDLE monitoring loop in background; Stop waits for it.
+	e.watcher.Add(1)
+	go func() {
+		defer e.watcher.Done()
+		e.imapIdleLoop(ctx)
+	}()
 
 	return nil
 }
@@ -196,6 +233,7 @@ func (e *EmailAdapter) Stop() error {
 	if e.cancel != nil {
 		e.cancel()
 	}
+	e.waitWatcher()
 	if e.relayConn != nil {
 		e.relayConn.Close()
 		e.relayConn = nil
@@ -207,22 +245,24 @@ func (e *EmailAdapter) Stop() error {
 	return nil
 }
 
-// Send delivers a reply email via SMTP.
-func (e *EmailAdapter) Send(_ context.Context, outbound OutboundMessage) error {
+// SendWithID delivers a reply email via SMTP and reports its Message-ID and
+// recipient (MessageIDSender; email approvals E1/E5). A relay send reports
+// no id, so email approvals stay off on the relay.
+func (e *EmailAdapter) SendWithID(_ context.Context, outbound OutboundMessage) (SentMessage, error) {
 	e.mu.RLock()
 	connected := e.connected
 	e.mu.RUnlock()
 
 	if !connected {
-		return fmt.Errorf("email: not connected")
+		return SentMessage{}, fmt.Errorf("email: not connected")
 	}
 	if e.config.Relay {
 		// The relay builds the subject server-side, so the read-only guard
 		// cannot check it for the tag: refused outright under the guard.
 		if g, err := e.safetyGuard(); err != nil || g != nil {
-			return fmt.Errorf("%w relay send: the Mailgun relay's subject cannot be checked for the tag (%v)", ErrSafetyRefused, err)
+			return SentMessage{}, fmt.Errorf("%w relay send: the Mailgun relay's subject cannot be checked for the tag (%v)", ErrSafetyRefused, err)
 		}
-		return e.sendRelay(outbound)
+		return SentMessage{}, e.sendRelay(outbound)
 	}
 
 	cfg := e.emailCfg()
@@ -262,22 +302,23 @@ func (e *EmailAdapter) Send(_ context.Context, outbound OutboundMessage) error {
 	emailBuf.WriteString("MIME-Version: 1.0\r\n")
 	emailBuf.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
 	emailBuf.WriteString(fmt.Sprintf("Date: %s\r\n", time.Now().Format(time.RFC1123Z)))
-	emailBuf.WriteString(fmt.Sprintf("Message-ID: <%d.%s>\r\n", time.Now().UnixNano(), from))
+	messageID := newEmailMessageID(from)
+	emailBuf.WriteString(fmt.Sprintf("Message-ID: %s\r\n", messageID))
 	emailBuf.WriteString("\r\n")
 	emailBuf.WriteString(outbound.Content)
 
 	addr := fmt.Sprintf("%s:%d", cfg.SMTPHost, smtpPort)
 
-	slog.Debug("email: sending SMTP reply", "to", outbound.RecipientID,
-		"thread", outbound.ThreadID, "subject", subject, "smtp", addr)
+	slog.Debug("email: sending SMTP reply",
+		"thread", outbound.ThreadID, "smtp", addr)
 
 	if err := e.sendSMTP(addr, from, outbound.RecipientID, emailBuf.String()); err != nil {
-		return fmt.Errorf("email: SMTP send failed: %w", err)
+		return SentMessage{}, fmt.Errorf("email: SMTP send failed: %w", err)
 	}
 
-	slog.Info("email: reply sent", "to", outbound.RecipientID,
-		"subject", subject, "len", len(outbound.Content))
-	return nil
+	slog.Info("email: reply sent",
+		"thread", outbound.ThreadID, "len", len(outbound.Content)) // never our own Message-ID: a bearer (E5)
+	return SentMessage{ID: messageID, Channel: strings.ToLower(strings.TrimSpace(outbound.RecipientID))}, nil
 }
 
 // InboundCh returns the channel for receiving inbound emails.
@@ -374,7 +415,20 @@ func (e *EmailAdapter) runIMAPSession(ctx context.Context, addr string, idleTime
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
-	defer conn.Close()
+	e.mu.Lock()
+	e.sessConn = conn
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		if e.sessConn == conn {
+			e.sessConn = nil
+		}
+		e.mu.Unlock()
+		conn.Close()
+	}()
+	if ctx.Err() != nil {
+		return nil // stopped while dialling
+	}
 
 	return e.watchInbox(ctx, newIMAPClient(conn), addr, idleTimeout, pollInterval)
 }
@@ -444,9 +498,15 @@ func (e *EmailAdapter) watchInbox(ctx context.Context, imap *imapClient, addr st
 		if err != nil {
 			return fmt.Errorf("idle/poll: %w", err)
 		}
+		if ctx.Err() != nil {
+			// Stopped while waiting: fetch nothing more, so no mail is taken
+			// into a stopped adapter (F-STOP; the QA-27 shape).
+			_ = imap.command("LOGOUT", "")
+			return nil
+		}
 
 		// Fetch any new messages since last UIDNEXT.
-		newUID, fetchErr := e.fetchNewMessages(imap, uidNext)
+		newUID, fetchErr := e.fetchNewMessages(ctx, imap, uidNext)
 		if fetchErr != nil {
 			slog.Warn("email: fetch error", "err", fetchErr)
 			// Non-fatal — continue monitoring.
@@ -487,6 +547,7 @@ func (e *EmailAdapter) waitIDLE(ctx context.Context, imap *imapClient, timeout t
 	}()
 
 	var result error
+	readerDone := false
 	select {
 	case <-ctx.Done():
 		// Shutting down.
@@ -494,14 +555,39 @@ func (e *EmailAdapter) waitIDLE(ctx context.Context, imap *imapClient, timeout t
 		// Re-issue IDLE per RFC 2177 recommendation.
 		slog.Debug("email: IDLE timeout, re-issuing")
 	case line := <-dataCh:
+		readerDone = true
 		slog.Debug("email: IDLE notification received", "line", line)
 	case readErr := <-errCh:
+		readerDone = true
 		result = fmt.Errorf("IDLE read: %w", readErr)
 	}
 
 	// Send DONE to exit IDLE.
 	if writeErr := imap.writeLine("DONE"); writeErr != nil {
 		return fmt.Errorf("IDLE DONE: %w", writeErr)
+	}
+
+	// One reader only. After a timeout or cancel the goroutine is still in
+	// readLine and owns the connection's reader; reading here as well would
+	// share one bufio.Reader between two goroutines (a data race that can
+	// panic in bufio, or lose the tagged reply). Take the goroutine's line
+	// first: it is the server's reply to DONE, or an untagged line before it.
+	if !readerDone {
+		select {
+		case line := <-dataCh:
+			if strings.HasPrefix(line, tag+" ") {
+				if err := idleTaggedStatus(tag, line); err != nil && result == nil {
+					result = fmt.Errorf("IDLE OK: %w", err)
+				}
+				return result
+			}
+			slog.Debug("email: untagged line before IDLE OK", "line", line)
+		case readErr := <-errCh:
+			if result == nil {
+				result = fmt.Errorf("IDLE OK: %w", readErr)
+			}
+			return result
+		}
 	}
 
 	// Read the tagged OK response.
@@ -512,9 +598,19 @@ func (e *EmailAdapter) waitIDLE(ctx context.Context, imap *imapClient, timeout t
 	return result
 }
 
+// idleTaggedStatus checks the tagged reply that ends IDLE, the same way
+// readResponse does: the status is the token right after the tag.
+func idleTaggedStatus(tag, line string) error {
+	fields := strings.Fields(line[len(tag)+1:])
+	if len(fields) > 0 && strings.EqualFold(fields[0], "OK") {
+		return nil
+	}
+	return fmt.Errorf("IMAP error: %s", line)
+}
+
 // fetchNewMessages fetches emails with UID >= uidNext and publishes them as InboundMessages.
 // Returns the new UIDNEXT value.
-func (e *EmailAdapter) fetchNewMessages(imap *imapClient, uidNext int) (int, error) {
+func (e *EmailAdapter) fetchNewMessages(ctx context.Context, imap *imapClient, uidNext int) (int, error) {
 	// Search for UIDs >= uidNext.
 	tag := imap.nextTag()
 	cmd := fmt.Sprintf("%s UID SEARCH %s", tag, imap.searchCriteria(fmt.Sprintf("UID %d:*", uidNext)))
@@ -540,7 +636,10 @@ func (e *EmailAdapter) fetchNewMessages(imap *imapClient, uidNext int) (int, err
 			if uid+1 > maxUID {
 				maxUID = uid + 1
 			}
-			e.fetchAndPublish(imap, uid)
+			if ctx.Err() != nil {
+				break // stopped: fetch nothing more
+			}
+			e.fetchAndPublish(ctx, imap, uid)
 		}
 	}
 
@@ -550,7 +649,7 @@ func (e *EmailAdapter) fetchNewMessages(imap *imapClient, uidNext int) (int, err
 // fetchAndPublish fetches a single email by UID and publishes it to the inbound channel.
 // It PEEKs: watching the inbox must never set \Seen on the server (RFC 3501
 // §6.4.5; founder ruling Q9(a)). Only an explicit reader-open marks a mail read.
-func (e *EmailAdapter) fetchAndPublish(imap *imapClient, uid int) {
+func (e *EmailAdapter) fetchAndPublish(ctx context.Context, imap *imapClient, uid int) {
 	if err := imap.guardAdmit(uid); err != nil {
 		slog.Warn("email: FETCH refused", "uid", uid, "err", err)
 		return
@@ -573,6 +672,12 @@ func (e *EmailAdapter) fetchAndPublish(imap *imapClient, uid int) {
 		slog.Warn("email: failed to parse email", "uid", uid)
 		return
 	}
+	// E6: only the receiving server's own topmost Authentication-Results
+	// can vouch for the sender of an approval answer, and (backlog 2, with
+	// authserv_id set) for the sender of any mail.
+	headerLines := emailHeaderLines(resp)
+	authOK, latchTripped := e.emailApprovalAuthFor(headerLines)
+	senderAuth, senderAuthClass := emailSenderAuth(headerLines, e.emailCfg().AuthservID)
 	imap.noteFetched(uid, headers)
 
 	from := headers.Get("From")
@@ -614,22 +719,42 @@ func (e *EmailAdapter) fetchAndPublish(imap *imapClient, uid int) {
 			"date":        date,
 			"message_id":  messageID,
 			"in_reply_to": inReplyTo,
+			"references":  headers.Get("References"),
 			"from_email":  senderEmail,
 		},
+	}
+	if authOK {
+		inMsg.Metadata["approval_auth"] = "pass"
+	}
+	inMsg.Metadata["sender_auth"] = senderAuth
+	if senderAuthClass != "" {
+		inMsg.Metadata["sender_auth_class"] = senderAuthClass
+	}
+	if latchTripped {
+		inMsg.Metadata["approval_latch"] = "tripped" // L1: the humanoid tells the owner
 	}
 	if isHTML {
 		inMsg.Metadata["content_type"] = "html"
 	}
 
 	slog.Info("email: new inbound email",
-		"from", senderEmail, "subject", subject,
+		"sender_auth", senderAuth,
 		"message_id", messageID, "body_len", len(contentText))
 
+	if emailBeforeDispatch != nil {
+		emailBeforeDispatch()
+	}
+	// F-STOP N1: a Stop that arrived during this fetch keeps the mail out of
+	// the stopped adapter. It was fetched with BODY.PEEK, so it stays unseen.
+	if ctx.Err() != nil {
+		slog.Info("email: stopped before dispatch; the mail stays unseen on the server", "uid", uid)
+		return
+	}
 	select {
 	case e.inbound <- inMsg:
 		slog.Debug("email: inbound message enqueued")
 	default:
-		slog.Warn("email: inbound channel full, dropping email", "from", senderEmail)
+		slog.Warn("email: inbound channel full, dropping email", "message_id", messageID)
 	}
 }
 
@@ -740,8 +865,14 @@ func (c *imapClient) parseCapabilities(line string) {
 	}
 	// Extract capability list after "CAPABILITY ".
 	rest := line[idx+len("CAPABILITY"):]
-	// Remove trailing "]" if present (e.g., "* OK [CAPABILITY IMAP4rev1 IDLE]")
-	rest = strings.TrimRight(rest, "]")
+	// In a bracketed response code ("* OK [CAPABILITY IMAP4rev1 IDLE] ready")
+	// the list ends at the "]": the last capability must not keep the bracket
+	// and the human-readable text after it is not a capability.
+	if strings.Contains(line[:idx], "[") {
+		if end := strings.IndexByte(rest, ']'); end >= 0 {
+			rest = rest[:end]
+		}
+	}
 	for _, cap := range strings.Fields(rest) {
 		c.capabilities[strings.ToUpper(cap)] = true
 	}
@@ -830,7 +961,7 @@ func (e *EmailAdapter) sendSMTP(addr, from, to, message string) error {
 		return err
 	}
 
-	slog.Debug("email: sendSMTP connecting", "addr", addr, "from", from, "to", to)
+	slog.Debug("email: sendSMTP connecting", "addr", addr, "from", from)
 
 	// Connect to SMTP server.
 	conn, err := net.DialTimeout("tcp", addr, 15*time.Second)
@@ -869,7 +1000,7 @@ func (e *EmailAdapter) sendSMTP(addr, from, to, message string) error {
 	if err := c.Rcpt(to); err != nil {
 		return fmt.Errorf("SMTP RCPT TO: %w", err)
 	}
-	slog.Debug("email: RCPT TO accepted", "to", to)
+	slog.Debug("email: RCPT TO accepted")
 
 	// Send the message body.
 	w, err := c.Data()
@@ -888,7 +1019,7 @@ func (e *EmailAdapter) sendSMTP(addr, from, to, message string) error {
 	if err := c.Quit(); err != nil {
 		return fmt.Errorf("SMTP QUIT: %w", err)
 	}
-	slog.Info("email: SMTP transaction completed successfully", "from", from, "to", to)
+	slog.Info("email: SMTP transaction completed successfully", "from", from)
 	return nil
 }
 
@@ -965,22 +1096,7 @@ func parseEmailResponse(lines []string) (textproto.MIMEHeader, string) {
 	}
 
 	if headerStart >= 0 {
-		// Read header lines until empty line or next section.
-		var headerLines []string
-		for i := headerStart; i < len(lines); i++ {
-			line := lines[i]
-			// Stop at empty line, closing paren, or next BODY section.
-			if line == "" || line == ")" || strings.HasPrefix(line, ")") ||
-				strings.Contains(strings.ToUpper(line), "BODY[") {
-				break
-			}
-			// Skip IMAP literal size markers like "{123}"
-			if strings.HasPrefix(line, "{") && strings.HasSuffix(line, "}") {
-				continue
-			}
-			headerLines = append(headerLines, line)
-		}
-		headers = parseHeaders(headerLines)
+		headers = parseHeaders(emailHeaderLines(lines))
 	}
 
 	if bodyStart >= 0 {
@@ -1016,6 +1132,36 @@ func parseEmailResponse(lines []string) (textproto.MIMEHeader, string) {
 }
 
 // parseHeaders parses RFC 2822 style headers from lines, handling continuation lines.
+// emailHeaderLines returns the raw header lines of a FETCH response's
+// BODY[HEADER] section, in the order the server stored them (nil when there
+// is none).
+func emailHeaderLines(lines []string) []string {
+	headerStart := -1
+	for i, line := range lines {
+		if strings.Contains(strings.ToUpper(line), "BODY[HEADER]") {
+			headerStart = i + 1
+		}
+	}
+	if headerStart < 0 {
+		return nil
+	}
+	var headerLines []string
+	for i := headerStart; i < len(lines); i++ {
+		line := lines[i]
+		// Stop at empty line, closing paren, or next BODY section.
+		if line == "" || line == ")" || strings.HasPrefix(line, ")") ||
+			strings.Contains(strings.ToUpper(line), "BODY[") {
+			break
+		}
+		// Skip IMAP literal size markers like "{123}"
+		if strings.HasPrefix(line, "{") && strings.HasSuffix(line, "}") {
+			continue
+		}
+		headerLines = append(headerLines, line)
+	}
+	return headerLines
+}
+
 func parseHeaders(lines []string) textproto.MIMEHeader {
 	headers := make(textproto.MIMEHeader)
 	var currentKey, currentVal string
@@ -2023,7 +2169,7 @@ func (e *EmailAdapter) SendEmail(to, subject, body, inReplyTo string, attachment
 	}
 
 	slog.Info("email: SendEmail called",
-		"from", from, "to", to, "subject", subject,
+		"from", from,
 		"in_reply_to", inReplyTo, "attachments", len(attachments),
 		"smtp_host", cfg.SMTPHost, "smtp_port", smtpPort,
 		"body_len", len(body))
@@ -2038,7 +2184,7 @@ func (e *EmailAdapter) SendEmail(to, subject, body, inReplyTo string, attachment
 	}
 	emailBuf.WriteString("MIME-Version: 1.0\r\n")
 	emailBuf.WriteString(fmt.Sprintf("Date: %s\r\n", time.Now().Format(time.RFC1123Z)))
-	emailBuf.WriteString(fmt.Sprintf("Message-ID: <%d.%s>\r\n", time.Now().UnixNano(), from))
+	emailBuf.WriteString(fmt.Sprintf("Message-ID: %s\r\n", newEmailMessageID(from)))
 
 	if len(attachments) == 0 {
 		emailBuf.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
@@ -2074,10 +2220,10 @@ func (e *EmailAdapter) SendEmail(to, subject, body, inReplyTo string, attachment
 
 	addr := fmt.Sprintf("%s:%d", cfg.SMTPHost, smtpPort)
 	if err := e.sendSMTP(addr, from, to, emailBuf.String()); err != nil {
-		slog.Error("email: SendEmail SMTP failed", "err", err, "to", to, "from", from)
+		slog.Error("email: SendEmail SMTP failed", "err", err, "from", from)
 		return err
 	}
-	slog.Info("email: SendEmail SMTP succeeded", "to", to, "from", from, "subject", subject)
+	slog.Info("email: SendEmail SMTP succeeded", "from", from, "in_reply_to", inReplyTo)
 	return nil
 }
 
@@ -2094,4 +2240,32 @@ func base64Encode(data []byte) string {
 		wrapped.WriteString("\r\n")
 	}
 	return wrapped.String()
+}
+
+// waitWatcher waits for the IMAP watcher to end after its context was
+// cancelled: first emailStopGrace for a clean DONE + LOGOUT, then it closes the
+// live connection (a stuck server never answers DONE) and waits at most
+// emailStopForce more. It holds no lock while waiting (F-STOP).
+func (e *EmailAdapter) waitWatcher() {
+	done := make(chan struct{})
+	go func() {
+		e.watcher.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return
+	case <-time.After(emailStopGrace):
+	}
+	e.mu.Lock()
+	c := e.sessConn
+	e.mu.Unlock()
+	if c != nil {
+		_ = c.Close()
+	}
+	select {
+	case <-done:
+	case <-time.After(emailStopForce):
+		slog.Warn("email: the IMAP watcher did not end after Stop closed its connection")
+	}
 }

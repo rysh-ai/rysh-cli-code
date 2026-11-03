@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/asynkron/protoactor-go/actor"
@@ -210,6 +211,10 @@ type MirrorTabListenerActor struct {
 	outputSubs map[string]*nats.Subscription
 	connected  bool
 	stopRetry  chan struct{}
+	// readOnlyKey is set when the upstream refused this connection's key as
+	// read-only (read_only_key.go): commands are no longer sent. Atomic (set
+	// from a nats.go callback); cleared on every (re)connect.
+	readOnlyKey atomic.Bool
 
 	// vterms holds one VT emulator per interactive source pane, keyed by source
 	// pane id. Fed by the per-pane raw VT stream and rendered into the mirror tab.
@@ -240,6 +245,13 @@ type MirrorTabListenerActor struct {
 	// union them.
 	subscriberID string
 
+	// watchNotes coalesces watch announcements after focus/visibility changes
+	// (trailing edge, mirrorWatchNoteDebounce, at most mirrorWatchNoteMaxWait
+	// apart during a burst), so a held focus key sends about one note a second
+	// and the final state always goes out. nil until Started (then a change is
+	// announced at once, as before).
+	watchNotes *trailingDebounce
+
 	// Actor identity for routing nats.go callbacks back into the actor system.
 	selfPID     *actor.PID
 	actorSystem *actor.ActorSystem
@@ -257,6 +269,17 @@ const mirrorUnwatchedRenderInterval = 500 * time.Millisecond
 // shared 2-pane tab). It stays live but at a lower rate than the focused pane so
 // two interactive mirrors don't both render flat out.
 const mirrorVisibleRenderInterval = 50 * time.Millisecond
+
+// mirrorWatchNoteDebounce and mirrorWatchNoteMaxWait pace watch announcements
+// after a change (see watchNotes).
+const (
+	mirrorWatchNoteDebounce = 250 * time.Millisecond
+	mirrorWatchNoteMaxWait  = time.Second
+)
+
+// watchNoteFlushMsg is the debounced watch announcement, routed from the
+// debounce timer to the actor thread (which owns remoteNC).
+type watchNoteFlushMsg struct{}
 
 // mirrorWatchHeartbeatInterval is how often the listener re-announces its watch
 // set upstream so the source's per-subscriber watch entry does not expire.
@@ -309,6 +332,10 @@ func (r *MirrorTabListenerActor) Receive(ctx actor.Context) {
 	case *actor.Started:
 		r.selfPID = ctx.Self()
 		r.actorSystem = ctx.ActorSystem()
+		self, system := r.selfPID, r.actorSystem
+		r.watchNotes = newTrailingDebounce(mirrorWatchNoteDebounce, mirrorWatchNoteMaxWait, func() {
+			system.Root.Send(self, &watchNoteFlushMsg{})
+		})
 		r.connectRemote()
 		if r.connected {
 			r.subscribeLayout()
@@ -322,8 +349,14 @@ func (r *MirrorTabListenerActor) Receive(ctx actor.Context) {
 
 	case *actor.Stopping:
 		close(r.stopRetry)
+		if r.watchNotes != nil {
+			r.watchNotes.Stop()
+		}
 		r.disconnectRemote()
 		slog.Info("mirror-tab-listener: stopped", "share", r.shareID)
+
+	case *watchNoteFlushMsg:
+		r.publishWatchSet()
 
 	case *msg.MsgUpstreamReconnected:
 		// nats.go re-subscribes existing subscriptions on reconnect; re-announce
@@ -390,12 +423,28 @@ func (r *MirrorTabListenerActor) Receive(ctx actor.Context) {
 	}
 }
 
+// noteReadOnlyKey runs (on a nats.go callback goroutine) when the upstream
+// refused one of this mirror's publishes as read-only: sendCommand stops
+// sending for this connection. Like input typed into a view-only mirror tab
+// (handleMirrorTabInput), it is logged once, not shown in the tab.
+func (r *MirrorTabListenerActor) noteReadOnlyKey() {
+	if !r.readOnlyKey.CompareAndSwap(false, true) {
+		return
+	}
+	slog.Warn("mirror-tab-listener: upstream key is read-only; input is not sent", "share", r.shareID)
+}
+
 // sendCommand publishes a control command to the share command subject on the
 // remote NATS server, targeting a specific source pane. Only valid in control
 // mode.
 func (r *MirrorTabListenerActor) sendCommand(commandType, payload, targetPaneID string) {
 	if r.remoteNC == nil || !r.connected {
 		slog.Warn("mirror-tab-listener: cannot send command, not connected", "share", r.shareID)
+		return
+	}
+	if r.readOnlyKey.Load() {
+		slog.Debug("mirror-tab-listener: command not sent (read-only key)",
+			"share", r.shareID, "type", commandType)
 		return
 	}
 	subject := fmt.Sprintf("ws.%s.share.%s.command", r.workspace, r.shareID)
@@ -505,7 +554,9 @@ func (r *MirrorTabListenerActor) connectRemote() {
 			r.connected = false
 			slog.Warn("mirror-tab-listener: disconnected", "share", r.shareID, "err", err)
 		}),
+		readOnlyKeyErrorHandler("mirror-tab-listener", r.noteReadOnlyKey),
 		nats.ReconnectHandler(func(_ *nats.Conn) {
+			r.readOnlyKey.Store(false)
 			if r.selfPID != nil && r.actorSystem != nil {
 				r.actorSystem.Root.Send(r.selfPID, &msg.MsgUpstreamReconnected{})
 			}
@@ -530,6 +581,7 @@ func (r *MirrorTabListenerActor) connectRemote() {
 	}
 	opts = append(opts, nats.ReconnectWait(reconnectInterval))
 
+	r.readOnlyKey.Store(false)
 	nc, err := nats.Connect(wsURL, opts...)
 	if err != nil {
 		slog.Error("mirror-tab-listener: connect failed",
@@ -938,7 +990,11 @@ func (r *MirrorTabListenerActor) applyWatchSet(paneIDs, focusIDs []string) {
 	// Phase 2: subscribe the per-pane topics for the panes we now watch and drop the
 	// ones we no longer watch, so background panes never cross the network.
 	r.reconcilePaneSubs(newW)
-	r.publishWatchSet()
+	if r.watchNotes != nil {
+		r.watchNotes.Trigger()
+	} else {
+		r.publishWatchSet()
+	}
 }
 
 // publishWatchSet announces the subscriber's current watch set to the source on

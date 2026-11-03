@@ -124,6 +124,9 @@ func (w *WhatsAppAdapter) relaySubject(suffix string) string {
 // workspace's inbound traffic. No local listener is bound.
 func (w *WhatsAppAdapter) startRelay(ctx context.Context) error {
 	cfg := w.config
+	w.mu.Lock()
+	w.relayStopping = false
+	w.mu.Unlock()
 	if cfg.RelayURL == "" || cfg.RelayAPIKey == "" {
 		return fmt.Errorf("whatsapp relay: upstream url and api key are required")
 	}
@@ -174,6 +177,13 @@ func (w *WhatsAppAdapter) startRelay(ctx context.Context) error {
 		"upstream", cfg.RelayURL, "inbound", w.relaySubject("inbound"), "queue", relayQueueGroup,
 		"holder", holder)
 
+	w.closeRelayOnDone(ctx)
+	return nil
+}
+
+// closeRelayOnDone closes the relay connection when ctx ends (Stop cancels it).
+// Closing it also ends a replay request in flight.
+func (w *WhatsAppAdapter) closeRelayOnDone(ctx context.Context) {
 	go func() {
 		<-ctx.Done()
 		w.mu.Lock()
@@ -185,7 +195,6 @@ func (w *WhatsAppAdapter) startRelay(ctx context.Context) error {
 			c.Close()
 		}
 	}()
-	return nil
 }
 
 // relayEventHandlers are the connection callbacks of a relay session. They are
@@ -207,7 +216,7 @@ func (w *WhatsAppAdapter) relayEventHandlers() []nats.Option {
 			// Messages published while we were away were persisted server-side
 			// but never delivered — core NATS has no replay. Ask for them; this
 			// also retries a connection another session held (D-21).
-			go w.retryRelayHold()
+			w.goRelay(w.retryRelayHold)
 		}),
 		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
 			w.handleRelayAsyncError(err)
@@ -245,8 +254,24 @@ func (w *WhatsAppAdapter) attachRelay(nc *nats.Conn) error {
 	w.mu.Unlock()
 
 	// Catch up on anything that arrived before this session existed.
-	go w.replayMissed()
+	w.goRelay(w.replayMissed)
 	return nil
+}
+
+// goRelay runs f in the background as tracked relay work, so Stop returns only
+// after it has finished. Once Stop has begun nothing new starts: the check and
+// the Add happen under mu, so no Add can race Stop's Wait.
+func (w *WhatsAppAdapter) goRelay(f func()) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.relayStopping {
+		return
+	}
+	w.relayWork.Add(1)
+	go func() {
+		defer w.relayWork.Done()
+		f()
+	}()
 }
 
 // One rysh session serves a channel connection (D-21 / E-11.2). rysh-server's
@@ -368,14 +393,29 @@ func (w *WhatsAppAdapter) handleRelayInbound(data []byte, replayed bool) {
 	if in.Content == "" {
 		return
 	}
+	// Once Stop has begun the message stays unhandled (not marked, watermark
+	// not moved), so the next start's replay brings it back and answers it.
+	// The check and the marking, the first step that cannot be undone, share
+	// one hold of mu, so a Stop cannot land between them.
+	w.mu.Lock()
+	stopping, fresh := w.relayStopping, false
+	if !stopping {
+		fresh = w.markHandledLocked(in.MessageID)
+	}
+	w.mu.Unlock()
+	if stopping {
+		slog.Info("whatsapp relay: stopped before dispatch; the next start replays it",
+			"message_id", in.MessageID)
+		return
+	}
 
 	// Every reconnect replays the server's stream from the watermark, and the
 	// watermark has one-second resolution — so the same message can legitimately
 	// arrive twice. Dropping it here is what keeps the humanoid from sending the
 	// customer a second reply.
-	if !w.markHandled(in.MessageID) {
+	if !fresh {
 		slog.Debug("whatsapp relay: ignoring duplicate inbound",
-			"message_id", in.MessageID, "from", in.SenderID)
+			"message_id", in.MessageID)
 		w.noteRelaySeen(in.Timestamp)
 		return
 	}
@@ -413,13 +453,13 @@ func (w *WhatsAppAdapter) handleRelayInbound(data []byte, replayed bool) {
 	w.mu.RUnlock()
 	if refused {
 		slog.Info("whatsapp relay: connection held by another session — recorded only",
-			"message_id", in.MessageID, "from", in.SenderID)
+			"message_id", in.MessageID)
 		return
 	}
 
 	if replayed && relayTooStale(in.Timestamp) {
 		slog.Warn("whatsapp relay: replayed message too old to auto-answer — recorded only",
-			"message_id", in.MessageID, "from", in.SenderID,
+			"message_id", in.MessageID,
 			"age", time.Since(time.Unix(in.Timestamp, 0)).Round(time.Second),
 			"cutoff", relayReplyWindow)
 		return
@@ -429,7 +469,7 @@ func (w *WhatsAppAdapter) handleRelayInbound(data []byte, replayed bool) {
 	case w.inbound <- im:
 	default:
 		slog.Warn("whatsapp relay: inbound buffer full, dropping",
-			"from", in.SenderID, "message_id", in.MessageID)
+			"message_id", in.MessageID)
 	}
 }
 
@@ -462,7 +502,7 @@ func (w *WhatsAppAdapter) handleRelayStatus(data []byte) {
 		return
 	}
 	slog.Warn("whatsapp relay: delivery failed",
-		"wamid", st.MessageID, "to", st.RecipientID,
+		"wamid", st.MessageID,
 		"code", st.ErrorCode, "title", st.ErrorTitle)
 	w.recordDeliveryFailure(waStatusUpdate{
 		MessageID:   st.MessageID,
@@ -625,10 +665,15 @@ func (w *WhatsAppAdapter) publishRelay(ctx context.Context, out relayOutbound) e
 	if nc == nil {
 		return fmt.Errorf("whatsapp relay: not connected to upstream")
 	}
+	return requestRelay(ctx, nc, w.relaySubject("outbound"), "whatsapp relay", out)
+}
 
+// requestRelay sends one outbound request to rysh-server and turns its ack into
+// an error. label prefixes errors and logs ("whatsapp relay", "github relay").
+func requestRelay(ctx context.Context, nc *nats.Conn, subject, label string, out relayOutbound) error {
 	data, err := json.Marshal(out)
 	if err != nil {
-		return fmt.Errorf("whatsapp relay: marshal outbound: %w", err)
+		return fmt.Errorf("%s: marshal outbound: %w", label, err)
 	}
 
 	// Request/reply rather than fire-and-forget: the server's answer distinguishes
@@ -652,14 +697,14 @@ func (w *WhatsAppAdapter) publishRelay(ctx context.Context, out relayOutbound) e
 				timeout = remaining
 			}
 		}
-		reply, err = nc.Request(w.relaySubject("outbound"), data, timeout)
+		reply, err = nc.Request(subject, data, timeout)
 		if err == nil {
 			break
 		}
 		if attempt >= attempts || !errors.Is(err, nats.ErrTimeout) {
-			return fmt.Errorf("whatsapp relay: outbound request: %w", err)
+			return fmt.Errorf("%s: outbound request: %w", label, err)
 		}
-		slog.Warn("whatsapp relay: outbound ack timed out, retrying with same message id",
+		slog.Warn(label+": outbound ack timed out, retrying with same message id",
 			"message_id", out.MessageID, "attempt", attempt)
 	}
 
@@ -671,7 +716,7 @@ func (w *WhatsAppAdapter) publishRelay(ctx context.Context, out relayOutbound) e
 		return nil // server accepted but answered in an unexpected shape
 	}
 	if ack.Error != "" {
-		return fmt.Errorf("whatsapp relay: %s", ack.Error)
+		return fmt.Errorf("%s: %s", label, ack.Error)
 	}
 	return nil
 }

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/rysh-ai/rysh-cli-code/internal/shellscan"
 )
 
 // Approval evaluation for policy-as-code (design 013 §1). Consumes the four
@@ -78,7 +80,11 @@ func (p *Policy) EvaluateToolApproval(toolName string, input json.RawMessage) (A
 	if id, ok := p.matchPermissive("approval.auto_approve", p.OrgAutoApprove, p.AutoApprove, toolName); ok {
 		return ApprovalAuto, id
 	}
-	if cmd != "" {
+	// A bash.allow glob matches the whole line, so "rysh board *" would also
+	// match "rysh board tail; curl …". Allow rules therefore auto-approve only
+	// one plain command: no chaining, redirection or substitution outside
+	// quotes (deny rules above still see the raw line).
+	if cmd != "" && plainCommand(cmd) {
 		if id, ok := p.matchPermissive("bash.allow", p.OrgBashAllow, p.BashAllow, cmd); ok {
 			return ApprovalAuto, id
 		}
@@ -104,6 +110,13 @@ func (p *Policy) matchPermissive(class string, orgList, projList []string, s str
 		return projID + "+" + orgID, true
 	}
 	return "", false
+}
+
+// plainCommand reports whether cmd is a single command with nothing hidden in
+// it (see shellscan).
+func plainCommand(cmd string) bool {
+	r := shellscan.Scan(cmd)
+	return !r.Unsafe() && !r.Chained()
 }
 
 func isBashTool(name string) bool { return name == "bash" || name == "bash_background" }

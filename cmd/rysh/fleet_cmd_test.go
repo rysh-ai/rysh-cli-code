@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/fleet"
+	"github.com/rysh-ai/rysh-cli-code/internal/session"
 )
 
 // `rysh fleet` rendering (design 028 §6.5, `E-40`).
@@ -118,5 +119,25 @@ func TestTheFleetVerbIsDocumented(t *testing.T) {
 	// without a line here.
 	if !strings.Contains(out, "rysh board tail --board") {
 		t.Error("`rysh board tail --board <id>` is missing from rysh help")
+	}
+}
+
+// --agent stamps what runs in a member's pane so the courier can deliver into
+// it (rysh-family H0: a hand-built native fleet got no deliveries). A bad value
+// is refused before anything is recorded or stamped.
+func TestFleetMemberAgentFlagIsValidatedFirst(t *testing.T) {
+	called := false
+	old := stampFleetAgent
+	stampFleetAgent = func(_ *session.Store, _, _, _ string) error { called = true; return nil }
+	defer func() { stampFleetAgent = old }()
+	err := runFleetMember(nil, "nosuch", []string{"add", "family", "--pane", "p1", "--agent", "bash"}, false)
+	if err == nil || !strings.Contains(err.Error(), "--agent must be rysh, claude or codex") {
+		t.Fatalf("err = %v, want the --agent validation error", err)
+	}
+	if called {
+		t.Error("stamped fleet.agent despite an invalid --agent")
+	}
+	if !strings.Contains(fleetUsage, "--agent rysh|claude|codex") {
+		t.Error("usage does not document --agent")
 	}
 }

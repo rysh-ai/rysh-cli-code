@@ -18,16 +18,22 @@ import (
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/bustoken"
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 )
 
 type Record struct {
-	Name    string `json:"name"`
-	Path    string `json:"path"`
-	State   string `json:"state"`
-	PID     int    `json:"pid,omitempty"`      // daemon process PID
-	TUIPIDs []int  `json:"tui_pids,omitempty"` // all attached TUI process PIDs
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+	State string `json:"state"`
+	PID   int    `json:"pid,omitempty"` // daemon process PID
+	// PIDStart is the daemon process's start time as ProcessStart reports it,
+	// stamped by the daemon itself. With PID it identifies the process: a
+	// different start time under the same PID is a recycled PID, which is
+	// never signalled (TerminateDaemon). 0 in records from older daemons.
+	PIDStart int64 `json:"pid_start,omitempty"`
+	TUIPIDs  []int `json:"tui_pids,omitempty"` // all attached TUI process PIDs
 	// AppClients is the number of desktop-app (WebSocket) clients currently
 	// connected to the daemon's web server. The registry's State field tracks
 	// TUI attachment only, so app sessions read "detached" even while the
@@ -96,6 +102,11 @@ type Record struct {
 	WebHost      string `json:"web_host,omitempty"`
 	WebUser      string `json:"web_user,omitempty"`
 	WebPublicURL string `json:"web_public_url,omitempty"`
+	// WebControlSecretFile is the path of the 0600 file holding the control
+	// door's per-launch secret when the daemon made that secret itself (a
+	// control-mode server the desktop app did not start). The desktop app reads
+	// it to adopt the daemon. The path only — the secret is never in a record.
+	WebControlSecretFile string `json:"web_control_secret_file,omitempty"`
 }
 
 // SourceCLI and SourceApp are the canonical session Source values: the rysh
@@ -354,7 +365,7 @@ func (s *Store) Delete(name string) error {
 
 	// Kill the daemon if it's still running.
 	if err == nil && record.PID > 0 {
-		if err := terminatePID(record.PID); err != nil && !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, syscall.ESRCH) {
+		if err := terminateRecord(record); err != nil && !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, syscall.ESRCH) {
 			return err
 		}
 	}
@@ -479,8 +490,7 @@ func (s *Store) deleteNATSBucketsViaAPI(natsPort int, buckets []string) {
 		natsPort = 24242 // default embedded NATS port
 	}
 
-	nc, err := nats.Connect(
-		fmt.Sprintf("nats://127.0.0.1:%d", natsPort),
+	nc, err := bustoken.Dial(natsPort,
 		nats.MaxReconnects(0),
 		nats.Timeout(1*time.Second),
 	)
@@ -593,6 +603,8 @@ type WebMeta struct {
 	User string
 	// PublicURL is the tunnel's public address, empty when there is no tunnel.
 	PublicURL string
+	// ControlSecretFile is Record.WebControlSecretFile.
+	ControlSecretFile string
 }
 
 // UpdateWebMeta records the live web endpoint AND its public face on the
@@ -612,11 +624,13 @@ func UpdateWebMeta(cfg config.Config, name string, meta WebMeta) {
 		meta = WebMeta{}
 	}
 	if rec.WebPort == meta.Port && rec.WebHost == meta.Host &&
-		rec.WebUser == meta.User && rec.WebPublicURL == meta.PublicURL {
+		rec.WebUser == meta.User && rec.WebPublicURL == meta.PublicURL &&
+		rec.WebControlSecretFile == meta.ControlSecretFile {
 		return
 	}
 	rec.WebPort, rec.WebHost = meta.Port, meta.Host
 	rec.WebUser, rec.WebPublicURL = meta.User, meta.PublicURL
+	rec.WebControlSecretFile = meta.ControlSecretFile
 	_, _ = store.Upsert(rec)
 }
 
@@ -674,6 +688,12 @@ func processZombie(pid int) bool {
 // (and never lingers as an orphan holding the NATS port). Returns nil once the
 // process is gone (or was already gone).
 func Terminate(pid int, grace time.Duration) error {
+	return terminate(pid, grace, nil)
+}
+
+// terminate is Terminate with an optional check run before the SIGKILL
+// escalation; a false check stops there without signalling again.
+func terminate(pid int, grace time.Duration, stillOurs func() bool) error {
 	if pid <= 0 {
 		return nil
 	}
@@ -693,7 +713,11 @@ func Terminate(pid int, grace time.Duration) error {
 		return nil // exited gracefully
 	}
 
-	// Still alive after the grace period — escalate to SIGKILL.
+	// Still alive after the grace period — escalate to SIGKILL, unless the PID
+	// no longer belongs to the process we signalled.
+	if stillOurs != nil && !stillOurs() {
+		return nil
+	}
 	if err := process.Signal(syscall.SIGKILL); err != nil {
 		if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH) {
 			return nil
@@ -704,6 +728,56 @@ func Terminate(pid int, grace time.Duration) error {
 		return nil
 	}
 	return fmt.Errorf("process %d still alive after SIGKILL", pid)
+}
+
+// ErrNotOurDaemon means the process now holding a record's PID is provably not
+// the daemon that wrote the record (a different start time, or for an older
+// record a different argv): the PID was recycled and the session's daemon is
+// gone. Nothing was signalled.
+var ErrNotOurDaemon = errors.New("the process holding this PID is not the session's daemon (PID recycled)")
+
+// ErrDaemonIdentityUnknown means the PID's identity could not be read, so it
+// was not signalled. Unlike ErrNotOurDaemon it proves nothing about the daemon.
+var ErrDaemonIdentityUnknown = errors.New("cannot verify that this PID is the session's daemon")
+
+// daemonIdentity checks that rec.PID is still the daemon that wrote rec: the
+// same start time when the record has one (security-lead N1, ledger 97), else,
+// for a record from an older daemon, an argv of "... daemon <session> ...".
+func daemonIdentity(rec Record) error {
+	if rec.PIDStart != 0 {
+		cur, ok := ProcessStart(rec.PID)
+		if !ok {
+			return ErrDaemonIdentityUnknown
+		}
+		if cur != rec.PIDStart {
+			return ErrNotOurDaemon
+		}
+		return nil
+	}
+	argv, ok := processArgs(rec.PID)
+	if !ok {
+		return ErrDaemonIdentityUnknown
+	}
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == "daemon" && argv[i+1] == rec.Name {
+			return nil
+		}
+	}
+	return ErrNotOurDaemon
+}
+
+// TerminateDaemon is Terminate for a session's daemon: it signals rec.PID only
+// after daemonIdentity confirms the process is still the one that wrote rec,
+// and checks again before escalating to SIGKILL, so a recycled PID is never
+// signalled. A dead PID is not an error.
+func TerminateDaemon(rec Record, grace time.Duration) error {
+	if rec.PID <= 0 || !ProcessAlive(rec.PID) {
+		return nil
+	}
+	if err := daemonIdentity(rec); err != nil {
+		return err
+	}
+	return terminate(rec.PID, grace, func() bool { return daemonIdentity(rec) == nil })
 }
 
 // waitGone polls until the process is gone or the timeout elapses, returning
@@ -721,9 +795,13 @@ func waitGone(pid int, timeout time.Duration) bool {
 	}
 }
 
-// terminatePID stops a daemon using the standard 1-second SIGTERM grace before
-// escalating to SIGKILL. Used by Delete, where KV is being torn down anyway so a
-// long flush window is unnecessary.
-func terminatePID(pid int) error {
-	return Terminate(pid, time.Second)
+// terminateRecord stops a session's daemon using the standard 1-second SIGTERM
+// grace before escalating to SIGKILL. Used by Delete, where KV is being torn
+// down anyway so a long flush window is unnecessary. A recycled PID is not
+// signalled and not an error: the record is being deleted either way.
+func terminateRecord(rec Record) error {
+	if err := TerminateDaemon(rec, time.Second); err != nil && !errors.Is(err, ErrNotOurDaemon) {
+		return err
+	}
+	return nil
 }

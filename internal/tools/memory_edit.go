@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/rysh-ai/rysh-cli-code/internal/memory"
 )
 
 const (
@@ -23,6 +25,7 @@ const (
 // system prompt on every session.
 type MemoryEditTool struct {
 	workDir string
+	known   func() []string
 }
 
 // MemoryEditParams holds the parameters for memory operations.
@@ -35,6 +38,12 @@ type MemoryEditParams struct {
 // NewMemoryEditTool creates a MemoryEditTool rooted at workDir.
 func NewMemoryEditTool(workDir string) *MemoryEditTool {
 	return &MemoryEditTool{workDir: workDir}
+}
+
+// BindKnownSecrets gives the tool the session's registered secret values, so
+// a write holding one is refused. Values are compared in-process, never logged.
+func (t *MemoryEditTool) BindKnownSecrets(known func() []string) {
+	t.known = known
 }
 
 // Spec returns the tool specification for the LLM.
@@ -88,15 +97,36 @@ func (t *MemoryEditTool) Execute(_ context.Context, params json.RawMessage) (*To
 		if strings.TrimSpace(p.Content) == "" {
 			return ErrOutput(ErrKindValidation, "content is required for append action"), nil
 		}
+		if out := t.refuseCredential(p.Section + "\n" + p.Content); out != nil {
+			return out, nil
+		}
 		return t.append(path, p.Content, p.Section)
 	case "write":
 		if strings.TrimSpace(p.Content) == "" {
 			return ErrOutput(ErrKindValidation, "content is required for write action"), nil
 		}
+		if out := t.refuseCredential(p.Content); out != nil {
+			return out, nil
+		}
 		return t.write(path, p.Content)
 	default:
 		return ErrOutputf(ErrKindValidation, "invalid action: %s", p.Action), nil
 	}
+}
+
+// refuseCredential applies the memory scrubber (design 010 §3a) to text bound
+// for RYSH.md, which is loaded into every later session. The refusal names
+// the rule only, never the value.
+func (t *MemoryEditTool) refuseCredential(text string) *ToolOutput {
+	var known []string
+	if t.known != nil {
+		known = t.known()
+	}
+	if rule, found := memory.CredentialShaped(text, known); found {
+		return ErrOutputf(ErrKindValidation,
+			"refused by rule %s: RYSH.md is loaded into every session, so it never holds secrets; store it with ##secret instead", rule)
+	}
+	return nil
 }
 
 func (t *MemoryEditTool) read(path string) (*ToolOutput, error) {

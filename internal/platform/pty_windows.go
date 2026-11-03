@@ -6,16 +6,16 @@
 // so the answer is a compile-time constant rather than a runtime surprise.
 package platform
 
-// PTYSupported is false on native Windows.
+// PTYSupported is true on native Windows: panes run on a pseudo-console
+// (ConPTY, internal/conpty) instead of creack/pty, whose Windows build is a
+// stub. ConPTY needs Windows 10 1809 or later; on an older Windows the pane
+// says so when its shell fails to start.
 //
-// rysh's PTY layer is github.com/creack/pty, whose Windows build is a stub:
-// it compiles, so a windows/amd64 binary links and runs, and then every
-// pty.Start fails at the moment the user tries to open their first pane.
-// Native support needs a ConPTY implementation behind this same seam — design
-// 011 gates that on demonstrated demand. Until then the supported Windows path
-// is WSL2, where the Linux binary runs unmodified.
-const PTYSupported = false
+// Native Windows panes are built but have NOT been tested on a real Windows
+// host (founder decision, root-order-100 §4: no final Windows test for this
+// release). WSL2 remains the tested path; see docs/windows.md.
+const PTYSupported = true
 
 // PTYUnsupportedReason explains, in user-facing terms, why panes cannot run.
-const PTYUnsupportedReason = "native Windows has no PTY support in this build " +
-	"(rysh needs ConPTY, which is not implemented yet)"
+// Empty when PTYSupported is true.
+const PTYUnsupportedReason = ""

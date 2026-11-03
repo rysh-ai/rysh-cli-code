@@ -12,6 +12,7 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/board"
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 	"github.com/rysh-ai/rysh-cli-code/internal/fleet"
+	"github.com/rysh-ai/rysh-cli-code/internal/fleetboard"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 	"github.com/rysh-ai/rysh-cli-code/internal/session"
 )
@@ -633,10 +634,12 @@ func CronApply(store *session.Store, sessionName, jobName, input string) (*msg.M
 
 // PaneSendInput sends input (shell command or AI prompt) to a pane in a
 // running or detached session. If paneID is empty, the input is sent to the
-// active pane via the workspace inbox. If paneID is specified, the input is
-// delivered directly to that pane's inbox as a MsgPaneExecShell or
-// MsgPaneExecPrompt (the PaneActor does not handle MsgSubmitInput directly;
-// that conversion is done by PaneGroupActor in the normal routing chain).
+// active pane via the workspace inbox. If paneID is specified, the pane is
+// probed and the input is delivered directly to its inbox as a
+// MsgPaneExecShell or MsgPaneExecPrompt (the PaneActor does not handle
+// MsgSubmitInput directly; that conversion is done by PaneGroupActor in the
+// normal routing chain). A pane that does not answer, or --mode prompt to a
+// pane running claude or another program, is an error (sendToPane).
 func PaneSendInput(store *session.Store, sessionName, paneID, text, mode string) error {
 	c, err := connect(store, sessionName)
 	if err != nil {
@@ -645,24 +648,16 @@ func PaneSendInput(store *session.Store, sessionName, paneID, text, mode string)
 	defer c.Close()
 
 	if paneID != "" {
-		// Send directly to the specified pane's inbox.
-		// PaneActor only understands MsgPaneExecShell / MsgPaneExecPrompt,
-		// so we must send the correct typed message.
-		subject := msg.T("pane", paneID, "inbox")
-		var paneMsg interface{}
-		switch mode {
-		case "prompt":
-			paneMsg = &msg.MsgPaneExecPrompt{Prompt: text}
-		default:
-			// Default to shell mode when targeting a specific pane.
-			paneMsg = &msg.MsgPaneExecShell{Command: text}
+		// Probe first, then the pane's own inbox (see sendToPane).
+		err = sendToPane(c, paneID, text, mode)
+		if err != nil {
+			return err
 		}
-		err = c.SendToSubject(subject, paneMsg)
 	} else {
 		// Send to workspace inbox → routes through the actor hierarchy
 		// (Workspace → Tab → Lane → PaneGroup → Pane) which handles
 		// mode detection and message conversion.
-		err = c.Send(&msg.MsgSubmitInput{Text: text, Mode: mode})
+		err = c.Send(SubmitInputMessage(text, mode))
 	}
 	if err != nil {
 		return fmt.Errorf("send input: %w", err)
@@ -672,6 +667,44 @@ func PaneSendInput(store *session.Store, sessionName, paneID, text, mode string)
 		fmt.Printf("sent to pane %s\n", paneID)
 	} else {
 		fmt.Println("sent to active pane")
+	}
+	return nil
+}
+
+// paneBus is the part of *Client that sendToPane needs (a fake in tests).
+type paneBus interface {
+	RequestFromSubject(subject string, message interface{}, timeout time.Duration) (interface{}, error)
+	SendToSubject(subject string, message interface{}) error
+}
+
+// sendPaneProbeTimeout matches the ansa router's liveness probe.
+const sendPaneProbeTimeout = 2 * time.Second
+
+// sendToPane publishes one line of input to a pane's inbox, but only after
+// the pane answers a snapshot request. The inbox is fire-and-forget, so
+// without the probe a wrong id, a short id or a pane that has exited all
+// printed "sent" (founder-tools Sprint 1 #4).
+//
+// --mode prompt to a pane running a program (claude, codex, vim …) is refused:
+// MsgPaneExecPrompt drives rysh's own LLM and never reaches that program
+// (F-25, see ansaDeliverToInbox). `rysh ansa send` types into the pane, which
+// does reach it. sendToPane does not type itself: typing clears whatever a
+// human has in the composer, and `rysh send` never did that.
+func sendToPane(c paneBus, paneID, text, mode string) error {
+	reply, err := c.RequestFromSubject(msg.T("pane", paneID, "snapshot"),
+		&msg.MsgGetPaneSnapshot{LayoutOnly: true}, sendPaneProbeTimeout)
+	if err != nil {
+		return fmt.Errorf("pane %s did not answer (a full pane id is needed; the pane may have exited); nothing was sent: %w", paneID, err)
+	}
+	program := ""
+	if snap, ok := reply.(*msg.MsgPaneSnapshotReply); ok {
+		program = strings.TrimSpace(snap.Snapshot.Program)
+	}
+	if mode == "prompt" && program != "" {
+		return fmt.Errorf("pane %s is running %s: --mode prompt goes to rysh's own model and never reaches %s, so nothing was sent; use: rysh ansa send %s -- <text>", paneID, program, program, paneID)
+	}
+	if err := c.SendToSubject(msg.T("pane", paneID, "inbox"), paneExecMessage(text, mode)); err != nil {
+		return fmt.Errorf("send input: %w", err)
 	}
 	return nil
 }
@@ -912,6 +945,17 @@ func FleetList(store *session.Store, sessionName, name string) (*fleet.Reply, er
 	return fleet.Ask(c.nc, fleet.Query{Name: name}, fleetTimeout)
 }
 
+// FleetBoard reads the session-wide fleet board's rows (design 030 §9.2, W2).
+// Read-only; the answer comes from the FleetBoardActor, not from any board.
+func FleetBoard(store *session.Store, sessionName string) (*fleetboard.Reply, error) {
+	c, err := connect(store, sessionName)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	return fleetboard.Ask(c.nc, fleetTimeout)
+}
+
 // FleetUpdate writes to the registry: register, forget, state, membership.
 //
 // The reply is returned even when the registry REFUSED, so a caller can print
@@ -953,5 +997,44 @@ func AnsaSend(store *session.Store, sessionName, asPaneID, to, mode, text string
 		To:       to,
 		Mode:     mode,
 		Text:     text,
+	})
+}
+
+// AnsaHung asks the daemon whether the claude in a pane is hung
+// (`rysh ansa hung`). Read-only: the daemon reads transcript file times and
+// the screen, never transcript content (D-67 (a)). Exactly one of to,
+// claudeSession and all.
+func AnsaHung(store *session.Store, sessionName, to, claudeSession string, all bool, minutes int) (*msg.MsgCLIResponse, error) {
+	c, err := connect(store, sessionName)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+
+	return cliRequest(c, &msg.MsgCLIAnsaHung{
+		To:            to,
+		ClaudeSession: claudeSession,
+		All:           all,
+		Minutes:       minutes,
+	})
+}
+
+// AnsaKeys presses named keys in ONE pane through ANSA (`rysh ansa keys`).
+// to is a pane id or @given-name; claudeSession addresses the pane by its
+// claude.session_id meta instead. Exactly one of the two. The daemon maps the
+// key names to bytes and applies the guard; see internal/actors/ansa_keys.go.
+func AnsaKeys(store *session.Store, sessionName, asPaneID, to, claudeSession string, keys []string, force bool) (*msg.MsgCLIResponse, error) {
+	c, err := connect(store, sessionName)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+
+	return cliRequest(c, &msg.MsgCLIAnsaKeys{
+		AsPaneID:      asPaneID,
+		To:            to,
+		ClaudeSession: claudeSession,
+		Keys:          keys,
+		Force:         force,
 	})
 }

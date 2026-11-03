@@ -176,6 +176,12 @@ type MsgMemoryStateUpdate = sharedmsg.MsgMemoryStateUpdate
 // Follow-up 2b: prompt hot-reload broadcast.
 type MsgReloadPrompts = sharedmsg.MsgReloadPrompts
 
+// Design 093 H1: per-pane agent profile (system prompt + tool allow-list).
+type MsgSetPaneAgentProfile = sharedmsg.MsgSetPaneAgentProfile
+
+// TagSetPaneAgentProfile is MsgSetPaneAgentProfile's codec tag.
+const TagSetPaneAgentProfile = sharedmsg.TagSetPaneAgentProfile
+
 // ---------------------------------------------------------------------------
 // Tag constant aliases (re-declared from sharedmsg since const can't be aliased)
 // ---------------------------------------------------------------------------

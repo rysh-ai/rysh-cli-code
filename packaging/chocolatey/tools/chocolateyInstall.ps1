@@ -1,5 +1,9 @@
 $ErrorActionPreference = 'Stop'
 
+# STALE (gap11, design 085): the Windows zip now opens panes through ConPTY,
+# untested on real Windows, and is no longer named _cli-only; see the note in
+# ../rysh.nuspec. This script must be rewritten before any publish.
+#
 # NOTE: this package ships the CLI-ONLY Windows build. It cannot open rysh
 # panes — rysh has no ConPTY implementation, so a windows/amd64 binary links
 # and runs but cannot allocate a terminal. The artifact name says so, and the

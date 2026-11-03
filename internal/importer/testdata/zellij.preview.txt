@@ -1,0 +1,26 @@
+rysh import zellij — preview (nothing is written without --apply)
+  from: testdata/zellij
+
+Layout: 2 tab(s), 3 lane(s), 5 pane(s)
+  tab 1 "code"
+    lane 1
+      pane 1  cwd: $HOME/src/web
+              start: nvim .
+    lane 2
+      pane 1  cwd: $HOME/src/web/frontend
+              start: npm run dev
+      pane 2 "scratch"  cwd: $HOME/src/web
+  tab 2 "logs"
+    lane 1
+      pane 1  cwd: /var/log
+              start: tail -f 'system log.txt'
+      pane 2  cwd: /var/log
+              start: ${EDITOR:-vi} notes.md
+  Start commands are not run now: they run when you run the generated script.
+
+Notes:
+  - tab "logs": a plugin pane was skipped (rysh has no Zellij plugins)
+
+With --apply this writes (after backing up what it replaces):
+  .rysh/imports/zellij-web.rysh
+Undo with: rysh import --undo

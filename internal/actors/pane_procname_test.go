@@ -104,12 +104,16 @@ func TestProcessNameOnADeadPidIsEmpty(t *testing.T) {
 func TestForegroundCLIResolvesAVersionNamedClaude(t *testing.T) {
 	const version = "9.9.999"
 	root := t.TempDir()
-	versions := filepath.Join(root, "share", "claude", "versions")
+	versions := filepath.Join(root, ".local", "share", "claude", "versions")
 	if err := os.MkdirAll(versions, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	real := filepath.Join(versions, version)
 	buildSleeper(t, real)
+	// HOME is the fake home, so the layout sits at the native installer's known
+	// install location, ~/.local/share/claude/versions (WO-7). It is set after
+	// the stand-in is built, so the build keeps the real Go cache.
+	t.Setenv("HOME", root)
 	link := filepath.Join(root, "claude")
 	if err := os.Symlink(real, link); err != nil {
 		t.Fatalf("symlink: %v", err)

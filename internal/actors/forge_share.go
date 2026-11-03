@@ -77,6 +77,10 @@ type ForgeShareActor struct {
 	selfPID *actor.PID
 	system  *actor.ActorSystem
 
+	// reregStop stops the heartbeat re-register loop (forge_register.go); nil
+	// while no loop runs. Mailbox only.
+	reregStop chan struct{}
+
 	// dial opens the upstream connection; defaults to dialUpstream. Overridable in
 	// tests to point at an in-process broker (no WebSocket / auth).
 	dial func(config.UpstreamConfig, string, ...nats.Option) (*nats.Conn, error)
@@ -282,7 +286,10 @@ func (a *ForgeShareActor) ensureConn(paneID string) bool {
 	if dial == nil {
 		dial = dialUpstream
 	}
-	nc, err := dial(a.config, "rysh-forge-"+shortID(a.uid))
+	nc, err := dial(a.config, "rysh-forge-"+shortID(a.uid),
+		// Re-register right after a reconnect, so a server restart or a role
+		// change does not leave the records inactive until the next heartbeat.
+		nats.ReconnectHandler(func(nc *nats.Conn) { go a.reregisterShared(nc) }))
 	if err != nil {
 		a.out(paneID, fmt.Sprintf("[forge] upstream connect failed: %v\n", err))
 		return false
@@ -295,6 +302,10 @@ func (a *ForgeShareActor) ensureConn(paneID string) bool {
 
 func (a *ForgeShareActor) shareAPI(name, paneID string) {
 	slog.Info("forge-share: share api requested", "name", name, "pane", shortID(paneID), "url", a.config.URL, "ws", a.ws)
+	if !validForgeAPIName(name) {
+		a.out(paneID, fmt.Sprintf("[forge] cannot share %q: %s\n", name, forgeAPINameRule))
+		return
+	}
 	ops := a.forge.APIOps(name)
 	if len(ops) == 0 {
 		a.out(paneID, fmt.Sprintf("[forge] %q is not enabled — run '##integration enable %s' first\n", name, name))
@@ -313,6 +324,22 @@ func (a *ForgeShareActor) shareAPI(name, paneID string) {
 	if !a.ensureConn(paneID) {
 		return
 	}
+	// Register the name before arming its invoke responder (forge_register.go).
+	switch out, reason := a.registerAPI(a.nc, name); out {
+	case forgeRegRefused:
+		a.out(paneID, fmt.Sprintf("[forge] cannot share api %q: the server refused the name: %s\n"+
+			"        (a name another member holds stays theirs; add the integration under another name)\n", name, reason))
+		return
+	case forgeRegFailed:
+		a.out(paneID, fmt.Sprintf("[forge] cannot share api %q: registration failed: %s\n", name, reason))
+		return
+	case forgeRegNoRegistry:
+		if a.readOnlyKey() {
+			a.out(paneID, fmt.Sprintf("[forge] cannot share api %q: the upstream key is read-only (sharing needs a key with write access)\n", name))
+			return
+		}
+		slog.Info("forge-share: the upstream has no forge registry; sharing without one", "api", name, "ws", a.ws)
+	}
 	// Arm the discovery responder once (the first shared API).
 	if a.catalogSub == nil {
 		sub, err := a.nc.Subscribe(forgeCatalogSubject(a.ws), a.handleCatalogReq)
@@ -329,9 +356,24 @@ func (a *ForgeShareActor) shareAPI(name, paneID string) {
 		return
 	}
 	_ = a.nc.Flush()
+	if a.readOnlyKey() {
+		// The upstream refused the responders (read_only_key.go): undo them, so
+		// nothing claims to be shared.
+		_ = sub.Unsubscribe()
+		a.mu.Lock()
+		none := len(a.shared) == 0
+		a.mu.Unlock()
+		if none && a.catalogSub != nil {
+			_ = a.catalogSub.Unsubscribe()
+			a.catalogSub = nil
+		}
+		a.out(paneID, fmt.Sprintf("[forge] cannot share api %q: the upstream key is read-only (sharing needs a key with write access)\n", name))
+		return
+	}
 	a.mu.Lock()
 	a.shared[name] = sub
 	a.mu.Unlock()
+	a.startReregister()
 	a.out(paneID, fmt.Sprintf("[forge] ✓ sharing api %q (%d op(s)) — a subscriber can run: ##forge subscribe %s\n", name, len(ops), name))
 	slog.Info("forge-share: shared api", "api", name, "ops", len(ops), "ws", a.ws)
 }
@@ -347,9 +389,15 @@ func (a *ForgeShareActor) unshareAPI(name, paneID string) {
 		return
 	}
 	_ = sub.Unsubscribe()
-	if empty && a.catalogSub != nil {
-		_ = a.catalogSub.Unsubscribe()
-		a.catalogSub = nil
+	if out, reason := a.unregisterAPI(a.nc, name); out == forgeRegRefused || out == forgeRegFailed {
+		slog.Warn("forge-share: unregister failed", "api", name, "outcome", out, "reason", reason)
+	}
+	if empty {
+		a.stopReregister()
+		if a.catalogSub != nil {
+			_ = a.catalogSub.Unsubscribe()
+			a.catalogSub = nil
+		}
 	}
 	a.out(paneID, fmt.Sprintf("[forge] stopped sharing api %q\n", name))
 }
@@ -421,6 +469,10 @@ func (a *ForgeShareActor) listRemote(paneID string) {
 			}
 		}
 	}
+	if len(seen) == 0 && a.readOnlyKey() {
+		a.out(paneID, "[forge] cannot list remote APIs: the upstream key is read-only\n")
+		return
+	}
 	if len(seen) == 0 {
 		a.out(paneID, fmt.Sprintf("[forge] no remote shared APIs found in workspace %s.\n"+
 			"        Check: (1) the source ran '##forge share api <name>' and shows '✓ sharing';\n"+
@@ -436,6 +488,10 @@ func (a *ForgeShareActor) listRemote(paneID string) {
 }
 
 func (a *ForgeShareActor) subscribe(name string, kind agentic.ScopeKind, ids agentic.ScopeIDs, paneID string, retriesLeft int, auth *runtime.AuthConfig) {
+	if !validForgeAPIName(name) {
+		a.out(paneID, fmt.Sprintf("[forge] cannot subscribe to %q: %s\n", name, forgeAPINameRule))
+		return
+	}
 	if !a.ensureConn(paneID) {
 		return
 	}
@@ -472,6 +528,10 @@ func (a *ForgeShareActor) subscribe(name string, kind agentic.ScopeKind, ids age
 		if ops != nil {
 			break
 		}
+	}
+	if len(ops) == 0 && a.readOnlyKey() {
+		a.out(paneID, fmt.Sprintf("[forge] cannot subscribe to %q: the upstream key is read-only\n", name))
+		return
 	}
 	if len(ops) == 0 {
 		// Bounded retry (used by startup config): the source may not have shared
@@ -530,6 +590,9 @@ func (a *ForgeShareActor) subscribe(name string, kind agentic.ScopeKind, ids age
 				return res, nil
 			}
 			res, err := call(bearer)
+			if err != nil && isReadOnlyKeyRefusal(nc.LastError()) {
+				return tools.ErrOutputf(tools.ErrKindPermissionDenied, "forge invoke: the upstream key is read-only"), nil
+			}
 			if err != nil {
 				return tools.ErrOutputf(tools.ErrKindTransient, "forge invoke failed (remote unavailable?): %v", err), nil
 			}
@@ -587,6 +650,9 @@ func (a *ForgeShareActor) scatter(filter string) []forgeCatalogResp {
 		return nil
 	}
 	_ = a.nc.Flush()
+	if a.readOnlyKey() {
+		return nil // refused: no responder will ever see it
+	}
 	var out []forgeCatalogResp
 	deadline := time.Now().Add(forgeDiscoverWindow)
 	for {
@@ -606,10 +672,25 @@ func (a *ForgeShareActor) scatter(filter string) []forgeCatalogResp {
 	return out
 }
 
+// readOnlyKey reports whether the upstream refused this actor's connection as
+// read-only (read_only_key.go). nats.go keeps the refusal as LastError, which
+// the -ERR sets before the PONG that ends a Flush arrives, and clears it on
+// reconnect.
+func (a *ForgeShareActor) readOnlyKey() bool {
+	return a.nc != nil && isReadOnlyKeyRefusal(a.nc.LastError())
+}
+
 func (a *ForgeShareActor) teardown() {
+	a.stopReregister()
 	a.mu.Lock()
-	for _, sub := range a.shared {
+	for name, sub := range a.shared {
 		_ = sub.Unsubscribe()
+		// Best effort and without waiting for a reply: the Drain below flushes
+		// it. The server's staleness window covers a source that never gets here.
+		if a.nc != nil {
+			body, _ := json.Marshal(forgeRegisterReq{V: 1, API: name, Source: a.uid})
+			_ = a.nc.Publish(forgeUnregisterSubject(a.ws), body)
+		}
 	}
 	a.shared = map[string]*nats.Subscription{}
 	for _, s := range a.subs {

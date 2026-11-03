@@ -1,0 +1,39 @@
+rysh import tmux — preview (nothing is written without --apply)
+  from: testdata/tmuxp
+
+Layout: 3 tab(s), 6 lane(s), 9 pane(s)
+  tab 1 "dev"
+    lane 1
+      pane 1  cwd: $HOME/work/shop
+              start: source .venv/bin/activate; python manage.py runserver
+    lane 2
+      pane 1  cwd: $HOME/work/shop
+              start: source .venv/bin/activate; npm run watch
+    lane 3
+      pane 1  cwd: $HOME/work/shop
+              start: source .venv/bin/activate
+  tab 2 "db"
+    lane 1
+      pane 1  cwd: /srv/db/sql
+              start: source .venv/bin/activate; psql shop
+      pane 2  cwd: /srv/db
+              start: source .venv/bin/activate
+  tab 3 "grid"
+    lane 1
+      pane 1  cwd: $HOME/work/shop
+              start: source .venv/bin/activate; htop
+      pane 2  cwd: $HOME/work/shop
+              start: source .venv/bin/activate
+    lane 2
+      pane 1  cwd: $HOME/work/shop
+              start: source .venv/bin/activate
+      pane 2  cwd: $HOME/work/shop
+              start: source .venv/bin/activate
+  Start commands are not run now: they run when you run the generated script.
+
+Notes:
+  - tab "grid": tiled is approximated as 2 lane(s) of stacked panes
+
+With --apply this writes (after backing up what it replaces):
+  .rysh/imports/tmux-shop.rysh
+Undo with: rysh import --undo

@@ -119,8 +119,24 @@ func ansaPaneCwd(p ansaPane) string {
 // else's conversation, and the receipt would still say "resumed". A pane that
 // recorded no directory at all keeps the old behaviour — there is nothing to
 // be wrong about.
+//
+// A pane stamped agent.sandbox is REFUSED too: this line has no sandbox
+// wrapper, so it would start that agent unsandboxed. The native resume
+// (`##claude --resume`, the daemon-restart path) re-applies the profile.
 func ansaResumeLine(p ansaPane, agent, sid string) (string, error) {
-	cmd := ansaResumeCommand(agent, sid, ansaPaneAgentArgs(p))
+	if why := claudeHooksRefusal(agent); why != "" {
+		return "", fmt.Errorf("%s", why)
+	}
+	if prof := strings.TrimSpace(p.meta(metaAgentSandbox)); prof != "" {
+		return "", fmt.Errorf("its agent runs under sandbox profile %q and a fleet resume would "+
+			"start it unsandboxed — resume it in the pane with ##%s --resume", prof, agent)
+	}
+	extra := ansaPaneAgentArgs(p)
+	if nativeAgentKind(agent) == nativeAgentClaude {
+		// The bridge, as on every other claude launch (claudeBridgeArgs).
+		extra = strings.TrimSpace(extra + claudeBridgeArgs(nativeAgentSpec{Kind: nativeAgentClaude, Args: extra}))
+	}
+	cmd := ansaResumeCommand(agent, sid, extra)
 	dir := ansaPaneCwd(p)
 	if dir == "" {
 		return cmd, nil

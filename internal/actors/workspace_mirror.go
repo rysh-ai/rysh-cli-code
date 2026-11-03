@@ -536,7 +536,9 @@ func (w *WorkspaceActor) removeMirrorTab(shareID string) bool {
 		return false
 	}
 	mt := w.mirrorTabs[idx]
-	if mt.listenerPID != nil && w.actorSystem != nil {
+	// A remote-host tab shares its host's actor with the host's other tabs;
+	// ##remote remove stops it, not the removal of one tab.
+	if mt.listenerPID != nil && w.actorSystem != nil && mt.host == "" {
 		w.actorSystem.Root.Stop(mt.listenerPID)
 	}
 	w.mirrorTabs = append(w.mirrorTabs[:idx], w.mirrorTabs[idx+1:]...)

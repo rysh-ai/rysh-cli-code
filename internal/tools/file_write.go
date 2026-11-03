@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/rysh-ai/rysh-cli-code/internal/policy"
 )
 
 // FileWriteTool creates or overwrites files.
@@ -69,6 +71,9 @@ func (t *FileWriteTool) Execute(ctx context.Context, params json.RawMessage) (*T
 	if err != nil {
 		return nil, err
 	}
+	if out.Error != "" {
+		return out, nil
+	}
 	filePath := out.Metadata["file_path"]
 
 	// Create parent directories if needed.
@@ -108,6 +113,9 @@ func (t *FileWriteTool) compute(params json.RawMessage) (*ToolOutput, string, er
 	filePath := p.FilePath
 	if !filepath.IsAbs(filePath) {
 		filePath = filepath.Join(t.workDir, filePath)
+	}
+	if out := fsPolicyRefusal(filePath, policy.FSWrite); out != nil {
+		return out, "", nil
 	}
 	var diff, operation string
 	if data, err := os.ReadFile(filePath); err == nil {

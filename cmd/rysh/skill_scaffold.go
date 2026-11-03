@@ -53,7 +53,10 @@ func channelCredFields(channel string) []credField {
 		return []credField{
 			{Key: "bot_token", Label: "Slack bot token (xoxb-…)", EnvName: "SLACK_BOT_TOKEN"},
 			{Key: "app_token", Label: "Slack app-level token (xapp-…)", EnvName: "SLACK_APP_TOKEN"},
-			{Key: "channels", Label: "Slack channels (comma-separated)", Default: "#support", IsList: true},
+			// No default (E33 G2): an allow-list drops everything outside it,
+			// DMs included, and the owner allowlist already decides who is
+			// answered. Empty = DMs plus any channel the bot is invited to.
+			{Key: "channels", Label: "Slack channels to limit to (comma-separated; empty = DMs + any channel the bot is in)", IsList: true},
 		}
 	case "email":
 		return []credField{
@@ -71,6 +74,10 @@ func channelCredFields(channel string) []credField {
 			{Key: "phone", Label: "phone_number_id (numeric Meta ID)"},
 			{Key: "api_key", Label: "Graph API access token", EnvName: "WHATSAPP_API_KEY"},
 			{Key: "verify_token", Label: "webhook verify token", EnvName: "WHATSAPP_VERIFY_TOKEN"},
+			// Collected rather than left to hand-editing because it is what
+			// authenticates inbound: the adapter refuses to start without it,
+			// and every webhook POST must carry a valid X-Hub-Signature-256.
+			{Key: "app_secret", Label: "Meta app secret (App Settings → Basic; signs inbound webhooks)", EnvName: "WHATSAPP_APP_SECRET"},
 		}
 	case "phone":
 		return []credField{
@@ -78,10 +85,10 @@ func channelCredFields(channel string) []credField {
 			{Key: "provider", Label: "telephony provider", Default: "twilio"},
 			{Key: "account_sid", Label: "Twilio account SID", EnvName: "TWILIO_ACCOUNT_SID"},
 			{Key: "auth_token", Label: "Twilio auth token", EnvName: "TWILIO_AUTH_TOKEN"},
-			// Collected rather than left to hand-editing because it is what
-			// authenticates inbound: Twilio signs the public URL, so without it
-			// the webhook accepts anything that reaches the port.
-			{Key: "webhook_url", Label: "public webhook URL Twilio posts to (enables signature checks)"},
+			// Required: Twilio signs the public URL it posts to, and the adapter
+			// verifies every inbound POST against it. Without it the adapter
+			// refuses to start (docs/phone-twilio.md).
+			{Key: "webhook_url", Label: "public webhook URL Twilio posts to (required; every inbound SMS is verified against it)"},
 		}
 	case "chatbot":
 		return []credField{
@@ -91,7 +98,9 @@ func channelCredFields(channel string) []credField {
 	case "discord":
 		return []credField{
 			{Key: "bot_token", Label: "Discord bot token", EnvName: "DISCORD_BOT_TOKEN"},
-			{Key: "channels", Label: "Discord channels (comma-separated)", Default: "#support", IsList: true},
+			// Numeric channel ids only (channels.ValidateDiscordChannelIDs);
+			// no default, for the same reason as Slack's.
+			{Key: "channels", Label: "Discord channel IDs to limit to (comma-separated numeric ids; empty = DMs + any channel the bot can see)", IsList: true},
 		}
 	case "telegram":
 		return []credField{
@@ -138,6 +147,22 @@ func channelCredFields(channel string) []credField {
 			{Key: "app_secret", Label: "Azure Bot client secret", EnvName: "TEAMS_APP_SECRET"},
 			{Key: "tenant_id", Label: "Entra tenant id (empty = multi-tenant bot)"},
 		}
+	case "mattermost":
+		return []credField{
+			{Key: "server_url", Label: "Mattermost server URL (https://…)"},
+			{Key: "bot_token", Label: "bot account access token", EnvName: "MATTERMOST_BOT_TOKEN"},
+		}
+	case "matrix":
+		return []credField{
+			{Key: "server_url", Label: "homeserver URL (https://…)"},
+			{Key: "bot_token", Label: "bot account access token", EnvName: "MATRIX_ACCESS_TOKEN"},
+		}
+	case "line":
+		return []credField{
+			{Key: "bot_token", Label: "channel access token", EnvName: "LINE_CHANNEL_ACCESS_TOKEN"},
+			{Key: "app_secret", Label: "channel secret", EnvName: "LINE_CHANNEL_SECRET"},
+			{Key: "webhook_port", Label: "local webhook port (your tunnel forwards the Webhook URL here)", Default: "8790"},
+		}
 	default:
 		return nil
 	}
@@ -148,8 +173,9 @@ func channelCredFields(channel string) []credField {
 // offering it. It is empty today: "phone" lived here while it was a placeholder
 // that sent and received nothing (X3), and came out when the Twilio transport
 // landed (B12). The seam stays for the next channel that ships behind its
-// config.
-var unofferedChannelTypes = map[string]bool{}
+// config. github (gap04) is configured by hand: it has no scaffold fields
+// until E33 adds an assistant preset for it (lead ruling R8).
+var unofferedChannelTypes = map[string]bool{"github": true}
 
 // onboardChannelTypes orders the channel picker: Slack and email first (the
 // friendliest first channels), then the remaining offerable ValidChannelTypes.

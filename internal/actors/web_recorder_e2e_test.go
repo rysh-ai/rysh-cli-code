@@ -394,8 +394,13 @@ func waitBrowserReady(t *testing.T, nc *nats.Conn, pub *msg.NATSPublisher, paneI
 	defer func() { _ = sub.Unsubscribe() }()
 
 	// Chromium's cold start can take a few seconds; retry the probe until it
-	// answers rather than guessing a single sleep duration.
-	deadline := time.Now().Add(60 * time.Second)
+	// answers rather than guessing a single sleep duration. The window covers
+	// the actor's worst case: every launch attempt waiting out its bound.
+	window := 30 * time.Second
+	for _, w := range headlessLaunchWaits {
+		window += w
+	}
+	deadline := time.Now().Add(window)
 	for time.Now().Before(deadline) {
 		_ = pub.Send(msg.T("pane", paneID, "browser", "request"), &msg.MsgBrowserActionRequest{
 			RequestID: "probe-1",

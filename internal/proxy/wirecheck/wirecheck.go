@@ -33,9 +33,17 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/proxy"
 )
 
-// plantedSecret is a live-SHAPED but synthetic credential. Real shape is the
-// point: it is what the SecretNAT detector tier must catch.
-const plantedSecret = "sk_live_ABCD1234abcd5678EFGH9012"
+// plantedParts are the pieces of the planted secret, joined at run time so
+// the live-shaped value never appears whole in the source or in a compiled
+// binary, where any scanner would flag rysh itself as leaking a key. They are
+// vars, not consts, on purpose: Go folds constant concatenation at compile
+// time, which would put the whole literal straight back in the binary.
+var plantedParts = []string{"sk_", "live_", "ABCD1234abcd", "5678EFGH9012"}
+
+// PlantedSecret is a live-SHAPED but synthetic credential. Real shape is the
+// point: it is what the SecretNAT detector tier must catch. cmd/wire-harness
+// plants the same value, so the two proofs and their recordings agree.
+func PlantedSecret() string { return strings.Join(plantedParts, "") }
 
 // dummyKey is what the probed CLI gets as its credential. The probe must never
 // need a working key — the stub upstream answers everything.
@@ -147,7 +155,7 @@ func Run(ctx context.Context, binary string, timeout time.Duration, scratchBase 
 	defer func() { _ = os.RemoveAll(scratch) }()
 
 	baseURL := srv.BaseURL() + "/" + prof.Dialect + "/" + probePaneID
-	prompt := "In one sentence: is " + plantedSecret + " a live or test key?"
+	prompt := "In one sentence: is " + PlantedSecret() + " a live or test key?"
 	argv, env, err := prof.ProbeCommand(bin, baseURL, prompt, scratch, dummyKey)
 	if err != nil {
 		return res, err
@@ -176,7 +184,7 @@ func Run(ctx context.Context, binary string, timeout time.Duration, scratchBase 
 	requests := res.Requests
 	mu.Unlock()
 
-	res.Planted = strings.Count(captured, plantedSecret)
+	res.Planted = strings.Count(captured, PlantedSecret())
 	res.Tokens = len(snatToken.FindAllString(captured, -1))
 
 	switch {

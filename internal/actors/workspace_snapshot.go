@@ -189,7 +189,7 @@ func (w *WorkspaceActor) collectSnapshot(layoutOnly, noHistories bool, historyPa
 			ts = mirrorPlaceholderTab(mt.shareID, mt.alias)
 		}
 		ts.ID = mirrorTabID(mt.shareID)
-		ts.Title = "📡 " + mt.displayName()
+		ts.Title = mt.snapshotTitle()
 		// Diagnostic: report how many panes are rendered as live-interactive vs how
 		// many have live VT state stored, so we can tell render-side from
 		// stream-side failures when interactive mirroring misbehaves.

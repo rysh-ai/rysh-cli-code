@@ -145,6 +145,10 @@ type ansaTransport interface {
 	// Interrupt sends the target's interrupt gesture. It is NOT Deliver with a
 	// special payload — see ansaInterruptPane.
 	Interrupt(paneID string) error
+	// SendKeys writes named key presses (already mapped to bytes by
+	// internal/ansakeys) to the pane's PTY, one write per press — see
+	// ansa_keys.go. Like Interrupt, it is not Deliver: no text, no CR.
+	SendKeys(paneID string, writes [][]byte) error
 	// Screen returns the target's live VT rows, or an error if it cannot be
 	// read. It exists for ONE caller — the drain loop below — because a stop
 	// that cannot be verified is the thing F-30 was.
@@ -1073,6 +1077,13 @@ func ansaDrainPane(tr ansaTransport, paneID string) ansaDrainOutcome {
 // the screen said — queued orders are GONE, not deferred, and a pane still
 // working after the bound is reported rather than chased forever.
 const ansaInterruptQueueCaution = "note: queued orders are CANCELLED, not deferred — a drained stop discards work the fleet had already accepted (F-30). A pane with a PENDING BACKGROUND TASK wakes itself when the task completes; the re-sweep catches wakes inside its window (rewoke+N above) — a longer-running task re-wakes its pane AFTER this receipt, and only re-running the stop puts it down.\n"
+
+// ansaDrainLabelNote explains the * on every quiet drain label (F-32). A
+// bounded screen-watch can show that nothing was happening when it looked; it
+// cannot show that a queue is empty or that a background task will not wake the
+// pane, so a quiet label is a reading, not a stop. `##ansa kill` is the verb
+// that verifies, by process state (F-42).
+const ansaDrainLabelNote = "note: * = the pane's screen showed no work when last read. That is not proof that nothing is queued or about to wake it (F-32). For a verified stop use ##ansa kill --fleet <name>|--all-fleets (checks process state).\n"
 
 // ansaKillOutcome is what a hard stop achieved on one pane, verified by
 // PROCESS STATE — the property that makes this verb unlike everything screen-

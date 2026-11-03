@@ -58,14 +58,16 @@ import (
 	"time"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/proxy"
+	"github.com/rysh-ai/rysh-cli-code/internal/proxy/wirecheck"
 
 	"github.com/rysh-ai/rysh-cli-shared/secretnat"
 )
 
 // plantedSecret is shaped like a live Stripe key so the detector tier fires on
 // it. It is synthetic: the point is that a real-SHAPED credential is what the
-// heuristic must catch.
-const plantedSecret = "sk_live_ABCD1234abcd5678EFGH9012"
+// heuristic must catch. It is assembled at run time by wirecheck, the same
+// value `##proxy check` plants, so it is never one literal in this binary.
+var plantedSecret = wirecheck.PlantedSecret()
 
 const paneID = "wire-harness-pane"
 

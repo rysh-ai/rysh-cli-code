@@ -277,8 +277,8 @@ func TestSplitTabFlag(t *testing.T) {
 
 // TestSecretWorkspaceScopeAndChain verifies the WorkspaceActor scope helpers:
 // the workspace scope derives from the workspace name (falling back to session),
-// and the skill-resolution chain is [tab, workspace] — collapsing to a single
-// element when there is no distinct tab scope.
+// and the skill-resolution chain is [tab, workspace, default] — dropping the tab
+// when there is no distinct tab scope (E33: the project scope comes last).
 func TestSecretWorkspaceScopeAndChain(t *testing.T) {
 	// Workspace name drives the scope token and label.
 	w := &WorkspaceActor{
@@ -292,8 +292,8 @@ func TestSecretWorkspaceScopeAndChain(t *testing.T) {
 	}
 	// Empty paneID falls back to the active tab; chain is [tab, workspace].
 	chain := w.secretScopeChain("")
-	if len(chain) != 2 || chain[0] != "tab-1111" || chain[1] != "ws-main" {
-		t.Fatalf("scope chain: got %v, want [tab-1111 ws-main]", chain)
+	if len(chain) != 3 || chain[0] != "tab-1111" || chain[1] != "ws-main" || chain[2] != "default" {
+		t.Fatalf("scope chain: got %v, want [tab-1111 ws-main default]", chain)
 	}
 
 	// Falls back to the session name when the workspace name is empty.
@@ -302,8 +302,8 @@ func TestSecretWorkspaceScopeAndChain(t *testing.T) {
 		t.Fatalf("session fallback scope: got %q, want sess-only", sc)
 	}
 	// With no tabs there is no tab scope, so the chain is workspace-only.
-	if chain := w2.secretScopeChain(""); len(chain) != 1 || chain[0] != "sess-only" {
-		t.Fatalf("workspace-only chain: got %v, want [sess-only]", chain)
+	if chain := w2.secretScopeChain(""); len(chain) != 2 || chain[0] != "sess-only" || chain[1] != "default" {
+		t.Fatalf("workspace-only chain: got %v, want [sess-only default]", chain)
 	}
 }
 

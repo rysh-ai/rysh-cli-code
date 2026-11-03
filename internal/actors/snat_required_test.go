@@ -18,6 +18,7 @@ func clearPolicyGlobals(t *testing.T) {
 	t.Cleanup(func() {
 		policy.ClearBlocked()
 		sharedagentic.SetApprovalPolicy(nil)
+		policy.SetActiveFS(nil)
 	})
 }
 

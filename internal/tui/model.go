@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/bus"
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
+	"github.com/rysh-ai/rysh-cli-code/internal/fleetboard"
 	msgpkg "github.com/rysh-ai/rysh-cli-code/internal/msg"
 	"github.com/rysh-ai/rysh-cli-code/internal/voice"
 )
@@ -65,6 +67,7 @@ type pipelineOutputMsg struct {
 // attentionEventMsg wraps an MsgAttentionEvent for the Bubble Tea message loop.
 type attentionEventMsg struct {
 	Event *msgpkg.MsgAttentionEvent
+	Ack   *msgpkg.MsgAttentionAck
 }
 
 // remoteFullscreenMsg is delivered to the (source) Bubble Tea loop when a
@@ -270,6 +273,7 @@ type Model struct {
 	// Attention mechanism state.
 	attentionCh       chan attentionEventMsg
 	attentionState    map[string]*attentionInfo
+	attentionOut      io.Writer
 	attentionBlink    bool
 	attentionLastBell map[string]time.Time
 
@@ -321,6 +325,18 @@ type Model struct {
 	// ~30fps so it cannot starve keystroke handling on the single update loop.
 	lastRawFetch    time.Time
 	rawFetchPending bool
+	// visiblePanes is the active tab's pane IDs, shared with the rawDirty NATS
+	// callback so signals from hidden panes never reach the Update loop.
+	visiblePanes *visiblePaneSet
+
+	// Render skipping (model_view.go View). Bubble Tea calls View() after EVERY
+	// message, and a full View measures the whole screen several times. A
+	// handler that changed nothing on screen (an unchanged frame, a dirty
+	// signal, a timer that only schedules work) sets viewSkip, and View serves
+	// vcache instead of rebuilding. vcache is a pointer so the cache survives
+	// Bubble Tea's by-value model copies; Update clears viewSkip first.
+	viewSkip bool
+	vcache   *viewCache
 
 	// Pushed mirror-pane VT frames (rysh.pane.*.vtframe — content_stream.go).
 	// vtFrameCh carries decoded keyframe/delta frames; mirrorVTSeq is the last
@@ -360,6 +376,16 @@ type Model struct {
 	// never blocks on the question.
 	boardRecorder RecorderState
 	boardViews    map[string]*boardViewState
+	// peerFeed is the daemon's last snapshot of the connected peer board
+	// (design 044 N1); peerSeen is the newest sequence the user has looked
+	// at in the peer view. Unread counts other sessions' messages above it.
+	peerFeed   *msgpkg.MsgPeerFeed
+	peerSeen   int64
+	peerFeedCh chan peerFeedMsg
+
+	// The fleet board's rows (design 030 W4), from the daemon's FleetBoardActor.
+	fleetBoard   *fleetboard.Reply
+	fleetBoardCh chan fleetBoardMsg
 	// pendingActivate remembers a backend activate-mode push (register-output)
 	// whose target mode is not yet enabled in this snapshot; syncPaneInputs
 	// applies it as soon as the mode-enable propagates. Keyed by pane ID.
@@ -497,6 +523,10 @@ func NewModel(cfg config.Config, logger *slog.Logger, b *bus.Bus) (Model, error)
 		}
 	})
 
+	// The daemon's peer-board feed (design 044 N1/N2): one exact subject.
+	peerFeedCh := setupPeerFeedSubscription(b, codecs)
+	fleetBoardCh := setupFleetBoardSubscription(b)
+
 	// Set up a persistent NATS subscription for attention events.
 	attentionCh := make(chan attentionEventMsg, 16)
 	_, _ = b.Conn().Subscribe(msgpkg.T("ws", "attention"), func(natMsg *nats.Msg) {
@@ -508,12 +538,17 @@ func NewModel(cfg config.Config, logger *slog.Logger, b *bus.Bus) (Model, error)
 		if err != nil {
 			return
 		}
-		evt, ok := decoded.(*msgpkg.MsgAttentionEvent)
-		if !ok {
+		var am attentionEventMsg
+		switch v := decoded.(type) {
+		case *msgpkg.MsgAttentionEvent:
+			am.Event = v
+		case *msgpkg.MsgAttentionAck:
+			am.Ack = v
+		default:
 			return
 		}
 		select {
-		case attentionCh <- attentionEventMsg{Event: evt}:
+		case attentionCh <- am:
 		default:
 		}
 	})
@@ -554,7 +589,8 @@ func NewModel(cfg config.Config, logger *slog.Logger, b *bus.Bus) (Model, error)
 	// Direct pane→TUI content plane: wildcard per-pane output streams plus the
 	// workspace layout-dirty signal, the per-pane raw-dirty notifications, and the
 	// pushed mirror-pane VT frame stream.
-	contentCh, layoutCh, rawDirtyCh, vtFrameCh := setupContentSubscriptions(b)
+	visiblePanes := &visiblePaneSet{}
+	contentCh, layoutCh, rawDirtyCh, vtFrameCh := setupContentSubscriptions(b, visiblePanes)
 
 	// Session-global MCP restart-state stream (follow-up 6b).
 	mcpStatusCh := setupMCPStatusSubscription(b)
@@ -596,6 +632,8 @@ func NewModel(cfg config.Config, logger *slog.Logger, b *bus.Bus) (Model, error)
 		pipelineCh:         pipelineCh,
 		pipelineOutputs:    make(map[string]string),
 		attentionCh:        attentionCh,
+		peerFeedCh:         peerFeedCh,
+		fleetBoardCh:       fleetBoardCh,
 		clipboardFlashCh:   clipboardFlashCh,
 		remoteFullscreenCh: remoteFullscreenCh,
 		attentionState:     make(map[string]*attentionInfo),
@@ -608,6 +646,8 @@ func NewModel(cfg config.Config, logger *slog.Logger, b *bus.Bus) (Model, error)
 		layoutCh:           layoutCh,
 		rawDirtyCh:         rawDirtyCh,
 		dirtyRawPanes:      make(map[string]struct{}),
+		visiblePanes:       visiblePanes,
+		vcache:             &viewCache{},
 		vtFrameCh:          vtFrameCh,
 		mirrorVTSeq:        make(map[string]uint64),
 		mirrorVTResync:     make(map[string]bool),
@@ -716,7 +756,7 @@ func (m Model) activePaneIsAgenticInFlight() bool {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.refreshCmd(), tickCmd(), m.reconcileWorkspacesCmd(), m.listenApprovalRequests(), m.listenPipelineOutput(), m.listenAttentionEvents(), m.listenMirrorDirty(), m.listenRemoteFullscreen(), m.listenContentCmd(), m.listenLayoutDirty(), m.listenRawDirtyCmd(), m.listenVTFrameCmd(), m.listenMCPStatusCmd(), m.listenEmailEventCmd(), m.listenActivateModeCmd(), m.listenCompanyEventCmd(), m.companyQueryCmd(), m.listenLLMPickerCmd(), m.listenBoardEventCmd(), m.askRecorderCmd(), m.listenClipboardFlashCmd(), reconcileTickCmd())
+	return tea.Batch(m.refreshCmd(), tickCmd(), m.reconcileWorkspacesCmd(), m.listenApprovalRequests(), m.listenPipelineOutput(), m.listenAttentionEvents(), m.listenPeerFeedCmd(), m.listenFleetBoardCmd(), m.listenMirrorDirty(), m.listenRemoteFullscreen(), m.listenContentCmd(), m.listenLayoutDirty(), m.listenRawDirtyCmd(), m.listenVTFrameCmd(), m.listenMCPStatusCmd(), m.listenEmailEventCmd(), m.listenActivateModeCmd(), m.listenCompanyEventCmd(), m.companyQueryCmd(), m.listenLLMPickerCmd(), m.listenBoardEventCmd(), m.askRecorderCmd(), m.listenClipboardFlashCmd(), reconcileTickCmd())
 }
 
 // reconcileWorkspacesCmd asks the daemon (once, at startup/attach) to reconcile

@@ -1,0 +1,11 @@
+{
+  "globalShortcut": "",
+  "mcpServers": {
+    "weather": {
+      "command": "uvx",
+      "args": ["weather-mcp"],
+      "env": { "FIXTURE_WEATHER_KEY": "placeholder-value-6" }
+    }
+  },
+  "preferences": { "menuBarEnabled": true }
+}

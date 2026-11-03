@@ -28,7 +28,9 @@ tar czf "$TMP/site/releases/v0.0.1/ry_${OS}_${ARCH}.tar.gz" -C "$TMP/build" ry
 ( cd "$TMP/site/releases/v0.0.1" && sha256sum "ry_${OS}_${ARCH}.tar.gz" > checksums.txt )
 
 PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
-( cd "$TMP/site" && python3 -m http.server "$PORT" --bind 127.0.0.1 >/dev/null 2>&1 ) & SERVER_PID=$!
+# exec: the subshell becomes the server, so SERVER_PID is the server itself and the EXIT trap
+# stops it (without exec it killed only the subshell and the server outlived the test).
+( cd "$TMP/site" && exec python3 -m http.server "$PORT" --bind 127.0.0.1 >/dev/null 2>&1 ) & SERVER_PID=$!
 for _ in $(seq 1 30); do curl -fsS "http://127.0.0.1:$PORT/releases/latest.txt" >/dev/null 2>&1 && break; sleep 0.2; done
 
 run_installer() { # $1 = log file; remaining = env assignments

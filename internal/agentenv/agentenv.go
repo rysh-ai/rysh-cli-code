@@ -62,6 +62,9 @@ var denyExact = []string{
 	// release / publish credentials (rr-msg-193's token unsets)
 	"GH_TOKEN", "GITHUB_TOKEN", "RYSH_CLI_PAT", "NPM_TOKEN", "NODE_AUTH_TOKEN",
 	"HOMEBREW_TAP_TOKEN", "GORELEASER_GITHUB_TOKEN", "GPG_KEY_FILE", "GPG_FINGERPRINT",
+	// the release names in the session store (root-order-105 R2 section, root-order-104 §3);
+	// exact, so the static paths drop them too: R2_ACCESS_KEY_ID matches no pattern at all
+	"R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_TOKEN", "NFPM_PASSPHRASE",
 	// GIT_* that can carry auth (root-0472 (b)); GIT_CONFIG_KEY_*/VALUE_* are prefixes below
 	"GIT_ASKPASS", "GIT_CONFIG_COUNT",
 	// a parent claude's nesting markers
@@ -72,10 +75,14 @@ var denyExact = []string{
 
 // denyPrefixes / denySuffixes / denyContains are the credential-shaped patterns:
 // AWS_*, GIT_CONFIG_KEY_*, GIT_CONFIG_VALUE_*; *_PASSWORD, *_TOKEN, *_API_KEY,
-// *_PAT, *_CREDENTIALS, *_PRIVATE_KEY, *_PASSPHRASE; *_SECRET*.
+// *_PAT, *_CREDENTIALS, *_PRIVATE_KEY, *_PASSPHRASE, *_KEY_ID; *_SECRET*.
+// *_KEY_ID (e20 nit on 1297577): R2_ACCESS_KEY_ID matched no pattern and needed an
+// exact entry; the suffix catches the next provider's key-id name with no code change.
+// Pattern-aware paths only (Filter, Dropped, Denied): the static env -u lists stay
+// exact-name, so a name the static paths must drop still needs a denyExact entry.
 var (
 	denyPrefixes = []string{"AWS_", "GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"}
-	denySuffixes = []string{"_PASSWORD", "_TOKEN", "_API_KEY", "_PAT", "_CREDENTIALS", "_PRIVATE_KEY", "_PASSPHRASE"}
+	denySuffixes = []string{"_PASSWORD", "_TOKEN", "_API_KEY", "_PAT", "_CREDENTIALS", "_PRIVATE_KEY", "_PASSPHRASE", "_KEY_ID"}
 	denyContains = []string{"_SECRET"}
 )
 

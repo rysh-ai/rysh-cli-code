@@ -157,7 +157,7 @@ func Shared(t *testing.T) *Session {
 	requireSupported(t)
 	bin := Binary(t)
 	sharedOnce.Do(func() {
-		shared, sharedErr = start(bin, "shared")
+		shared, sharedErr = start(bin, "shared", "")
 	})
 	if sharedErr != nil {
 		t.Fatalf("daemontest: boot shared session: %v", sharedErr)
@@ -171,7 +171,22 @@ func Fresh(t *testing.T) *Session {
 	t.Helper()
 	requireSupported(t)
 	bin := Binary(t)
-	s, err := start(bin, strings.ToLower(sanitize(t.Name())))
+	s, err := start(bin, strings.ToLower(sanitize(t.Name())), "")
+	if err != nil {
+		t.Fatalf("daemontest: boot session: %v", err)
+	}
+	t.Cleanup(func() { s.stop() })
+	return s
+}
+
+// FreshWithConfig is Fresh with extra top-level YAML appended to the session's
+// rysh.config.yaml (e.g. a `notify:` section). It must not repeat a key the
+// base config already sets (rysh, nats, provider).
+func FreshWithConfig(t *testing.T, extraYAML string) *Session {
+	t.Helper()
+	requireSupported(t)
+	bin := Binary(t)
+	s, err := start(bin, strings.ToLower(sanitize(t.Name())), extraYAML)
 	if err != nil {
 		t.Fatalf("daemontest: boot session: %v", err)
 	}
@@ -187,15 +202,16 @@ func requireSupported(t *testing.T) {
 		t.Skip("daemontest: -short skips the live-daemon suite (~40s)")
 	}
 	if runtime.GOOS == "windows" {
-		// Design 011: native Windows is CLI-only until ConPTY exists, so a
-		// daemon there cannot create the pane these tests talk to.
-		t.Skip("daemontest: rysh cannot open panes on native Windows (design 011)")
+		// Design 085: native Windows panes run on ConPTY, but this live suite
+		// has never been run on a Windows host (that test was waived for the
+		// release, root-order-100 §4) and its helpers assume Unix processes.
+		t.Skip("daemontest: the live-daemon suite is not run on native Windows (design 085)")
 	}
 }
 
 // start writes an isolated config, spawns a detached daemon and waits for it to
 // register.
-func start(bin, label string) (*Session, error) {
+func start(bin, label, extraYAML string) (*Session, error) {
 	dir, err := os.MkdirTemp("", "rysh-daemontest-")
 	if err != nil {
 		return nil, err
@@ -214,7 +230,7 @@ nats:
 provider:
   name: "claude"
   api_key: ""
-`, name)
+`, name) + extraYAML
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		os.RemoveAll(dir)
 		return nil, err

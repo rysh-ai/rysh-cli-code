@@ -186,7 +186,7 @@ func submitPrompt(c *cli.Client, paneID, text string) error {
 		}
 		return nil
 	}
-	if err := c.Send(&msg.MsgSubmitInput{Text: text, Mode: "prompt"}); err != nil {
+	if err := c.Send(cli.SubmitInputMessage(text, "prompt")); err != nil {
 		return fmt.Errorf("submit prompt: %w", err)
 	}
 	return nil

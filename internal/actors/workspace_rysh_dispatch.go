@@ -267,8 +267,10 @@ func init() {
 				"  ##pane                       show active pane details (default: info)\n",
 				"  ##pane info                  show active pane details\n",
 				"  ##pane info <pane>           show that pane (id, title or given-name)\n",
+				"  ##pane info [<pane>] --json  the same as one JSON object (for scripts and the SDKs)\n",
 				"  ##pane new [--worktree [branch]]  new pane; --worktree runs it in its own git worktree\n",
 				"                               (branch pane/<alias>; removed on close if clean, KEPT if dirty)\n",
+				"  ##pane new --json ...        report the new pane as JSON (alias, tab_id, …); --json goes first\n",
 				"  ##pane new --claude [prompt] new pane running an interactive claude, session id recorded\n",
 				"                               in ##pane meta (claude.session_id); the prompt is passed at launch\n",
 				"  ##pane meta [--pane <ref>] list|get <k>|set <k> <v>|delete <k>   per-pane notes for whoever\n",
@@ -278,6 +280,7 @@ func init() {
 				"  ##pane sync off --all [--except <ref>]...  pause every pane but this one and agents boards\n",
 				"                               (also --tab <tab>; `on --all` resumes; `list` shows paused)\n",
 				"  ##pane list [--tab <tab-id>] list panes of a tab (default: active tab)\n",
+				"  ##pane list --all            list panes of every tab; --json prints {\"panes\":[...]}\n",
 				"  ##pane name <name>           set a given-name for the active pane (unique per lane)\n",
 				"  ##pane name <pane-id> <name> set a given-name for the pane with that id (see ##pane list)\n",
 				"  ##pane listen <id|alias>     listen to another pane's shared output\n",
@@ -330,6 +333,29 @@ func init() {
 			},
 			statusAware: true,
 			run:         func(w *WorkspaceActor, c *ryshCmd) { w.handleUpstreamCommand(c.out, c.paneID, c.args) },
+		},
+		{
+			name: "remote",
+			help: []string{
+				"  ##remote add <ssh-alias> [--session <name>] [--dir <ws>]  show a remote rysh session's tabs here, over your own ssh\n",
+				"  ##remote list                 remote hosts, their state and tab count\n",
+				"  ##remote remove <ssh-alias>   drop a host's tabs (its panes keep running remotely)\n",
+				"  ##remote reconnect <ssh-alias>  retry a disconnected host now\n",
+			},
+			statusAware: true,
+			run:         func(w *WorkspaceActor, c *ryshCmd) { c.err = w.handleRemoteCommand(c.out, c.args) },
+		},
+		{
+			name: "hosted",
+			help: []string{
+				"  ##hosted [--llm anthropic|gemini|openai[/model]] [--name N]  start a run on rysh.ai's hosted runner and attach (uses upstream: from rysh.config.yaml)\n",
+				"  ##hosted list                 your hosted runs\n",
+				"  ##hosted attach [run-id]      show a running hosted run's tabs here\n",
+				"  ##hosted stop [run-id]        end a run and delete its key from this machine\n",
+				"  ##hosted status               is the connection and are the model keys in place\n",
+			},
+			statusAware: true,
+			run:         func(w *WorkspaceActor, c *ryshCmd) { c.err = w.handleHostedCommand(c.out, c.args) },
 		},
 		{
 			name: "company",
@@ -516,6 +542,15 @@ func init() {
 			run:         func(w *WorkspaceActor, c *ryshCmd) { w.handleCronCommand(c.ctx, c.out, c.paneID, c.rawText) },
 		},
 		{
+			name: "trigger",
+			help: []string{
+				"  ##trigger add|list|logs|rotate|rm  signed webhooks (127.0.0.1) that start an @agent or prompt\n",
+				"  ##trigger listen|stop|status       the loopback listener (default port 23320)\n",
+			},
+			statusAware: true,
+			run:         func(w *WorkspaceActor, c *ryshCmd) { w.handleTriggerCommand(c.out, c.rawText) },
+		},
+		{
 			name: "agent",
 			help: []string{
 				"  ##agent spawn <name>          load .rysh/agents/<name>/SKILL.md\n",
@@ -616,6 +651,18 @@ func init() {
 			run:         func(w *WorkspaceActor, c *ryshCmd) { w.handleCostCommand(c.out, c.paneID, c.args) },
 		},
 		{
+			name: "memory",
+			help: []string{
+				"  ##memory [list]               what agents remember across sessions in this workspace (+ policy state)\n",
+				"  ##memory show <id>            one memory (credential-shaped entries are withheld, never shown)\n",
+				"  ##memory add [--kind fact|preference|note] <text>  remember something (secrets are refused)\n",
+				"  ##memory forget <id>|--all    delete memories; agents stop seeing them on the next prompt\n",
+				"  ##memory path                 the folder (.rysh/memory/entries, one file per memory; edit by hand)\n",
+			},
+			statusAware: true,
+			run:         func(w *WorkspaceActor, c *ryshCmd) { w.handleMemoryCommand(c.out, c.paneID, c.args) },
+		},
+		{
 			name: "policy",
 			help: []string{
 				"  ##policy                      show the resolved policy (.rysh/policy.yaml + org policy; fail-closed)\n",
@@ -650,6 +697,29 @@ func init() {
 			run:         func(w *WorkspaceActor, c *ryshCmd) { w.handleWorktreeCommand(c.out, c.paneID, c.args) },
 		},
 		{
+			name: "checkpoint",
+			help: []string{
+				"  ##checkpoint [list]           this pane's file checkpoints (1 = newest)\n",
+				"  ##checkpoint save [label]     snapshot the pane's git work tree now\n",
+				"  ##checkpoint diff [n]         what changed since checkpoint n\n",
+				"  ##checkpoint restore <n>      put checkpoint n back (current files saved first)\n",
+				"  ##checkpoint undo             undo the last agent turn's edits (also: rysh undo)\n",
+			},
+			statusAware: true,
+			run: func(w *WorkspaceActor, c *ryshCmd) {
+				c.err = w.handleCheckpointCommand(c.out, c.paneID, c.args)
+			},
+		},
+		{
+			name: "hooks",
+			help: []string{
+				"  ##hooks [list]                lifecycle hooks from .rysh/hooks.yaml (pre-tool gates)\n",
+				"  ##hooks reload                re-read .rysh/hooks.yaml\n",
+			},
+			statusAware: true,
+			run:         func(w *WorkspaceActor, c *ryshCmd) { c.err = w.handleHooksCommand(c.out, c.args) },
+		},
+		{
 			name: "peer",
 			help: []string{
 				"  ##peer connect <url> --key-secret <name>  connect to a workspace peer board\n",
@@ -671,6 +741,7 @@ func init() {
 			name: "board",
 			help: []string{
 				"  ##board open                  open the agents board pane\n",
+				"  ##board attach <pane>         show the board in an idle shell pane (ends its shell; never a busy pane)\n",
 				"  ##board post <text>           post a milestone to the agents board\n",
 				"  ##board reply <thread> <text> reply under an existing thread\n",
 				"  ##board copy [worker] [N]     copy agent messages to the clipboard, unwrapped\n",
@@ -678,7 +749,7 @@ func init() {
 				"                                (board pane keys: y newest, Y visible, o visible as HTML)\n",
 				"  (agents post silently instead: rysh board post --as <pane-id> <text>)\n",
 			},
-			helpRewrite: []bool{false, false, false, false, false, false, true},
+			helpRewrite: []bool{false, false, false, false, false, false, false, true},
 			statusAware: true,
 			run:         func(w *WorkspaceActor, c *ryshCmd) { c.err = w.handleBoardCommand(c.out, c.paneID, c.args) },
 		},
@@ -710,9 +781,12 @@ func init() {
 				"  ##ansa interrupt <@name|id>   cancel the turn in that pane (ESC, never a signal)\n",
 				"  ##ansa interrupt --fleet <n>  cancel the turn in every pane of THAT fleet\n",
 				"  ##ansa interrupt --all-fleets same, for every fleet in the session\n",
-				"  (agents route silently instead: rysh ansa send --to <@name|id> <text>)\n",
+				"  ##ansa keys <@name|id> <key>.. press named keys in ONE pane: esc, esc*2, up, ctrl+u, …\n",
+				"                                (enter, tab, ctrl+c and other submit/signal keys need --force)\n",
+				"  ##ansa keys --claude-session <id> <key>..  same, addressed by claude.session_id\n",
+				"  (agents route silently instead: rysh ansa send|keys <@name|id> -- <text|keys>)\n",
 			},
-			helpRewrite: []bool{false, false, false, true},
+			helpRewrite: []bool{false, false, false, false, false, false, false, false, false, false, true},
 			statusAware: true,
 			run:         func(w *WorkspaceActor, c *ryshCmd) { c.err = w.handleAnsaCommand(c.out, c.paneID, c.args) },
 		},
@@ -731,6 +805,12 @@ func init() {
 				"                               quoted prompt arg it is never replayed on restore\n",
 				"                               runs autonomously (--dangerously-skip-permissions);\n",
 				"                               pass --permission-mode manual to be asked instead\n",
+				"  ##claude account             list subscription accounts (workspace secrets\n",
+				"                               CLAUDE_<NAME>_OAUTH_TOKEN) and the active one\n",
+				"  ##claude account use <name>  every claude rysh starts uses that account (per-user:\n",
+				"                               all sessions on this machine); --restart restarts idle\n",
+				"                               ones now (resumed), --restart --now busy ones too\n",
+				"  ##claude account off         back to each claude's own login (same flags)\n",
 			},
 			statusAware: true,
 			run: func(w *WorkspaceActor, c *ryshCmd) {

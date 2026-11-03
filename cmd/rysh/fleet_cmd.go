@@ -32,16 +32,20 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/cli"
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
 	"github.com/rysh-ai/rysh-cli-code/internal/fleet"
+	"github.com/rysh-ai/rysh-cli-code/internal/fleetboard"
 	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"github.com/rysh-ai/rysh-cli-code/internal/session"
 )
 
 const fleetUsage = "usage: rysh fleet ls [--json] [--session <name>]\n" +
 	"       rysh fleet show <name> [--json] [--session <name>]\n" +
+	"       rysh fleet board [--json] [--session <name>]   the fleet board: one row per fleet (health, status, head)\n" +
 	"       rysh fleet register <name> [--board <id>] [--source <path>] [--roadmap <dir>] [--tab <id>]\n" +
 	"       rysh fleet state <name> registered|up|down\n" +
 	"       rysh fleet member add <fleet> --pane <id> [--role <r>] [--label <l>] [--unit <u>]\n" +
 	"                                     [--parent <pane-id>] [--worktree <path>] [--session-id <id>]\n" +
+	"                                     [--agent rysh|claude|codex]   stamp what runs in the pane, so the\n" +
+	"                                     board courier can deliver commands into it (rysh = a native agent pane)\n" +
 	"       rysh fleet member rm <fleet> --pane <id>\n" +
 	"       rysh fleet forget <name>\n" +
 	"       rysh fleet status [<fleet>] [--json]           the status ledger: work, activity, health, blockers\n" +
@@ -79,6 +83,9 @@ func runFleetCmd(cfg config.Config, args []string) error {
 	switch sub {
 	case "ls", "list":
 		return runFleetList(store, sess, "", jsonOut)
+
+	case "board":
+		return runFleetBoard(store, sess, jsonOut)
 
 	case "show":
 		if len(rest) == 0 {
@@ -146,8 +153,14 @@ func runFleetMember(store *session.Store, sess string, rest []string, jsonOut bo
 	flags, m.Parent = extractStringFlag(flags, "--parent")
 	flags, m.Worktree = extractStringFlag(flags, "--worktree")
 	flags, m.SessionID = extractStringFlag(flags, "--session-id")
+	var agent string
+	flags, agent = extractStringFlag(flags, "--agent")
 	if err := unknownFleetFlags(flags); err != nil {
 		return err
+	}
+	agent = strings.TrimSpace(agent)
+	if agent != "" && agent != "rysh" && agent != "claude" && agent != "codex" {
+		return fmt.Errorf("rysh fleet member: --agent must be rysh, claude or codex (got %q)", agent)
 	}
 	if strings.TrimSpace(m.PaneID) == "" {
 		// A member IS a pane. Without an id there is nothing to record, and
@@ -158,14 +171,36 @@ func runFleetMember(store *session.Store, sess string, rest []string, jsonOut bo
 
 	switch op {
 	case "add", "set", "upsert":
-		return runFleetUpdate(store, sess,
-			fleet.Update{Op: fleet.OpMemberUpsert, Name: name, Member: m}, jsonOut)
+		if err := runFleetUpdate(store, sess,
+			fleet.Update{Op: fleet.OpMemberUpsert, Name: name, Member: m}, jsonOut); err != nil {
+			return err
+		}
+		if agent == "" {
+			return nil
+		}
+		// The courier routes a board command by this stamp (courier.Plan): a
+		// native pane without it is "at its shell prompt" and nothing is
+		// delivered. fleetctl stamps it the same way.
+		return stampFleetAgent(store, sess, m.PaneID, agent)
 	case "rm", "remove", "del":
 		return runFleetUpdate(store, sess,
 			fleet.Update{Op: fleet.OpMemberRemove, Name: name, PaneID: m.PaneID}, jsonOut)
 	default:
 		return fmt.Errorf("unknown member op %q\n%s", op, progname.Rewrite(fleetUsage))
 	}
+}
+
+// stampFleetAgent records what runs in a member's pane (pane meta
+// fleet.agent). A variable so tests can see the call without a daemon.
+var stampFleetAgent = func(store *session.Store, sess, paneID, agent string) error {
+	resp, err := cli.RyshCommandResult(store, sess, "", "", "##pane meta set fleet.agent "+agent+" --pane "+paneID)
+	if err != nil {
+		return fmt.Errorf("rysh fleet member: member recorded, but fleet.agent was not stamped: %w", err)
+	}
+	if resp != nil && resp.Error != "" {
+		return fmt.Errorf("rysh fleet member: member recorded, but fleet.agent was not stamped: %s", resp.Error)
+	}
+	return nil
 }
 
 func runFleetList(store *session.Store, sess, name string, jsonOut bool) error {
@@ -188,6 +223,32 @@ func runFleetList(store *session.Store, sess, name string, jsonOut bool) error {
 	fmt.Print(renderFleetList(reply, name))
 	return nil
 }
+
+// runFleetBoard prints the fleet board's rows (design 030 W2). A plain list;
+// the dashboard view is W4.
+func runFleetBoard(store *session.Store, sess string, jsonOut bool) error {
+	reply, err := cli.FleetBoard(store, sess)
+	if err != nil {
+		if errors.Is(err, fleetboard.ErrNoFleetBoard) {
+			return fmt.Errorf("%v\nthe fleet board is kept by the session daemon; a daemon older than this "+
+				"rysh has none (restart the session on this build)", err)
+		}
+		return err
+	}
+	if jsonOut {
+		enc, merr := json.MarshalIndent(reply, "", "  ")
+		if merr != nil {
+			return merr
+		}
+		fmt.Println(string(enc))
+		return nil
+	}
+	fmt.Print(renderFleetBoard(reply))
+	return nil
+}
+
+// renderFleetBoard is fleetboard.RenderText: one text form for every surface.
+func renderFleetBoard(reply *fleetboard.Reply) string { return fleetboard.RenderText(reply) }
 
 func runFleetUpdate(store *session.Store, sess string, u fleet.Update, jsonOut bool) error {
 	reply, err := cli.FleetUpdate(store, sess, u)

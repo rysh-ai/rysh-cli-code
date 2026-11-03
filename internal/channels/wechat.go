@@ -121,6 +121,7 @@ type WeChatAdapter struct {
 	connected bool
 	err       string
 	server    *http.Server
+	addr      string // the address the webhook listener bound, once Start has run
 	cancel    context.CancelFunc
 
 	received []WeChatMessage
@@ -220,6 +221,12 @@ func (w *WeChatAdapter) Start(ctx context.Context) error {
 		return fmt.Errorf("wechat: encoding_aes_key is set, but safe-mode message encryption is not implemented yet — " +
 			"switch the account to plaintext mode, or leave the key unset")
 	}
+	// The listener binds 127.0.0.1 unless webhook_bind names another host:
+	// the operator's reverse proxy or tunnel forwards to it.
+	host, err := webhookBindHost("wechat", w.config)
+	if err != nil {
+		return err
+	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	w.cancel = cancel
@@ -235,12 +242,17 @@ func (w *WeChatAdapter) Start(ctx context.Context) error {
 
 	// Bind synchronously so a port conflict surfaces as a Start error rather
 	// than a goroutine that dies unobserved.
-	addr := fmt.Sprintf(":%d", w.port)
+	addr := net.JoinHostPort(host, strconv.Itoa(w.port))
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		cancel()
 		w.setState(false, err.Error())
 		return fmt.Errorf("wechat: webhook listen on %s: %w", addr, err)
+	}
+
+	if !isLoopbackHost(host) {
+		slog.Warn("wechat: webhook listening beyond loopback because webhook_bind says so; every POST must still carry a valid signature",
+			"listen", ln.Addr().String())
 	}
 
 	mux := http.NewServeMux()
@@ -250,6 +262,7 @@ func (w *WeChatAdapter) Start(ctx context.Context) error {
 
 	w.mu.Lock()
 	w.server = server
+	w.addr = ln.Addr().String()
 	w.connected = true
 	w.err = ""
 	w.mu.Unlock()
@@ -716,4 +729,11 @@ func (w *WeChatAdapter) GetMessage(id string) (WeChatMessage, bool) {
 		}
 	}
 	return WeChatMessage{}, false
+}
+
+// listenAddr is the address the webhook listener bound, or "" before Start.
+func (w *WeChatAdapter) listenAddr() string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.addr
 }

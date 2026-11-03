@@ -94,7 +94,7 @@ func TestWhatsAppValidate(t *testing.T) {
 	defer srv.Close()
 
 	newAdapter := func(phone, key string) *WhatsAppAdapter {
-		a := NewWhatsAppAdapter(msg.ChannelConfig{Phone: phone, APIKey: key})
+		a := NewWhatsAppAdapter(msg.ChannelConfig{Phone: phone, APIKey: key, AppSecret: e25WAFakeSecret})
 		a.baseURL = srv.URL
 		return a
 	}
@@ -118,7 +118,7 @@ func TestWhatsAppValidate(t *testing.T) {
 		time.Sleep(2 * time.Second)
 	}))
 	defer slow.Close()
-	a := NewWhatsAppAdapter(msg.ChannelConfig{Phone: "12345", APIKey: "good-token"})
+	a := NewWhatsAppAdapter(msg.ChannelConfig{Phone: "12345", APIKey: "good-token", AppSecret: e25WAFakeSecret})
 	a.baseURL = slow.URL
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()

@@ -107,6 +107,10 @@ type NATSConfig struct {
 	URL     string `yaml:"url"`
 	DataDir string `yaml:"data_dir"`
 	Port    int    `yaml:"port"`
+	// OwnPort is true when this project's rysh.config.yaml names a port of its
+	// own (nats.port > 0) and RYSH_NATS_PORT does not override it (D-55 B).
+	// Such a daemon refuses to join another project's NATS server as a guest.
+	OwnPort bool `yaml:"-"`
 }
 
 // UpstreamConfig holds settings for the remote upstream server connection.
@@ -317,6 +321,12 @@ func (wc WorkspaceConfig) ResolveUpstream(session UpstreamConfig) UpstreamConfig
 type Config struct {
 	NATS     NATSConfig
 	Upstream UpstreamConfig
+	// RemoteHosts are `##remote add` entries to connect at start (design 070,
+	// feature #14): `remote: hosts:` in rysh.config.yaml.
+	RemoteHosts []RemoteHostConfig
+	// NotifyNeedsYou is the daemon-side "needs you" notifier (gap02 / G6):
+	// `notify: needs_you:` in rysh.config.yaml. Off unless a sink is set.
+	NotifyNeedsYou NotifyNeedsYouConfig
 	// Company binds this session to one AI-native company on the upstream
 	// server (design 037); written by `rysh connect`.
 	Company       CompanyConfig
@@ -361,6 +371,10 @@ type Config struct {
 	// with InteractiveShell; when false the legacy strip-everything behavior
 	// is used. Config `[ui] shell_color_output` or RYSH_SHELL_COLOR.
 	ShellColorOutput bool
+	// NotifyTerminal is what the TUI writes to the host terminal when a pane
+	// starts needing you: off (default), bell, or osc9. `[ui] notify_terminal`
+	// or RYSH_NOTIFY_TERMINAL; unknown values are off (root-order-044 #3).
+	NotifyTerminal string
 	// ShellBufferBytes caps each pane's text output buffers (merged and
 	// per-mode) in bytes. <= 0 falls back to the built-in default (256 KiB).
 	// Config `[ui] shell_buffer_bytes` or RYSH_SHELL_BUFFER_BYTES.
@@ -633,8 +647,26 @@ func (c Config) ResolvedWorkspaces() []WorkspaceConfig {
 }
 
 // ryshConfigFile is the YAML structure that maps to rysh.config.yaml.
+// RemoteHostConfig is one remote rysh session shown in this window over the
+// user's own ssh (design 070). Every field is what `##remote add` takes; only
+// the ssh alias names the host — keys and jumps stay in ~/.ssh/config.
+type RemoteHostConfig struct {
+	Alias     string `yaml:"alias"`      // ssh_config Host alias
+	Session   string `yaml:"session"`    // remote session name
+	Dir       string `yaml:"dir"`        // remote workspace to cd into
+	Config    string `yaml:"config"`     // remote rysh.config.yaml
+	Bin       string `yaml:"bin"`        // remote rysh binary (default rysh_local)
+	SSHConfig string `yaml:"ssh_config"` // ssh -F file (default: the user's own)
+}
+
+type ryshRemote struct {
+	Hosts []RemoteHostConfig `yaml:"hosts"`
+}
+
 type ryshConfigFile struct {
 	Rysh         ryshRysh                     `yaml:"rysh"`
+	Remote       ryshRemote                   `yaml:"remote"`
+	Notify       ryshNotify                   `yaml:"notify"`
 	NATS         ryshNATS                     `yaml:"nats"`
 	Upstream     ryshUpstream                 `yaml:"upstream"`
 	Company      CompanyConfig                `yaml:"company"`
@@ -798,7 +830,9 @@ type ryshUI struct {
 	// ShellColorOutput is a pointer so "unset" (nil → keep the default of
 	// true) is distinguishable from an explicit `shell_color_output: false`.
 	ShellColorOutput *bool `yaml:"shell_color_output"`
-	ShellBufferBytes int   `yaml:"shell_buffer_bytes"`
+	// NotifyTerminal: off|bell|osc9 (root-order-044 #3). Unknown means off.
+	NotifyTerminal   string `yaml:"notify_terminal"`
+	ShellBufferBytes int    `yaml:"shell_buffer_bytes"`
 	// ShellReadlineKeys is a pointer so "unset" (nil → keep the default of
 	// true) is distinguishable from an explicit `shell_readline_keys: false`.
 	ShellReadlineKeys *bool `yaml:"shell_readline_keys"`
@@ -901,6 +935,11 @@ type ProxyConfig struct {
 	// idle CLI looks exactly like an escaped one, so strict mode can stop
 	// innocent work. `##proxy check <cli>` is the deterministic answer, and the
 	// warning stays the default posture (022 §8.2).
+	//
+	// Strict mode governs the allowed agent CLIs at their known install
+	// locations, identified by their real executable. It is not an anti-evasion
+	// boundary against the user's own machine: a copy run from an unlisted
+	// location is unknown, so it is not watched (F-13).
 	Strict bool
 	// Models bounds which models a governed pane may call (design 001 §4.7).
 	// Empty ⇒ every model is allowed, which is the default.
@@ -1504,6 +1543,8 @@ func applyDefaults() Config {
 		DefaultShell:            shellDefault(),
 		InteractiveShell:        true,
 		ShellColorOutput:        true,
+		NotifyTerminal:          NotifyTerminalOff,
+		NotifyNeedsYou:          defaultNotifyNeedsYou(),
 		ShellBufferBytes:        262144,
 		ShellReadlineKeys:       true,
 		ShellHistorySize:        1000,
@@ -1608,6 +1649,7 @@ func loadFromFile(path string, cfg Config) (Config, error) {
 	// as a guest and left its buckets in that store for good.
 	if f.NATS.Port != nil && *f.NATS.Port >= 0 {
 		cfg.NATS.Port = *f.NATS.Port
+		cfg.NATS.OwnPort = *f.NATS.Port > 0 // D-55 B: the project asked for a bus of its own
 	}
 
 	// Automation section: config-level defaults for the ##auto command family,
@@ -1703,6 +1745,9 @@ func loadFromFile(path string, cfg Config) (Config, error) {
 	}
 	if f.UI.ShellColorOutput != nil {
 		cfg.ShellColorOutput = *f.UI.ShellColorOutput
+	}
+	if f.UI.NotifyTerminal != "" {
+		cfg.NotifyTerminal = normalizeNotifyTerminal(f.UI.NotifyTerminal)
 	}
 	if f.UI.ShellBufferBytes > 0 {
 		cfg.ShellBufferBytes = f.UI.ShellBufferBytes
@@ -1922,6 +1967,11 @@ func loadFromFile(path string, cfg Config) (Config, error) {
 		cfg.MetricsListen = s
 	}
 
+	if len(f.Remote.Hosts) > 0 {
+		cfg.RemoteHosts = append([]RemoteHostConfig(nil), f.Remote.Hosts...)
+	}
+	applyNotifyNeedsYou(&cfg.NotifyNeedsYou, f.Notify.NeedsYou)
+
 	// Upstream section
 	if f.Upstream.Enabled {
 		cfg.Upstream.Enabled = true
@@ -2082,6 +2132,7 @@ func applyEnvOverrides(cfg Config) Config {
 	}
 	if v := envInt("RYSH_NATS_PORT"); v > 0 {
 		cfg.NATS.Port = v
+		cfg.NATS.OwnPort = false // the environment chose this port, not the project (e.g. the desktop app)
 	}
 	if v := envInt("RYSH_WEB_PORT"); v > 0 {
 		cfg.WebPort = v
@@ -2259,6 +2310,9 @@ func applyEnvOverrides(cfg Config) Config {
 	}
 	if b, ok := envBool("RYSH_SHELL_COLOR"); ok {
 		cfg.ShellColorOutput = b
+	}
+	if v := strings.TrimSpace(os.Getenv("RYSH_NOTIFY_TERMINAL")); v != "" {
+		cfg.NotifyTerminal = normalizeNotifyTerminal(v)
 	}
 	if b, ok := envBool("RYSH_SHELL_READLINE"); ok {
 		cfg.ShellReadlineKeys = b

@@ -150,6 +150,68 @@ func checkSendFile(path string) (string, error) {
 	return abs, nil
 }
 
+// sessionWorkspace is the session's project root: the Path of its registry
+// record (the daemon's cwd, cmd/rysh/main.go), or "" when it cannot be read.
+func sessionWorkspace(store *session.Store, sess string) string {
+	rec, err := store.Get(sess)
+	if err != nil {
+		return ""
+	}
+	return rec.Path
+}
+
+// attachSendFile checks --file and sets the command's File (and, with no text,
+// its default "Read … in full." text) RELATIVE TO THE WORKSPACE ROOT (ORDER-82,
+// rr-msg-302 §1): a board record must never carry an absolute path, which holds
+// a home directory and a username. The absolute path stays internal (the
+// existence check). The recipient resolves the relative path from the
+// workspace root, as fleetctl's own "Read …" lines already ask (ORDER-80).
+//
+// A file OUTSIDE the workspace, or an unknown workspace, is REFUSED: there is
+// deliberately no absolute or $HOME fallback. The refusal names the file by
+// its base name only.
+func attachSendFile(req *msg.MsgCLIBoardPost, file, workspace string) error {
+	abs, err := checkSendFile(file)
+	if err != nil {
+		return err
+	}
+	rel, err := workspaceRelative(abs, workspace)
+	if err != nil {
+		return err
+	}
+	req.File = rel
+	if req.Text == "" {
+		req.Text = "Read " + rel + " in full."
+	}
+	return nil
+}
+
+// workspaceRelative returns abs relative to workspace, both resolved through
+// symlinks, or an error when abs is not inside workspace.
+func workspaceRelative(abs, workspace string) (string, error) {
+	refuse := func(why string) error {
+		return fmt.Errorf("--file %s: %s: refused (rr-msg-302 §1). A board command records its file only "+
+			"RELATIVE to the workspace root, never as an absolute or $HOME path; put the file under the "+
+			"workspace (e.g. your worktree's out/) and pass that", filepath.Base(abs), why)
+	}
+	if strings.TrimSpace(workspace) == "" {
+		return "", refuse("the session's workspace root is unknown, so it cannot be made relative")
+	}
+	ws, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		return "", refuse("the session's workspace root cannot be resolved")
+	}
+	p, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", refuse("the file cannot be resolved")
+	}
+	rel, err := filepath.Rel(ws, p)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", refuse("it is outside the workspace")
+	}
+	return rel, nil
+}
+
 func runBoardSendCmd(cfg config.Config, b boardSendArgs) error {
 	if b.as == "" {
 		b.as = os.Getenv("RYSH_PANE")
@@ -170,13 +232,8 @@ func runBoardSendCmd(cfg config.Config, b boardSendArgs) error {
 			ThreadID: b.threadID, Board: b.board, To: b.to, CmdID: b.cmdID,
 		}
 		if b.file != "" {
-			abs, err := checkSendFile(b.file)
-			if err != nil {
+			if err := attachSendFile(req, b.file, sessionWorkspace(store, sess)); err != nil {
 				return err
-			}
-			req.File = abs
-			if req.Text == "" {
-				req.Text = "Read " + abs + " in full."
 			}
 		}
 		return printBoardResponse(cli.BoardSendRequest(store, sess, req))

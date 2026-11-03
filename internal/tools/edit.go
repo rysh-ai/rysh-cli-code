@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/rysh-ai/rysh-cli-code/internal/policy"
 )
 
 // EditTool performs exact-string replacement(s) in a single existing file.
@@ -125,6 +127,9 @@ func (t *EditTool) compute(params json.RawMessage) (*ToolOutput, string, error) 
 	filePath := p.FilePath
 	if !filepath.IsAbs(filePath) {
 		filePath = filepath.Join(t.workDir, filePath)
+	}
+	if out := fsPolicyRefusal(filePath, policy.FSWrite); out != nil {
+		return out, "", nil
 	}
 
 	data, err := os.ReadFile(filePath)

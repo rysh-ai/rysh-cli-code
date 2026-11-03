@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !linux && !darwin
+//go:build !linux && !darwin && !windows
 
 package actors
 
@@ -17,3 +17,7 @@ func processName(int) string { return "" }
 // processExecArgs has no implementation on this platform either; see
 // processName.
 func processExecArgs(int) (string, []string) { return "", nil }
+
+// processRealExe has no implementation on this platform either, so every
+// process is unknown to strict mode here; see processName.
+func processRealExe(int) string { return "" }

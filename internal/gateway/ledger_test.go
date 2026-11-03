@@ -40,6 +40,12 @@ type upstreamStub struct {
 	policyETag    string
 	policyRequest int
 	ifNoneMatch   []string
+
+	// spend cap (root-order-044 #8): capMicro > 0 turns it on.
+	capMicro    int64
+	capPeriod   string
+	spentUSD    int64
+	usdReported []int64 // SpentSinceMicroUSD of every lease call, in order
 }
 
 // leaseCallCount reads leaseCalls under the stub's lock. Allow() renews on a
@@ -84,6 +90,8 @@ func (s *upstreamStub) lease(req *http.Request) (*http.Response, error) {
 	// Reconcile what the daemon spent since its last call, and return the slice
 	// it was holding.
 	s.spent += in.SpentSince
+	s.spentUSD += in.SpentSinceMicroUSD
+	s.usdReported = append(s.usdReported, in.SpentSinceMicroUSD)
 	delete(s.outstanding, in.DaemonID)
 
 	remaining := s.ceiling - s.spent
@@ -100,6 +108,10 @@ func (s *upstreamStub) lease(req *http.Request) (*http.Response, error) {
 	if granted > s.maxLease {
 		granted = s.maxLease
 	}
+	capRefused := s.capMicro > 0 && s.spentUSD >= s.capMicro
+	if capRefused {
+		granted = 0
+	}
 	if granted > 0 {
 		s.outstanding[in.DaemonID] = granted
 	}
@@ -110,6 +122,14 @@ func (s *upstreamStub) lease(req *http.Request) (*http.Response, error) {
 		CeilingTokens:  s.ceiling,
 		ActiveDaemons:  len(s.outstanding),
 		MaxLeaseTokens: s.maxLease,
+	}
+	if s.capMicro > 0 {
+		reply.SpendCapMicroUSD, reply.SpentPeriodMicroUSD, reply.SpendCapPeriod = s.capMicro, s.spentUSD, s.capPeriod
+		if capRefused {
+			reply.Refusal = sharedmsg.GatewayRefusalSpendCap
+		} else if granted == 0 {
+			reply.Refusal = sharedmsg.GatewayRefusalTokenCeiling
+		}
 	}
 	raw, _ := json.Marshal(reply)
 	return jsonResponse(http.StatusOK, raw, nil), nil

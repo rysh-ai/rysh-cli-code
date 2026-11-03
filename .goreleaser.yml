@@ -16,6 +16,14 @@
 #   - no `brews` push       (the formula step self-skips unless a
 #                            HOMEBREW_TAP_TOKEN secret is present)
 #
+# Built paths and archive owners (root-order-030/040; the E-104 class: no builder
+# path or user name in anything we ship):
+#   - every build has `flags: [-trimpath]`, so no binary embeds the builder's
+#     $HOME, module cache, GOROOT or build directory;
+#   - every archive member (the binary via `builds_info`, each `files` entry via
+#     `info`) is owned by root:root, so no archive names the builder's macOS user;
+#   - the changelog `format` carries no author handle.
+#
 # Schema version: v2
 version: 2
 
@@ -29,6 +37,8 @@ builds:
   - id: rysh-linux-amd64
     binary: rysh
     main: ./cmd/rysh
+    flags:
+      - -trimpath
     goos: [linux]
     goarch: [amd64]
     env:
@@ -43,6 +53,8 @@ builds:
   - id: rysh-linux-arm64
     binary: rysh
     main: ./cmd/rysh
+    flags:
+      - -trimpath
     goos: [linux]
     goarch: [arm64]
     env:
@@ -53,6 +65,8 @@ builds:
   - id: rysh-darwin
     binary: rysh
     main: ./cmd/rysh
+    flags:
+      - -trimpath
     goos: [darwin]
     goarch: [amd64, arm64]
     env:
@@ -63,6 +77,8 @@ builds:
   - id: rysh-windows
     binary: rysh
     main: ./cmd/rysh
+    flags:
+      - -trimpath
     goos: [windows]
     goarch: [amd64]
     env:
@@ -75,11 +91,26 @@ archives:
     ids: [rysh-linux-amd64, rysh-linux-arm64, rysh-darwin]
     name_template: "rysh_{{.Os}}_{{.Arch}}"
     formats: [tar.gz]
+    builds_info:
+      owner: root
+      group: root
     files:
-      - README.md
-      - LICENSE
-      - NOTICE
-      - rysh.config.yaml.example
+      - src: README.md
+        info:
+          owner: root
+          group: root
+      - src: LICENSE
+        info:
+          owner: root
+          group: root
+      - src: NOTICE
+        info:
+          owner: root
+          group: root
+      - src: rysh.config.yaml.example
+        info:
+          owner: root
+          group: root
 
   # Native Windows is a CLI-ONLY artifact: rysh has no ConPTY implementation, so
   # it cannot open panes. The binary refuses session commands with WSL guidance
@@ -89,11 +120,26 @@ archives:
     ids: [rysh-windows]
     name_template: "rysh_{{.Os}}_{{.Arch}}_cli-only"
     formats: [zip]
+    builds_info:
+      owner: root
+      group: root
     files:
-      - README.md
-      - LICENSE
-      - NOTICE
-      - rysh.config.yaml.example
+      - src: README.md
+        info:
+          owner: root
+          group: root
+      - src: LICENSE
+        info:
+          owner: root
+          group: root
+      - src: NOTICE
+        info:
+          owner: root
+          group: root
+      - src: rysh.config.yaml.example
+        info:
+          owner: root
+          group: root
 
 checksum:
   name_template: "checksums.txt"
@@ -149,6 +195,9 @@ release:
 
 changelog:
   use: github
+  # No author handles in the release notes (root-order-040): the default github
+  # format appends "(@<login>)" to every line; this one emits only sha and subject.
+  format: "{{ .SHA }}: {{ .Message }}"
   sort: asc
   filters:
     exclude:

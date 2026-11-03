@@ -65,3 +65,21 @@ func TestFirstFlagVal(t *testing.T) {
 		t.Fatalf("absent flag = %q, want empty", got)
 	}
 }
+
+func TestWithControlSecretFile(t *testing.T) {
+	base := buildWebStartCommand(23299, "", "", "", true)
+	if got, err := withControlSecretFile(base, "", true); err != nil || got != base {
+		t.Fatalf("no file: %q, %v", got, err)
+	}
+	if got, err := withControlSecretFile(base, "/tmp/rysh-x/h", true); err != nil || got != base+" --control-secret-file /tmp/rysh-x/h" {
+		t.Fatalf("with file: %q, %v", got, err)
+	}
+	if _, err := withControlSecretFile(base, "/tmp/rysh-x/h", false); err == nil {
+		t.Fatal("a secret file without --control was accepted")
+	}
+	for _, p := range []string{"/Users/x/Library/Application Support/h", "/tmp/a\tb", "/tmp/a\nb"} {
+		if _, err := withControlSecretFile(base, p, true); err == nil {
+			t.Fatalf("a path with whitespace was accepted: %q", p)
+		}
+	}
+}

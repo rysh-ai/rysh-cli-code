@@ -137,7 +137,8 @@ func TestUpdateWebMeta(t *testing.T) {
 
 	UpdateWebMeta(cfg, "s1", WebMeta{
 		Port: 23001, Host: "0.0.0.0", User: "alice",
-		PublicURL: "https://rysh-web.ngrok.app",
+		PublicURL:         "https://rysh-web.ngrok.app",
+		ControlSecretFile: "/u/config/rysh/web-control/ctl-x",
 	})
 
 	rec, err := store.Get("s1")
@@ -145,7 +146,8 @@ func TestUpdateWebMeta(t *testing.T) {
 		t.Fatal(err)
 	}
 	if rec.WebPort != 23001 || rec.WebHost != "0.0.0.0" ||
-		rec.WebUser != "alice" || rec.WebPublicURL != "https://rysh-web.ngrok.app" {
+		rec.WebUser != "alice" || rec.WebPublicURL != "https://rysh-web.ngrok.app" ||
+		rec.WebControlSecretFile != "/u/config/rysh/web-control/ctl-x" {
 		t.Fatalf("web meta not recorded: %+v", rec)
 	}
 	// Other writers' bookkeeping survives the read-modify-write.
@@ -161,7 +163,7 @@ func TestUpdateWebMeta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rec.WebPort != 0 || rec.WebHost != "" || rec.WebUser != "" || rec.WebPublicURL != "" {
+	if rec.WebPort != 0 || rec.WebHost != "" || rec.WebUser != "" || rec.WebPublicURL != "" || rec.WebControlSecretFile != "" {
 		t.Fatalf("stopped server still advertised: %+v", rec)
 	}
 

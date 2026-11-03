@@ -63,7 +63,7 @@ func runMeetingSpikeLiveKit(cfg config.Config, args []string) error {
 	rest, sess := extractStringFlag(rest, "--session")
 	rest, tokenFor := extractStringFlag(rest, "--token")
 	if len(rest) != 0 || room == "" {
-		return errors.New(spikeLiveKitUsage)
+		return errors.New(strings.TrimRight(spikeLiveKitUsage, "\n"))
 	}
 	if lkURL == "" {
 		lkURL = firstNonEmpty(os.Getenv("LIVEKIT_URL"), "ws://127.0.0.1:7880")

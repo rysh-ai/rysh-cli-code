@@ -110,7 +110,7 @@ func TestInboundWatcherPeeksAndNeverMarksRead(t *testing.T) {
 		lastSubjects: map[string]string{},
 	}
 
-	next, err := e.fetchNewMessages(imap, 41)
+	next, err := e.fetchNewMessages(context.Background(), imap, 41)
 	if err != nil {
 		t.Fatalf("fetchNewMessages: %v", err)
 	}
@@ -171,17 +171,11 @@ func TestInboundSessionExaminesAndNeverMarksRead(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- e.watchInbox(ctx, imap, "fake:993", time.Minute, 10*time.Millisecond) }()
 
-	fetched := func() int {
-		n := 0
-		for _, c := range sent() {
-			if strings.Contains(strings.ToUpper(c), " FETCH ") {
-				n++
-			}
-		}
-		return n
-	}
+	// Wait for both mails to be published, not for both FETCHes to be sent:
+	// a cancel between the second FETCH and its dispatch stops before
+	// dispatch (F-STOP N1) and leaves that mail unseen, which is right.
 	deadline := time.Now().Add(5 * time.Second)
-	for fetched() < 2 && time.Now().Before(deadline) {
+	for len(e.inbound) < 2 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	cancel()

@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -37,6 +38,7 @@ const (
 	doctorPass = "PASS"
 	doctorWarn = "WARN"
 	doctorFail = "FAIL"
+	doctorInfo = "INFO" // a reported fact (e.g. a binding line); never counted
 )
 
 // doctorCheck is one line of doctor output.
@@ -58,6 +60,10 @@ type doctorDeps struct {
 	dialNATS func(port int, timeout time.Duration) error
 	// lookupRef resolves a ${NAME} reference (config-level precedence).
 	lookupRef func(name string) (string, bool)
+	// lookupStored resolves a ${NAME} from the on-disk tiers only
+	// (.rysh/secrets, config secrets) — what an already-running daemon can
+	// see without its own environment.
+	lookupStored func(name string) (string, bool)
 	// getenv reads process environment (os.Getenv) — the clipboard check
 	// sniffs SSH/tmux/screen markers from it.
 	getenv func(name string) string
@@ -79,6 +85,17 @@ func defaultDoctorDeps(cfg config.Config) doctorDeps {
 			// .rysh/secrets files first, then config [secrets], then env —
 			// the precedence visible outside a running session.
 			if v, ok := config.LookupSecretRef(cfg.RyshDir, name); ok {
+				return v, true
+			}
+			for _, scope := range cfg.Secrets {
+				if v, ok := scope[name]; ok {
+					return v, true
+				}
+			}
+			return "", false
+		},
+		lookupStored: func(name string) (string, bool) {
+			if v, ok := config.LookupStoredSecretRef(cfg.RyshDir, name); ok {
 				return v, true
 			}
 			for _, scope := range cfg.Secrets {
@@ -140,6 +157,7 @@ func doctorChecks(cfg config.Config, deps doctorDeps) []doctorCheck {
 	out = append(out, checkProvider(cfg, deps))
 	out = append(out, checkChannels(cfg, deps)...)
 	out = append(out, checkDaemon(cfg, deps)...)
+	out = append(out, checkBusPort(cfg, deps)...)
 	out = append(out, checkConfig(cfg, deps)...)
 	out = append(out, checkClipboard(deps)...)
 	return out
@@ -348,10 +366,32 @@ func resolveChannelConfigRefs(cc msg.ChannelConfig, lookup func(string) (string,
 // validated=false means the adapter offers none (doctor reports it as WARN
 // rather than running a side-effectful Start probe).
 func validateChannelAdapter(ctx context.Context, a channels.ChannelAdapter) (validated bool, err error) {
-	if v, ok := a.(channels.Validator); ok {
-		return true, v.Validate(ctx)
+	validated, _, err = validateChannelIdentity(ctx, a)
+	return validated, err
+}
+
+// channelUnreachable reports whether a validator error means the platform was
+// never reached, so the credentials were not judged. The Telegram and Discord
+// validators format their transport error with %v (it would carry the
+// token-bearing URL), so besides net.Error this matches their " unreachable: "
+// wording.
+func channelUnreachable(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) || strings.Contains(err.Error(), " unreachable: ")
+}
+
+// validateChannelIdentity is validateChannelAdapter that also returns who the
+// bot is, when the adapter can say (channels.IdentityValidator: Telegram getMe,
+// Discord users/@me). One non-binding check either way, never two.
+func validateChannelIdentity(ctx context.Context, a channels.ChannelAdapter) (validated bool, id channels.BotIdentity, err error) {
+	if v, ok := a.(channels.IdentityValidator); ok {
+		id, err = v.ValidateIdentity(ctx)
+		return true, id, err
 	}
-	return false, nil
+	if v, ok := a.(channels.Validator); ok {
+		return true, id, v.Validate(ctx)
+	}
+	return false, id, nil
 }
 
 // checkChannels validates every humanoid × configured channel.
@@ -403,8 +443,9 @@ func checkChannels(cfg config.Config, deps doctorDeps) []doctorCheck {
 				continue
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), validateProviderTimeout)
-			validated, verr := validateChannelAdapter(ctx, adapter)
+			validated, id, verr := validateChannelIdentity(ctx, adapter)
 			cancel()
+			bot := ""
 			switch {
 			case !validated:
 				out = append(out, doctorCheck{Group: "channels", Status: doctorWarn,
@@ -412,15 +453,27 @@ func checkChannels(cfg config.Config, deps doctorDeps) []doctorCheck {
 					Fix:    fmt.Sprintf(progname.Rewrite("start the channel to fully verify: rysh attach, then ##humanoid channel start %s %s"), fm.Name, chType)})
 			case verr != nil:
 				fix := fmt.Sprintf("fix the %s credentials referenced in %s", chType, path)
+				if channelUnreachable(verr) {
+					fix = "check the network (DNS, proxy, firewall), then re-run doctor — the token itself was not judged"
+				}
 				if len(missing) > 0 {
 					fix = fmt.Sprintf("empty ${%s} — export it or add it to .rysh/secrets, then re-run doctor", strings.Join(missing, "}, ${"))
 				}
+				// An adapter error may quote a resolved token (a request
+				// URL); print the ${NAME} instead of the value.
 				out = append(out, doctorCheck{Group: "channels", Status: doctorFail,
-					Detail: fmt.Sprintf("%s: %v", label, verr), Fix: fix})
+					Detail: fmt.Sprintf("%s: %s", label, redactResolvedRefs(verr.Error(), fm.Contacts[chType], deps.lookupRef)), Fix: fix})
 			default:
-				out = append(out, doctorCheck{Group: "channels", Status: doctorPass,
-					Detail: fmt.Sprintf("%s: credentials valid", label)})
+				bot = id.Username
+				detail := fmt.Sprintf("%s: credentials valid", label)
+				if id.Handle() != "" {
+					detail += " (" + id.Handle() + ")"
+				}
+				out = append(out, doctorCheck{Group: "channels", Status: doctorPass, Detail: detail})
 			}
+			// E33 G6: which chat drives what — a fact, not a check.
+			out = append(out, doctorCheck{Group: "binding", Status: doctorInfo,
+				Detail: bindingLine(chType, bot, fm.Name, fm.Contacts[chType].Allowlist, sessionNameOrDefault(cfg), projectDir())})
 		}
 	}
 	if len(out) == 0 {
@@ -469,6 +522,71 @@ func checkDaemon(cfg config.Config, deps doctorDeps) []doctorCheck {
 	}
 	return []doctorCheck{{Group: "daemon", Status: doctorPass,
 		Detail: fmt.Sprintf("session %q alive (PID %d, NATS port %d reachable)", name, rec.PID, rec.NATSPort)}}
+}
+
+// checkBusPort reports the project's bus port, where it comes from, and
+// whether this project's daemon serves it (D-55 B). "Serves" is read from the
+// live session records on this machine; nothing connects to the bus.
+func checkBusPort(cfg config.Config, deps doctorDeps) []doctorCheck {
+	name := cfg.SessionName
+	if name == "" {
+		name = "default"
+	}
+	port := cfg.NATS.Port
+	src := "shared default"
+	switch {
+	case deps.getenv("RYSH_NATS_PORT") != "":
+		src = "RYSH_NATS_PORT"
+	case cfg.NATS.OwnPort:
+		src = "own port, rysh.config.yaml"
+	}
+	head := fmt.Sprintf("bus port %d (%s)", port, src)
+	pass := func(detail string) []doctorCheck {
+		return []doctorCheck{{Group: "daemon", Status: doctorPass, Detail: head + ": " + detail}}
+	}
+	warn := func(detail, fix string) []doctorCheck {
+		return []doctorCheck{{Group: "daemon", Status: doctorWarn, Detail: head + ": " + detail, Fix: fix}}
+	}
+	if port <= 0 {
+		return nil // the NATS check above already reports a session without a port
+	}
+
+	var others []string
+	mine := -1
+	if store, err := session.NewStore(cfg); err == nil {
+		recs, _ := store.List()
+		for _, r := range recs {
+			if r.PID <= 0 || !session.ProcessAlive(r.PID) {
+				continue
+			}
+			if r.Name == name {
+				mine = r.NATSPort
+			} else if r.NATSPort == port {
+				others = append(others, r.Name)
+			}
+		}
+	}
+	restart := fmt.Sprintf(progname.Rewrite("run \"rysh stop %s\" then \"rysh attach %s\""), name, name)
+	choose := progname.Rewrite("stop that session, or give this project another nats.port in rysh.config.yaml (or run \"rysh setup\" in a new directory)")
+
+	switch {
+	case mine == port && len(others) == 0:
+		return pass(fmt.Sprintf("served by this project's daemon (session %q)", name))
+	case mine == port:
+		return pass(fmt.Sprintf("served by this project's daemon (session %q), shared with %s", name, strings.Join(others, ", ")))
+	case mine > 0:
+		return warn(fmt.Sprintf("this project's daemon (session %q) runs on port %d, not the configured one", name, mine), restart)
+	}
+	if len(others) > 0 {
+		if cfg.NATS.OwnPort {
+			return warn(fmt.Sprintf("held by session %s, not this project's daemon; this project's daemon will refuse to join it", strings.Join(others, ", ")), choose)
+		}
+		return pass(fmt.Sprintf("served by session %s; this project's daemon joins it as a guest when it starts", strings.Join(others, ", ")))
+	}
+	if deps.dialNATS(port, 2*time.Second) == nil {
+		return warn("something listens there but no rysh session on this machine records it", choose)
+	}
+	return pass("free; this project's daemon takes it when it starts")
 }
 
 // ---------------------------------------------------------------------------
@@ -528,10 +646,16 @@ func checkEnvRefs(path, content string, deps doctorDeps) []doctorCheck {
 		if _, ok := deps.lookupRef(name); !ok {
 			out = append(out, doctorCheck{Group: "config", Status: doctorFail,
 				Detail: fmt.Sprintf("${%s} in %s does not resolve", name, path),
-				Fix:    fmt.Sprintf("export %s or add it to .rysh/secrets (##secret new %s <value>)", name, name)})
+				Fix:    secretRefFix(name)})
 		}
 	}
 	return out
+}
+
+// secretRefFix is the one fix line for an unresolved ${NAME}, shared by doctor
+// and the setup/assistant summaries so they never disagree.
+func secretRefFix(name string) string {
+	return fmt.Sprintf("export %s or add it to .rysh/secrets (##secret new %s <value>)", name, name)
 }
 
 // pairingUngated mirrors HumanoidActor.channelPairingGate: it reports whether a

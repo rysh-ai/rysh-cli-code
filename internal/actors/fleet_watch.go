@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/courier"
+	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 	"github.com/rysh-ai/rysh-cli-code/internal/fleet"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 )
@@ -67,6 +68,7 @@ const (
 	MetaFleetBlockerFor = "fleet.blocker_for"
 	MetaFleetActivity   = "fleet.activity"
 	MetaFleetHealth     = "fleet.health"
+	MetaFleetAttention  = "fleet.attention" // observed: why the pane needs a human, or ""
 )
 
 // fleetWatch is the watch's state that is not the ledger: what was mirrored,
@@ -111,10 +113,12 @@ func (a *AgentFleetActor) watchLoop(done <-chan struct{}) {
 		case <-t.C:
 			a.observeOnce()
 			a.judgeOnce()
+			a.emitLedgerChanges()
 		case <-a.watch.kick:
 			// A declaration arrived: re-derive now, so an unblock or a
 			// deadlock is acted on in seconds rather than at the next tick.
 			a.judgeOnce()
+			a.emitLedgerChanges()
 		}
 	}
 }
@@ -149,7 +153,7 @@ func (a *AgentFleetActor) observeOnce() {
 	if len(panes) == 0 {
 		return
 	}
-	results := make([]string, len(panes))
+	results := make([]paneObservation, len(panes))
 	procs := readProcTable() // once per sweep, for every pane (design 056 §2)
 	sem := make(chan struct{}, afaObserveParallel)
 	var wg sync.WaitGroup
@@ -165,7 +169,11 @@ func (a *AgentFleetActor) observeOnce() {
 	wg.Wait()
 	now := time.Now().UnixMilli()
 	for i, id := range panes {
-		a.reg.Observe(id, results[i], now)
+		a.reg.Observe(id, results[i].activity, now)
+		// An unreadable pane says nothing about attention: keep what we had.
+		if results[i].attentionKnown {
+			a.reg.ObserveAttention(id, results[i].attention, now)
+		}
 	}
 }
 
@@ -178,12 +186,37 @@ func (a *AgentFleetActor) observeOnce() {
 // Unreadable is UNKNOWN, never idle — a loaded session misses VT reads, and
 // calling every agent idle exactly when the fleet is busiest would fire a stall
 // alert at all of them.
-func observePane(pub *msg.NATSPublisher, paneID string, procs *procTable, gap time.Duration) string {
+func observePane(pub *msg.NATSPublisher, paneID string, procs *procTable, gap time.Duration) paneObservation {
+	// The pane's snapshot carries its "needs you" state (root-order-044 #3),
+	// observed by the pane itself; the ledger keeps it as its own column.
+	var obs paneObservation
+	t, snapErr := courier.SnapshotVia(pub, paneID)
+	if snapErr == nil {
+		obs.attentionKnown = true
+		if reason, needs := domain.PaneNeedsYou(t.Meta); needs {
+			if reason == "" {
+				reason = domain.AttentionNeedsYou
+			}
+			obs.attention = reason
+		}
+	}
+	obs.activity = observeActivity(pub, paneID, procs, gap, t, snapErr)
+	return obs
+}
+
+// paneObservation is one sweep's look at one pane.
+type paneObservation struct {
+	activity       string
+	attention      string // reason, or "" when the pane does not need anyone
+	attentionKnown bool   // false when the snapshot could not be read
+}
+
+func observeActivity(pub *msg.NATSPublisher, paneID string, procs *procTable, gap time.Duration, t courier.Target, snapErr error) string {
 	if inFlight, _, _ := ansaTurnStatus(pub, paneID); inFlight {
 		return fleet.ActivityWorking
 	}
 	if procs != nil {
-		if t, err := courier.SnapshotVia(pub, paneID); err == nil && procs.toolRunning(t.PGID) {
+		if snapErr == nil && procs.toolRunning(t.PGID) {
 			return fleet.ActivityWorking
 		}
 	}
@@ -470,6 +503,7 @@ func (a *AgentFleetActor) mirror(pub *msg.NATSPublisher, m fleet.Member) {
 		MetaFleetBlockerFor: strings.Join(st.BlockerFor, ","),
 		MetaFleetActivity:   st.Activity,
 		MetaFleetHealth:     st.Health,
+		MetaFleetAttention:  st.Attention,
 	}
 	keys := make([]string, 0, len(want))
 	for k := range want {

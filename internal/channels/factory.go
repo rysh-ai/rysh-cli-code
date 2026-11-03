@@ -68,6 +68,22 @@ func NewAdapter(channelType string, config msg.ChannelConfig) (ChannelAdapter, e
 			"subscription", config.Subscription,
 			"has_credentials", config.CredentialsJSON != "")
 		return NewGoogleChatAdapter(config), nil
+	case "mattermost":
+		slog.Debug("channels: creating MattermostAdapter",
+			"server_url", config.ServerURL, "has_bot_token", config.BotToken != "")
+		return NewMattermostAdapter(config), nil
+	case "matrix":
+		slog.Debug("channels: creating MatrixAdapter",
+			"server_url", config.ServerURL, "has_bot_token", config.BotToken != "")
+		return NewMatrixAdapter(config), nil
+	case "line":
+		slog.Debug("channels: creating LineAdapter",
+			"has_bot_token", config.BotToken != "", "webhook_port", config.WebhookPort)
+		return NewLineAdapter(config), nil
+	case "github":
+		slog.Debug("channels: creating GitHubAdapter",
+			"repos", config.Channels, "bot_login", config.BotLogin)
+		return NewGitHubAdapter(config), nil
 	default:
 		// Built-ins first, always (the cases above) — then the installed
 		// channel-plugin registry via the nil-safe hook (design 002 §4.4).

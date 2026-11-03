@@ -89,10 +89,18 @@ func (w *WorkspaceActor) handleCLIPeerCommand(m *msg.MsgCLIPeerCommand) *msg.Msg
 		if err := peer.Save(w.cfg.RyshDir, w.cfg.SessionName, connection); err != nil {
 			return fail(err)
 		}
+		// Nothing is left to publish to: publishing ends with the connection
+		// and a later connect starts with nothing published (N3).
+		if err := peer.SavePublications(w.cfg.RyshDir, w.cfg.SessionName, peer.Publications{}); err != nil {
+			return fail(err)
+		}
 		if w.peerRuntime != nil {
 			w.peerRuntime.SetConnected(false)
 		}
 		return &msg.MsgCLIResponse{OK: true, Output: "peer board disconnected\n"}
+	}
+	if p.Verb == "publish" || p.Verb == "unpublish" {
+		return w.peerPublishCommand(p, connection)
 	}
 	if p.Verb == "status" && !connection.Enabled {
 		if p.JSON {
@@ -112,6 +120,10 @@ func (w *WorkspaceActor) handleCLIPeerCommand(m *msg.MsgCLIPeerCommand) *msg.Msg
 			identity = uuid.NewString()
 		}
 		candidate := peer.Connection{Enabled: true, URL: strings.TrimRight(p.URL, "/"), Workspace: p.Workspace, Board: board, KeySecret: p.KeySecret, SessionID: identity}
+		// The connecting pane receives peer "needs you" alerts (design 044 N2).
+		if m.AsPaneID != "" {
+			candidate.Pane = w.resolvePaneID(m.AsPaneID)
+		}
 		client := peer.Client{Connection: candidate, Key: w.peerKey(p.KeySecret)}
 		if candidate.Workspace == "" {
 			candidate.Workspace, err = client.ResolveWorkspace(ctx)
@@ -148,7 +160,11 @@ func (w *WorkspaceActor) handleCLIPeerCommand(m *msg.MsgCLIPeerCommand) *msg.Msg
 		if p.JSON {
 			return encode(status)
 		}
-		return &msg.MsgCLIResponse{OK: true, Output: fmt.Sprintf("peer board connected: %s / %s\nworkspace=%s user=%s role=%s session=%s\n", connection.URL, status.Board, status.Workspace, status.User, status.Role, connection.SessionID)}
+		out := fmt.Sprintf("peer board connected: %s / %s\nworkspace=%s user=%s role=%s session=%s\n", connection.URL, status.Board, status.Workspace, status.User, status.Role, connection.SessionID)
+		if pubs, err := peer.LoadPublications(w.cfg.RyshDir, w.cfg.SessionName); err == nil && len(pubs.Boards) > 0 {
+			out += fmt.Sprintf("published: %s (peer unpublish <board> stops one)\n", strings.Join(pubs.Names(), ", "))
+		}
+		return &msg.MsgCLIResponse{OK: true, Output: out}
 	case "tail":
 		page, err := client.Tail(ctx, p.After, p.Limit)
 		if err != nil {

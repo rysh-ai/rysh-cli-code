@@ -1,0 +1,19 @@
+rysh import iterm2 — preview (nothing is written without --apply)
+
+Layout: 2 tab(s), 3 lane(s), 4 pane(s)
+  tab 1 "editor"
+    lane 1
+      pane 1 "editor"  cwd: $HOME/src/api
+              start: vim .
+    lane 2
+      pane 1  cwd: $HOME/src/api
+      pane 2  cwd: /srv/logs & more
+  tab 2 "tab 2"
+    lane 1
+      pane 1  cwd: $HOME
+              start: htop
+  Start commands are not run now: they run when you run the generated script.
+
+With --apply this writes (after backing up what it replaces):
+  .rysh/imports/iterm2-work.rysh
+Undo with: rysh import --undo

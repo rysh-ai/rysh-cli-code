@@ -62,6 +62,26 @@ func ExpandEnvRefs(s string, lookup func(string) (string, bool)) (expanded strin
 // this is the config-level precedence `rysh onboard` / `rysh doctor` can see.
 // Values are whitespace-trimmed like the runtime secret store's.
 func LookupSecretRef(ryshDir, name string) (string, bool) {
+	if v, ok := LookupStoredSecretRef(ryshDir, name); ok {
+		return v, true
+	}
+	if !secretNameOK(name) {
+		return "", false
+	}
+	if v, ok := os.LookupEnv(name); ok {
+		// An env var that is set but empty counts as unresolved: an empty
+		// key/token is never usable, and doctor should name it as missing.
+		if v = strings.TrimSpace(v); v != "" {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// LookupStoredSecretRef is LookupSecretRef without the process environment:
+// only the persisted .rysh/secrets files. It is what an already-running
+// daemon can resolve no matter which environment it was started from.
+func LookupStoredSecretRef(ryshDir, name string) (string, bool) {
 	if !secretNameOK(name) {
 		return "", false
 	}
@@ -82,13 +102,6 @@ func LookupSecretRef(ryshDir, name string) (string, bool) {
 			if v, ok := readSecretFile(filepath.Join(root, scope, name)); ok {
 				return v, true
 			}
-		}
-	}
-	if v, ok := os.LookupEnv(name); ok {
-		// An env var that is set but empty counts as unresolved: an empty
-		// key/token is never usable, and doctor should name it as missing.
-		if v = strings.TrimSpace(v); v != "" {
-			return v, true
 		}
 	}
 	return "", false

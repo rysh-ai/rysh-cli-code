@@ -76,7 +76,7 @@ func liveWhatsAppAdapter(t *testing.T, env map[string]string, port int) *WhatsAp
 		Enabled:     true,
 		APIKey:      env["RYSH_LIVE_WHATSAPP_ACCESS_TOKEN"],
 		Phone:       env["RYSH_LIVE_WHATSAPP_PHONE_NUMBER_ID"],
-		AppSecret:   os.Getenv("RYSH_LIVE_WHATSAPP_APP_SECRET"),
+		AppSecret:   env["RYSH_LIVE_WHATSAPP_APP_SECRET"],
 		VerifyToken: os.Getenv("RYSH_LIVE_WHATSAPP_VERIFY_TOKEN"),
 		WebhookPort: strconv.Itoa(port),
 	})
@@ -125,6 +125,8 @@ func whatsAppTemplate() (name, lang string) {
 //	                                    code ("447700900123"). On a test number it
 //	                                    must be one of the app's (max 5) verified
 //	                                    recipient numbers
+//	RYSH_LIVE_WHATSAPP_APP_SECRET       the app secret (required: the adapter
+//	                                    refuses to start without it)
 //	RYSH_LIVE_WHATSAPP_TEMPLATE         template name (optional; default
 //	                                    "hello_world", which takes no parameters)
 //	RYSH_LIVE_WHATSAPP_TEMPLATE_LANG    its language code (optional; default en_US)
@@ -137,6 +139,7 @@ func TestLiveWhatsAppOutbound(t *testing.T) {
 		"RYSH_LIVE_WHATSAPP_ACCESS_TOKEN",
 		"RYSH_LIVE_WHATSAPP_PHONE_NUMBER_ID",
 		"RYSH_LIVE_WHATSAPP_TO",
+		"RYSH_LIVE_WHATSAPP_APP_SECRET",
 	)
 	whatsAppIsolateState(t)
 	adapter := liveWhatsAppAdapter(t, env, freeTCPPort(t))
@@ -190,9 +193,10 @@ func TestLiveWhatsAppOutbound(t *testing.T) {
 //	RYSH_LIVE_WHATSAPP_VERIFY_TOKEN   the Verify Token typed into Meta's webhook
 //	                                  form (optional; needed only if the Callback
 //	                                  URL is (re)verified while this test runs)
-//	RYSH_LIVE_WHATSAPP_APP_SECRET     the app secret (optional; when set, every
+//	RYSH_LIVE_WHATSAPP_APP_SECRET     the app secret (required: the adapter
+//	                                  refuses to start without it, and every
 //	                                  inbound POST must carry a valid
-//	                                  X-Hub-Signature-256, as in production)
+//	                                  X-Hub-Signature-256)
 //	RYSH_LIVE_WHATSAPP_WAIT_SECS      how long to wait for the human (optional;
 //	                                  default 180)
 //
@@ -206,6 +210,7 @@ func TestLiveWhatsAppRoundTrip(t *testing.T) {
 		"RYSH_LIVE_WHATSAPP_PHONE_NUMBER_ID",
 		"RYSH_LIVE_WHATSAPP_TO",
 		"RYSH_LIVE_WHATSAPP_TUNNEL_URL",
+		"RYSH_LIVE_WHATSAPP_APP_SECRET",
 	)
 	whatsAppIsolateState(t)
 	port := envInt("RYSH_LIVE_WHATSAPP_WEBHOOK_PORT", defaultWhatsAppWebhookPort)
@@ -246,8 +251,8 @@ func TestLiveWhatsAppRoundTrip(t *testing.T) {
 		t.Fatalf("inbound phone_number_id = %q, want %q — the webhook delivered another number's traffic",
 			pn, env["RYSH_LIVE_WHATSAPP_PHONE_NUMBER_ID"])
 	}
-	t.Logf("inbound OK: sender=%s name=%q wamid_set=true content_len=%d signature_checked=%v",
-		got.SenderID, got.SenderName, len(got.Content), os.Getenv("RYSH_LIVE_WHATSAPP_APP_SECRET") != "")
+	t.Logf("inbound OK: sender=%s name=%q wamid_set=true content_len=%d signature_checked=true",
+		got.SenderID, got.SenderName, len(got.Content))
 
 	// The window is open now only because the inbound above was stored.
 	if err := adapter.Send(ctx, OutboundMessage{

@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -146,8 +144,10 @@ type PaneActor struct {
 	// Active turn IDs per mode — tracks the current turn for streaming answers.
 	activeTurnIDs map[msg.ConversationType]string
 
-	ptyFile            *os.File
-	cmd                *exec.Cmd
+	// The shell's terminal — the PTY master on Unix, a ConPTY console on
+	// Windows — and the shell process running on it.
+	ptyFile            paneTerm
+	shellProc          paneShellProc
 	llmPromptExecInbox string // "{session}.pane.{id}.llm_prompt_execution.inbox"
 	llmPromptExecPID   *actor.PID
 	memoryPID          *actor.PID   // PID of MemoryManagerActor (nil if no provider)
@@ -217,6 +217,11 @@ type PaneActor struct {
 	// consumers fall back to lsof/proc resolution then. Holds a string.
 	shellCwdAtomic atomic.Value
 
+	// sandboxedAtomic mirrors "meta has agent.sandbox" for the lifecycle edges,
+	// which come from the read loop and the foreground poller as well as the
+	// mailbox. Kept by noteMetaChanged.
+	sandboxedAtomic atomic.Bool
+
 	// programAtomic is the pane's live foreground program name, "" at the
 	// shell prompt: a known agent CLI's own name (foregroundCLI), else the
 	// kernel's name for the executable. Read by buildSnapshot on the mailbox goroutine; written by
@@ -259,6 +264,14 @@ type PaneActor struct {
 	// SMALLEST claim so the grid fits inside every viewport showing the pane;
 	// see applyEffectivePaneSize. Touched only from the mailbox goroutine.
 	sizeClaims map[string]paneSizeClaim
+	// viewportLastInput reports when a terminal UI's tty last had input; nil
+	// means ttyLastInput. A seam for the arbitration tests (see
+	// idleViewportClaims).
+	viewportLastInput func(pid int) (time.Time, bool)
+	// sizeIdle is the idle set the last arbitration left out, so the reap
+	// sweep can tell when someone has started or stopped typing in a
+	// terminal UI. Touched only from the mailbox goroutine.
+	sizeIdle map[string]bool
 	// lastSizeClaimReap rate-limits the liveness sweep over sizeClaims, which
 	// runs off snapshot requests (a hot path) rather than a timer.
 	lastSizeClaimReap time.Time
@@ -327,6 +340,16 @@ type PaneActor struct {
 	// approvalAttentionEnabled controls whether approval events emit attention notifications.
 	approvalAttentionEnabled bool
 
+	// attn is the pane's "needs you" state (attention.go). Owned by the
+	// actor goroutine; the watcher reaches it only through attentionSend.
+	attn paneAttention
+	// attentionSend posts the watcher's verdict onto the mailbox (set in Started).
+	attentionSend atomic.Value // func(active bool)
+	// lastOutputNano / lastInputNano: when the PTY last produced output and last
+	// received a keystroke (unix nanos), for the watcher.
+	lastOutputNano atomic.Int64
+	lastInputNano  atomic.Int64
+
 	kvDirty bool
 	// persistTickStop halts the safety-net persist ticker (panePersistInterval).
 	persistTickStop chan struct{}
@@ -387,6 +410,7 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 		// own goroutine, where ctx is not ours to touch.
 		if self, system := ctx.Self(), ctx.ActorSystem(); self != nil && system != nil {
 			p.sizeSettleSend = func() { system.Root.Send(self, &paneSizeSettleMsg{}) }
+			p.attentionSend.Store(func(active bool) { system.Root.Send(self, &paneAttentionMsg{active: active}) })
 		}
 		p.br = bridge.New(p.nc, ctx.Self(), ctx.ActorSystem(), p.pub.Codecs())
 		p.br.SetPaneID(p.id)
@@ -413,6 +437,8 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 		_ = p.br.AddSubject(msg.T("pane", p.id, "restrictions"))
 		// Approval request topic (for attention mechanism).
 		_ = p.br.AddSubject(msg.T("pane", p.id, "approval", "request"))
+		// ...and its answer, which clears the pane's "needs you" (attention.go).
+		_ = p.br.AddSubject(msg.T("pane", p.id, "approval", "response"))
 		// Per-mode history topics only (not merged — same dual-publish reason).
 		_ = p.br.AddSubject(msg.T("pane", p.id, "history", "shell"))
 		_ = p.br.AddSubject(msg.T("pane", p.id, "history", "ai"))
@@ -471,6 +497,10 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 			return agActor
 		})
 		p.llmPromptExecPID = ctx.Spawn(agProps)
+		// Re-apply a stored agent profile (design 093 H1) before the first
+		// turn: queued on the actor's mailbox ahead of anything its inbox
+		// subscription can deliver. Covers every daemon restart.
+		p.reapplyAgentProfileOnSpawn(ctx)
 
 		// Restore LLM conversation if available.
 		if p.kvStore != nil {
@@ -621,7 +651,7 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 		p.killForeground(m.Hard)
 
 	case *msg.MsgPaneExecPrompt:
-		p.executePrompt(m.Prompt, nil)
+		p.handleExecPrompt(m)
 
 	case *msg.MsgPaneExecRysh:
 		p.executeRysh(m.Command)
@@ -734,6 +764,9 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 
 	case *msg.MsgPaneSetMeta:
 		p.setMeta(m.Key, m.Value)
+		if domain.IsPaneAgentProfileKey(m.Key) {
+			p.applyAgentProfile(ctx)
+		}
 
 	case *msg.MsgPaneStop:
 		ctx.Stop(ctx.Self())
@@ -1054,6 +1087,7 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 		}
 
 	case *msg.MsgApprovalRequest:
+		p.noteApprovalRequest(m)
 		if p.approvalAttentionEnabled {
 			_ = p.pub.Send(msg.T("ws", "attention"), &msg.MsgAttentionEvent{
 				PaneID:    p.id,
@@ -1064,6 +1098,12 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 				Timestamp: time.Now().Unix(),
 			})
 		}
+
+	case *msg.MsgApprovalResponse:
+		p.noteApprovalResponse(m)
+
+	case *paneAttentionMsg:
+		p.applyPromptAttention(m.active)
 
 	case *msg.RequestEnvelope:
 		switch inner := m.Inner.(type) {
@@ -1077,13 +1117,27 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 			// false to pull full content in one hop. Conversation buffers are never
 			// needed on the reply path (only the 2s-gated persist path builds them).
 			snap := p.buildSnapshot(!inner.LayoutOnly, false, snapshotWantsHistories(inner, p.id))
-			_ = m.Reply(&msg.MsgPaneSnapshotReply{Snapshot: snap})
+			// A content fetch from a requester that already holds this exact
+			// content (the TUI's reconcile) gets NotModified: no marshal, no wire
+			// bytes, no decode on the other side.
+			if inner.IfContentHash != 0 && !inner.LayoutOnly && msg.PaneContentHash(snap) == inner.IfContentHash {
+				_ = m.Reply(&msg.MsgPaneSnapshotReply{NotModified: true})
+			} else {
+				_ = m.Reply(&msg.MsgPaneSnapshotReply{Snapshot: snap})
+			}
 			p.maybePersist()
 		case *msg.MsgGetPaneVT:
 			// Lightweight per-frame interactive refresh: reply with only the VT
 			// screen + cursor, skipping the heavy buffer build/marshal. Pure read —
-			// no persist trigger.
-			_ = m.Reply(p.buildVTFrame())
+			// no persist trigger. A requester that sends its row hashes gets only
+			// the rows that changed.
+			_ = m.Reply(vtFrameForRequest(p.buildVTFrame(), inner.RowHashes))
+		case *msg.MsgPaneAttachBoard:
+			// `##board attach` (design 030 W5): the final busy check and the
+			// conversion, in this one turn (pane_board_attach.go).
+			_ = m.Reply(&msg.MsgPaneAttachBoardReply{
+				Reason: p.attachBoard(inner.BoardID, time.UnixMilli(inner.DeadlineUnixMs)),
+			})
 		case *msg.MsgGetPaneScrollback:
 			_ = m.Reply(&msg.MsgPaneScrollbackReply{Rows: p.buildScrollbackRows()})
 		case *msg.MsgGetPaneScrollbackDelta:
@@ -1173,6 +1227,7 @@ func (p *PaneActor) setMeta(key, value string) {
 		}
 		p.meta[key] = value
 	}
+	p.noteMetaChanged()
 	p.kvDirty = true
 	// Synchronous sidecar write (F-54): meta is the addressing layer
 	// fleet selectors and boards resolve against; it gets its own tiny

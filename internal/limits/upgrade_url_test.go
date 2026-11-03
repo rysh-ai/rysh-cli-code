@@ -26,7 +26,7 @@ const legacyPaneLimitMsg = "pane limit reached (30/30 on Free plan). Upgrade you
 func TestCheckCreateMessageUnchangedWithoutUpgradeURL(t *testing.T) {
 	c := NewChecker("https://example.invalid", "key")
 	c.cached = &ResourceLimits{PlanID: "free", PlanName: "Free", MaxPanes: 30} // no UpgradeURL
-	c.lastFetch = time.Now() // fresh: do not trigger a background refresh
+	c.lastFetch = time.Now()                                                   // fresh: do not trigger a background refresh
 
 	err := c.CheckCreate(ResourceUsage{Panes: 30}, 1)
 	if err == nil {

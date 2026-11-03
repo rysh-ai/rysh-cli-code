@@ -71,7 +71,7 @@ func (w *WorkspaceActor) cronRestore() {
 	// auto-<kind>-<name> cron job upserted; jobs whose recipe was deleted are
 	// removed. Recipes without the key are untouched (purely on-demand).
 	w.syncRecipeSchedules()
-	now := time.Now()
+	now := w.cronClock()
 	for _, j := range w.cron.jobs {
 		if j.Enabled {
 			if err := j.ComputeNext(now); err != nil {
@@ -139,7 +139,7 @@ func (w *WorkspaceActor) handleCronTick(ctx actor.Context) {
 		slog.Info("cron: persisted jobs loaded after retry", "jobs", len(w.cron.jobs))
 		w.cronRestore()
 	}
-	now := time.Now()
+	now := w.cronClock()
 	changed := false
 	for _, j := range w.cron.jobs {
 		if !j.Due(now) {
@@ -166,21 +166,73 @@ func (w *WorkspaceActor) handleCronTick(ctx actor.Context) {
 func (w *WorkspaceActor) fireCronJob(ctx actor.Context, j *cron.Job) {
 	paneID := w.cronResolveTarget(j.Target)
 	if paneID == "" {
-		j.RecordRun(cron.Run{At: time.Now(), Status: "error", Note: "target pane not found: " + j.Target})
+		j.RecordRun(cron.Run{At: w.cronClock(), Status: cron.StatusError, Note: "target pane not found: " + j.Target})
 		return
+	}
+	status, note := w.fireScheduledInput(ctx, paneID, "cron", j.Name, j.InferMode(), j.Input)
+	j.RecordRun(cron.Run{At: w.cronClock(), Status: status, Note: note})
+}
+
+// fireScheduledInput is the one fire path for unattended input — cron jobs and
+// webhook triggers (gap06). It routes through routeInput exactly as typed
+// input, so tool approvals, the governance proxy, SecretNAT and the sandbox
+// apply unchanged. The one thing it adds is honesty: governed input that
+// fail-closed policy would refuse (design 013) is not routed at all, and the
+// caller records StatusBlocked instead of a run that never happened.
+// label names the source in the pane echo ("cron", "trigger").
+func (w *WorkspaceActor) fireScheduledInput(ctx actor.Context, paneID, label, name, mode, input string) (status, note string) {
+	if w.policyBlocked() && w.inputGoverned(mode, input) {
+		w.notifyPolicyBlocked(paneID)
+		return cron.StatusBlocked, "refused: policy failed to load (fail-closed)"
 	}
 	tab := w.resolveOriginTab(paneID)
 
 	// Echo the fire to the target pane's rysh output so it's visible in-session.
-	_ = w.pub.SendPaneRyshOutput(paneID, fmt.Sprintf("\n[cron] fired %q → %s\n", j.Name, j.Input))
+	_ = w.pub.SendPaneRyshOutput(paneID, fmt.Sprintf("\n[%s] fired %q → %s\n", label, name, input))
 
-	out := w.routeInput(ctx, paneID, tab, j.InferMode(), j.Input)
+	// Marked for the length of the synchronous routing: commands that must
+	// come from a person (`##board attach`) refuse a scheduled fire.
+	var out string
+	w.withScheduledFire(label, func() { out = w.routeInput(ctx, paneID, tab, mode, input) })
 
-	note := "dispatched"
+	note = "dispatched"
 	if trimmed := strings.TrimSpace(out); trimmed != "" {
 		note = truncateCron(firstLineCron(trimmed), 200) // synchronous ## result tail
 	}
-	j.RecordRun(cron.Run{At: time.Now(), Status: "ok", Note: note})
+	return cron.StatusOK, note
+}
+
+// inputGoverned reports whether routeInput would refuse this input while the
+// policy file is unparseable (design 013). It mirrors routeInput's order
+// exactly: @@ control is allowed; an @agent prompt is governed; a ## system
+// command, or a #user-command that RESOLVES to a script, runs before the
+// prompt gate and is not governed (an unresolved #word is ordinary prompt
+// text); rysh and pipeline modes are not governed; a prompt-mode line is.
+// Anything this reports as governed is not routed and is recorded blocked, so
+// it must never claim more than routeInput refuses.
+func (w *WorkspaceActor) inputGoverned(mode, text string) bool {
+	switch {
+	case strings.HasPrefix(text, "@@"):
+		return false
+	case strings.HasPrefix(text, "@"):
+		return true
+	case strings.HasPrefix(text, "##") && !strings.HasPrefix(text, "##>"):
+		return false
+	}
+	if word := userCommandLineWord(text); word != "" {
+		if _, ok := w.findUserCommand(word); ok {
+			return false
+		}
+	}
+	return mode == "prompt"
+}
+
+// cronClock is the scheduler's notion of now; tests inject a fake clock.
+func (w *WorkspaceActor) cronClock() time.Time {
+	if w.cronNow != nil {
+		return w.cronNow()
+	}
+	return time.Now()
 }
 
 // cronResolveTarget maps a job's Target to a live pane id: "active"/"" → the
@@ -440,7 +492,7 @@ flagsDone:
 		Input:    input,
 		Enabled:  true,
 	}
-	_ = j.ComputeNext(time.Now())
+	_ = j.ComputeNext(w.cronClock())
 	w.cron.jobs = append(w.cron.jobs, j)
 	w.cronPersist()
 
@@ -589,7 +641,7 @@ func (w *WorkspaceActor) cronSetEnabled(out *strings.Builder, name string, enabl
 	}
 	j.Enabled = enabled
 	if enabled {
-		if err := j.ComputeNext(time.Now()); err != nil {
+		if err := j.ComputeNext(w.cronClock()); err != nil {
 			fmt.Fprintf(out, "\n[cron] cannot enable %q: %v\n", name, err)
 			w.failRysh("cannot enable %q: %v", name, err)
 			j.Enabled = false

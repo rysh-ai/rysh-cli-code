@@ -72,6 +72,8 @@ type fakeAnsaTransport struct {
 	// failure during a loaded session.
 	screenFailFirst int
 	interruptErr    error
+	// keyWrites records every SendKeys write, in order.
+	keyWrites [][]byte
 
 	// The native agent's state — what Probe cannot see. turnInFlight is "this
 	// pane's rysh agent is mid-turn"; turnPaused is "it has a checkpoint to
@@ -137,6 +139,14 @@ func (f *fakeAnsaTransport) Interrupt(paneID string) error {
 	f.mu.Lock()
 	f.interrupted = append(f.interrupted, paneID)
 	f.mu.Unlock()
+	return nil
+}
+
+// SendKeys records key writes; the keys tests use keysFake, which overrides it.
+func (f *fakeAnsaTransport) SendKeys(paneID string, writes [][]byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.keyWrites = append(f.keyWrites, writes...)
 	return nil
 }
 

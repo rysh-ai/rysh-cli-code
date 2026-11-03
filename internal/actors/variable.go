@@ -73,7 +73,7 @@ func (w *WorkspaceActor) namedExpandLayered(scopes []string, in string) string {
 }
 
 // namedExpandFunc returns the combined secret+variable expander bound to the
-// scope chain for paneID (tab → workspace → env), suitable for threading into the
+// scope chain for paneID (tab → workspace → default → env), suitable for threading into the
 // agent/humanoid skill-file parsers. This is the single integration point that
 // makes frontmatter, system-prompt bodies, and humanoid contact configs resolve
 // ${NAME} from both .rysh/secrets and .rysh/variables.

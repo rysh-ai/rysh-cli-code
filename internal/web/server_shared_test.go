@@ -49,6 +49,8 @@ func startTwoDoorServer(t *testing.T) (private, shared int, creds *Credentials) 
 func get(t *testing.T, url, bearer string) int {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	// What the desktop app presents on its own door; it must not open any other.
+	req.Header = controlSecretHeaders()
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
@@ -65,10 +67,15 @@ func TestSharedDoor_GatesWhilePrivateStaysOpen(t *testing.T) {
 	private, shared, creds := startTwoDoorServer(t)
 
 	if code := get(t, fmt.Sprintf("http://127.0.0.1:%d/api/env", private), ""); code != http.StatusOK {
-		t.Errorf("private door with no credential = %d, want 200 (the desktop app presents none)", code)
+		t.Errorf("private door with the control secret = %d, want 200 (the desktop app's posture)", code)
+	}
+	if resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/env", private)); err != nil {
+		t.Fatal(err)
+	} else if resp.Body.Close(); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("private door with no secret = %d, want 401", resp.StatusCode)
 	}
 	if code := get(t, fmt.Sprintf("http://127.0.0.1:%d/api/env", shared), ""); code != http.StatusUnauthorized {
-		t.Errorf("shared door with no credential = %d, want 401", code)
+		t.Errorf("shared door with the control secret but no login = %d, want 401 (the secret opens only the private door)", code)
 	}
 
 	tok, err := signJWT(creds.SigningKey(), creds.Username, time.Now(), AccessTokenTTL)
@@ -99,7 +106,9 @@ func TestSharedDoor_ServesLoginPageAndHealth(t *testing.T) {
 func TestSharedDoor_AuthStatusIsPerDoor(t *testing.T) {
 	private, shared, _ := startTwoDoorServer(t)
 	body := func(url string) string {
-		resp, err := http.Get(url)
+		req, _ := http.NewRequest(http.MethodGet, url, nil)
+		req.Header = controlSecretHeaders()
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("GET %s: %v", url, err)
 		}

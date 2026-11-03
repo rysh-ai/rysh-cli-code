@@ -1,0 +1,13 @@
+{
+  "action": "opened",
+  "issue": {
+    "number": 43,
+    "title": "Crash on empty input",
+    "body": "Steps: run with no args.\n\n@example_bot can you reproduce and propose a fix?",
+    "html_url": "https://github.com/acme/widgets/issues/43",
+    "user": {"login": "alice", "type": "User"},
+    "author_association": "OWNER"
+  },
+  "repository": {"full_name": "acme/widgets", "html_url": "https://github.com/acme/widgets"},
+  "sender": {"login": "alice", "type": "User"}
+}

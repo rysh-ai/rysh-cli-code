@@ -62,14 +62,18 @@ type groupWorktreeRef struct {
 // title), mirroring the agent path's agent/<name> convention — branch, pane
 // title and worktree directory all share one human-readable handle.
 func (w *WorkspaceActor) handlePaneNewCommand(ctx actor.Context, out *strings.Builder, paneID string, args []string) {
+	args, asJSON := stripLeadingJSONFlag(args)
 	rest, withClaude := stripClaudeFlag(args)
 	if withClaude {
-		w.handlePaneNewClaude(ctx, out, paneID, rest)
+		w.handlePaneNewClaude(ctx, out, paneID, rest, asJSON)
 		return
 	}
 	rest, withWorktree := stripWorktreeFlag(args)
 	if !withWorktree {
 		// Plain `##pane new` is an alias of `##new pane`.
+		if asJSON {
+			rest = append(rest, "--json")
+		}
 		w.handleNewInstance(ctx, out, paneID, append([]string{"pane"}, rest...))
 		return
 	}
@@ -128,6 +132,10 @@ func (w *WorkspaceActor) handlePaneNewCommand(ctx actor.Context, out *strings.Bu
 	w.restoreFocusAfterCreate(paneID)
 	w.persistToKV()
 
+	if asJSON {
+		writeJSONLine(out, NewPaneResult{Alias: alias, TabID: tab.id, LaneID: laneID, Branch: branch, Worktree: path})
+		return
+	}
 	fmt.Fprintf(out, "\n[rysh] new pane %q created in lane %.8s — shell starts in the worktree\n", alias, laneID)
 	fmt.Fprintf(out, "  merge back when done:  ##worktree merge %s\n", branch)
 	fmt.Fprintf(out, "  closing the pane removes the worktree if clean; dirty worktrees are kept\n")

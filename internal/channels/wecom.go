@@ -107,6 +107,7 @@ type WeComAdapter struct {
 	connected bool
 	err       string
 	server    *http.Server
+	addr      string // the address the webhook listener bound, once Start has run
 	cancel    context.CancelFunc
 
 	received []WeComMessage
@@ -200,6 +201,12 @@ func (w *WeComAdapter) Start(ctx context.Context) error {
 		return fmt.Errorf("wecom: encoding_aes_key is required and must be valid: %w", err)
 	}
 	w.aesKey = key
+	// The listener binds 127.0.0.1 unless webhook_bind names another host:
+	// the operator's reverse proxy or tunnel forwards to it.
+	host, err := webhookBindHost("wecom", w.config)
+	if err != nil {
+		return err
+	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	w.cancel = cancel
@@ -212,12 +219,17 @@ func (w *WeComAdapter) Start(ctx context.Context) error {
 		return fmt.Errorf("wecom: credential check failed: %w", err)
 	}
 
-	addr := fmt.Sprintf(":%d", w.port)
+	addr := net.JoinHostPort(host, strconv.Itoa(w.port))
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		cancel()
 		w.setState(false, err.Error())
 		return fmt.Errorf("wecom: webhook listen on %s: %w", addr, err)
+	}
+
+	if !isLoopbackHost(host) {
+		slog.Warn("wecom: webhook listening beyond loopback because webhook_bind says so; every POST must still carry a valid msg_signature",
+			"listen", ln.Addr().String())
 	}
 
 	mux := http.NewServeMux()
@@ -227,6 +239,7 @@ func (w *WeComAdapter) Start(ctx context.Context) error {
 
 	w.mu.Lock()
 	w.server = server
+	w.addr = ln.Addr().String()
 	w.connected = true
 	w.err = ""
 	w.mu.Unlock()
@@ -639,4 +652,11 @@ func (w *WeComAdapter) GetMessage(id string) (WeComMessage, bool) {
 		}
 	}
 	return WeComMessage{}, false
+}
+
+// listenAddr is the address the webhook listener bound, or "" before Start.
+func (w *WeComAdapter) listenAddr() string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.addr
 }

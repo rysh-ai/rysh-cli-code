@@ -31,6 +31,9 @@ type Connection struct {
 	Board     string `json:"board"`
 	KeySecret string `json:"key_secret"`
 	SessionID string `json:"session_id"`
+	// Pane is the local pane that connected; peer "needs you" alerts land
+	// on it (design 044 N2). Empty for connections made before it existed.
+	Pane string `json:"pane,omitempty"`
 }
 
 type Message struct {
@@ -111,12 +114,17 @@ func Load(root, session string) (Connection, error) {
 
 // Save is atomic and stores only a secret's name, never its value.
 func Save(root, session string, c Connection) error {
-	path := connectionPath(root, session)
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
+		return err
+	}
+	return writePrivate(connectionPath(root, session), data)
+}
+
+// writePrivate writes data to path atomically (temp file, fsync, rename);
+// the temp file is created 0600, so the result is private to the user.
+func writePrivate(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
 	f, err := os.CreateTemp(filepath.Dir(path), ".peer-")

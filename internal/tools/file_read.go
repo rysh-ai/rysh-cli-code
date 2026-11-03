@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/rysh-ai/rysh-cli-code/internal/policy"
 )
 
 const defaultLineLimit = 2000
@@ -67,6 +69,9 @@ func (t *FileReadTool) Execute(ctx context.Context, params json.RawMessage) (*To
 	path := p.FilePath
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(t.workDir, path)
+	}
+	if out := fsPolicyRefusal(path, policy.FSRead); out != nil {
+		return out, nil
 	}
 
 	// Set default limit.

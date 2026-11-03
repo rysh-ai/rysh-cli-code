@@ -540,6 +540,7 @@ func TestTelegramWebhookMode(t *testing.T) {
 	var (
 		hookMu        sync.Mutex
 		setURL        string
+		setSecret     string
 		deleteWebhook bool
 	)
 	api := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
@@ -548,11 +549,13 @@ func TestTelegramWebhookMode(t *testing.T) {
 			_, _ = io.WriteString(rw, `{"ok":true,"result":{"id":424242,"is_bot":true,"first_name":"rysh","username":"ryshbot"}}`)
 		case strings.HasSuffix(r.URL.Path, "/setWebhook"):
 			var p struct {
-				URL string `json:"url"`
+				URL         string `json:"url"`
+				SecretToken string `json:"secret_token"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&p)
 			hookMu.Lock()
 			setURL = p.URL
+			setSecret = p.SecretToken
 			hookMu.Unlock()
 			_, _ = io.WriteString(rw, `{"ok":true,"result":true}`)
 		case strings.HasSuffix(r.URL.Path, "/deleteWebhook"):
@@ -590,6 +593,7 @@ func TestTelegramWebhookMode(t *testing.T) {
 
 	hookMu.Lock()
 	gotURL := setURL
+	gotSecret := setSecret
 	hookMu.Unlock()
 	if gotURL != "https://example.com/tg-hook" {
 		t.Errorf("setWebhook url = %q", gotURL)
@@ -598,9 +602,17 @@ func TestTelegramWebhookMode(t *testing.T) {
 		t.Errorf("Status details = %q, want webhook :%d", st.Details, port)
 	}
 
-	// Deliver an update to the loopback webhook and expect it inbound.
-	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/", port), "application/json",
+	// Deliver an update to the loopback webhook, signed with the secret_token
+	// registered via setWebhook (as Telegram does), and expect it inbound.
+	// Unsigned updates are refused; see e25_tg_webhook_secret_test.go.
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/", port),
 		strings.NewReader(tgFixtureDM))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Telegram-Bot-Api-Secret-Token", gotSecret)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST to webhook: %v", err)
 	}

@@ -79,11 +79,18 @@ var auditFileMu sync.Mutex
 func (s *Service) recordTool(e AuditEntry) {
 	s.mu.Lock()
 	e.Meeting, e.MeetingID = s.botID, s.cfg.ID
-	if e.Status != "started" {
-		s.toolCalls++
-	}
 	path := s.cfg.AuditPath
 	s.mu.Unlock()
+	// Count the call only after its line is written (or the write was
+	// attempted), so the status count never runs ahead of the audit file:
+	// a reader that waits on ToolCalls and then reads the log sees the line.
+	if e.Status != "started" {
+		defer func() {
+			s.mu.Lock()
+			s.toolCalls++
+			s.mu.Unlock()
+		}()
+	}
 	if path == "" {
 		return
 	}

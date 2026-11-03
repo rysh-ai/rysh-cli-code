@@ -11,6 +11,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/bustoken"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 )
 
@@ -25,7 +26,7 @@ type Client struct {
 // NewClient connects to the NATS server at the given port.
 func NewClient(port int, sessionName string) (*Client, error) {
 	url := fmt.Sprintf("nats://127.0.0.1:%d", port)
-	nc, err := nats.Connect(url,
+	nc, err := bustoken.Dial(port,
 		nats.Timeout(3*time.Second),
 		nats.MaxReconnects(0),
 	)
@@ -43,7 +44,7 @@ func NewClient(port int, sessionName string) (*Client, error) {
 // fail-fast behaviour, where a dead session must be an error now.
 func NewPersistentClient(port int, sessionName string) (*Client, error) {
 	url := fmt.Sprintf("nats://127.0.0.1:%d", port)
-	nc, err := nats.Connect(url,
+	nc, err := bustoken.Dial(port,
 		nats.Timeout(3*time.Second),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2*time.Second),

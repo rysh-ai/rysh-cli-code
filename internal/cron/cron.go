@@ -21,10 +21,19 @@ const MaxRunHistory = 20
 // MaxJobs caps the number of jobs a session may hold.
 const MaxJobs = 100
 
+// Run statuses. StatusBlocked is a run that fail-closed policy refused
+// (design 013): it was not delivered, and it does not count as a failure.
+const (
+	StatusOK      = "ok"
+	StatusError   = "error"
+	StatusSkipped = "skipped"
+	StatusBlocked = "blocked"
+)
+
 // Run is one recorded firing of a job.
 type Run struct {
 	At     time.Time `json:"at"`
-	Status string    `json:"status"` // ok | error | skipped
+	Status string    `json:"status"` // ok | error | skipped | blocked
 	Note   string    `json:"note,omitempty"`
 }
 
@@ -134,9 +143,12 @@ func (j *Job) RecordRun(r Run) {
 	j.LastRun = r.At
 	j.LastStatus = r.Status
 	j.RunCount++
-	if r.Status == "error" {
+	switch r.Status {
+	case StatusError:
 		j.FailStreak++
-	} else {
+	case StatusBlocked:
+		// Neither a failure nor a success: the job was never delivered.
+	default:
 		j.FailStreak = 0
 	}
 	j.Runs = append(j.Runs, r)

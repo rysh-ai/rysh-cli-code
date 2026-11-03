@@ -22,6 +22,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/bustoken"
 	"github.com/rysh-ai/rysh-cli-code/internal/channels"
 	"github.com/rysh-ai/rysh-cli-code/internal/channels/plugin"
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
@@ -59,7 +60,11 @@ func defaultPluginNATSProvider() (*nats.Conn, string, error) {
 		}
 		url = fmt.Sprintf("nats://127.0.0.1:%d", rec.NATSPort)
 	}
-	nc, err := nats.Connect(url)
+	tokOpt, err := bustoken.OptionForURL(url)
+	if err != nil {
+		return nil, "", fmt.Errorf("plugin nats: %w", err)
+	}
+	nc, err := nats.Connect(url, tokOpt)
 	if err != nil {
 		return nil, "", fmt.Errorf("plugin nats: connect %s: %w", url, err)
 	}

@@ -10,7 +10,10 @@ import (
 	"sync"
 	"time"
 
+	sharedmsg "github.com/rysh-ai/rysh-cli-shared/msg"
+
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
+	"github.com/rysh-ai/rysh-cli-code/internal/usage"
 )
 
 // Budget enforcement (design 001 §4.4).
@@ -178,6 +181,36 @@ func leaseMessage(tenant string) string {
 	return "rysh budget exceeded for " + who + " across all machines: the " +
 		"workspace-wide token ceiling is used up for today. Raise it in the rysh " +
 		"dashboard, or inspect local spend with `##cost`."
+}
+
+// SpendCapReporter is the optional half of a LeaseGate that knows the
+// workspace's USD spend cap (root-order-044 #8). The LedgerClient implements
+// it; a gate that does not is treated as "no cap".
+type SpendCapReporter interface {
+	SpendCap(tenant string) (sharedmsg.GatewaySpendCap, bool)
+}
+
+// spendCapMessage is the 429 body when the workspace spend cap refused. Same
+// rate-limit shape as every other ceiling; the words name the cap, the
+// ESTIMATED spend and the period. ok=false: no figures known, none invented.
+func spendCapMessage(tenant string, c sharedmsg.GatewaySpendCap, ok bool) string {
+	who := "this workspace"
+	if tenant != "" {
+		who = "this workspace (tenant " + tenant + ")"
+	}
+	head := "rysh spend cap reached for " + who + " across all machines"
+	tail := ". An admin can raise or clear the workspace spend cap in the rysh " +
+		"dashboard; inspect local spend with `##cost`."
+	if !ok {
+		return head + tail
+	}
+	period := "this month (UTC)"
+	if c.Period == sharedmsg.SpendCapPeriodDay {
+		period = "today (UTC)"
+	}
+	return head + ": an estimated " + usage.FormatUSD(c.SpentMicroUSD) + " of " +
+		usage.FormatUSD(c.CapMicroUSD) + " used " + period +
+		" (rysh's price-table estimate, not the provider's invoice)" + tail
 }
 
 // budgetMessage is the human-readable text carried in the 429 body. It names

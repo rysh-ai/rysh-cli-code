@@ -4,6 +4,7 @@ package actors
 
 import (
 	"os/exec"
+	"github.com/rysh-ai/rysh-cli-code/internal/web"
 	"strings"
 	"testing"
 	"time"
@@ -69,6 +70,7 @@ func TestPaneShellEnv_StripsWebServerVars(t *testing.T) {
 		{"RYSH_WEB_AUTO_START", "true"},
 		{"RYSH_WEB_PORT", "51811"},
 		{"RYSH_WEB_HOST", "0.0.0.0"},
+		{web.EnvControlSecretFile, "/tmp/handover"},
 	} {
 		t.Setenv(kv[0], kv[1])
 	}
@@ -78,7 +80,7 @@ func TestPaneShellEnv_StripsWebServerVars(t *testing.T) {
 	for _, kv := range paneShellEnv() {
 		name, _, _ := strings.Cut(kv, "=")
 		switch name {
-		case "RYSH_WEB_CONTROL", "RYSH_WEB_AUTO_START", "RYSH_WEB_PORT", "RYSH_WEB_HOST":
+		case "RYSH_WEB_CONTROL", "RYSH_WEB_AUTO_START", "RYSH_WEB_PORT", "RYSH_WEB_HOST", web.EnvControlSecretFile:
 			t.Errorf("%s leaked into the pane shell environment", name)
 		case "RYSH_KEEP_ME":
 			sawKeeper = true

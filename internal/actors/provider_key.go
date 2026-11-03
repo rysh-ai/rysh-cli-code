@@ -102,21 +102,23 @@ func providerKeyFromStore(store *namedStore, chain []string, family string) stri
 // from the process environment, which is what every one of these paths did
 // before the store was threaded down.
 type secretResolver struct {
-	store *namedStore
-	scope string // the workspace scope token (already sanitized)
+	store   *namedStore
+	scope   string // the workspace scope token (already sanitized)
+	project bool   // resolve from projectSecretScope last (WorkspaceActor.projectScopeFallback)
 }
 
 // scopeChain is the actor-side twin of (*WorkspaceActor).secretScopeChain: the
-// tab scope (most specific) then the workspace scope. An empty tabID — a
-// humanoid, which belongs to no tab — collapses it to the workspace scope.
+// tab scope (most specific), the workspace scope, then — for a session with no
+// `workspaces:` list — the project scope. An empty tabID — a humanoid, which
+// belongs to no tab — drops the tab scope.
 func (r *secretResolver) scopeChain(tabID string) []string {
 	if tabID == "" {
-		return []string{r.scope}
+		return withProjectScope([]string{r.scope}, r.project)
 	}
 	if tab := sanitizeScope(tabID); tab != r.scope {
-		return []string{tab, r.scope}
+		return withProjectScope([]string{tab, r.scope}, r.project)
 	}
-	return []string{r.scope}
+	return withProjectScope([]string{r.scope}, r.project)
 }
 
 // providerAPIKey resolves a provider family's key for a tab under this
@@ -163,5 +165,5 @@ func (w *WorkspaceActor) childSecretResolver() *secretResolver {
 		return nil
 	}
 	scope, _ := w.secretWorkspaceScope()
-	return &secretResolver{store: w.secrets, scope: scope}
+	return &secretResolver{store: w.secrets, scope: scope, project: w.projectScopeFallback()}
 }

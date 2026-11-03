@@ -271,6 +271,25 @@ func (p *PaneActor) executePrompt(prompt string, contentBlocks []provider.Conten
 		_ = p.pub.SendPaneOutput(p.id, prompt+"\n")
 		return
 	}
+	p.executeAgentPrompt(prompt, contentBlocks)
+}
+
+// handleExecPrompt is the pane inbox's MsgPaneExecPrompt: a Literal prompt
+// skips every prefix check (design 093 H3).
+func (p *PaneActor) handleExecPrompt(m *msg.MsgPaneExecPrompt) {
+	if m.Literal {
+		p.executeAgentPrompt(m.Prompt, nil)
+		return
+	}
+	p.executePrompt(m.Prompt, nil)
+}
+
+// executeAgentPrompt runs prompt as an agent turn, reading nothing in it as a
+// directive. executePrompt reaches it after its "##>" check; a Literal
+// MsgPaneExecPrompt (`rysh family serve`, design 093 H3) reaches it directly,
+// so a family member's message that happens to start with "##>" is still a
+// prompt. The policy gate below applies to both.
+func (p *PaneActor) executeAgentPrompt(prompt string, contentBlocks []provider.ContentBlock) {
 	// Fail-closed (design 013): this is the fan-in for every pane prompt —
 	// local input, cron, `rysh send --mode prompt`, and remote `exec_prompt`
 	// arriving over a control-mode share, which never passes through

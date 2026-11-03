@@ -89,11 +89,20 @@ type MsgGetPaneSnapshot struct {
 	// Empty means all panes (the prior behaviour). See
 	// MsgGetWorkspaceSnapshot.ActiveHistoryOnly.
 	HistoryPaneID string `json:"history_pane_id,omitempty"`
+	// IfContentHash is the PaneContentHash of the content the requester already
+	// holds. When the pane's freshly built snapshot hashes the same, the reply
+	// is NotModified with an empty snapshot, so an unchanged pane costs no
+	// marshal, wire bytes or decode. Zero (and any older daemon, which ignores
+	// the field) means always send the full snapshot.
+	IfContentHash uint64 `json:"if_content_hash,omitempty"`
 }
 
-// MsgPaneSnapshotReply carries the pane snapshot reply.
+// MsgPaneSnapshotReply carries the pane snapshot reply. NotModified answers a
+// matching IfContentHash: Snapshot is then empty and the requester keeps what
+// it has.
 type MsgPaneSnapshotReply struct {
-	Snapshot domain.PaneSnapshot `json:"snapshot"`
+	Snapshot    domain.PaneSnapshot `json:"snapshot"`
+	NotModified bool                `json:"not_modified,omitempty"`
 }
 
 // MsgGetPaneVT requests ONLY the live interactive VT frame (screen + cursor) of a
@@ -103,7 +112,16 @@ type MsgPaneSnapshotReply struct {
 // type) but skips building and marshalling the heavy output/history buffers, so a
 // redraw-heavy app refreshes one pane's screen cheaply instead of pulling the
 // whole pane snapshot on every rawDirty signal.
-type MsgGetPaneVT struct{}
+//
+// RowHashes, when set, are VTRowHash values of the screen the requester already
+// holds. The reply is then a row delta: Delta is true, Screen is empty, Rows is
+// the screen height and Changed lists only the rows whose hash differs (or that
+// lie beyond the requester's screen). BaseHash echoes VTRowsHash(RowHashes) so
+// the requester can tell which screen the delta applies to. Empty RowHashes
+// (and any older daemon, which ignores the field) means a full Screen.
+type MsgGetPaneVT struct {
+	RowHashes []uint64 `json:"row_hashes,omitempty"`
+}
 
 // MsgPaneVTReply carries one local pane's live interactive VT frame. Interactive
 // is false when the pane is not currently showing an interactive program (the TUI
@@ -115,6 +133,11 @@ type MsgPaneVTReply struct {
 	Screen      []string `json:"screen,omitempty"`
 	CursorRow   int      `json:"cursor_row"`
 	CursorCol   int      `json:"cursor_col"`
+	// Row-delta form (see MsgGetPaneVT.RowHashes).
+	Delta    bool          `json:"delta,omitempty"`
+	Rows     int           `json:"rows,omitempty"`
+	Changed  []VTLineDelta `json:"changed,omitempty"`
+	BaseHash uint64        `json:"base_hash,omitempty"`
 }
 
 // MsgGetPaneScrollback requests an interactive pane's scrollback history plus

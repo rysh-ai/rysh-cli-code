@@ -1,0 +1,70 @@
+{
+  "source": "tmux",
+  "inputs": [
+    "testdata/tmux-live"
+  ],
+  "tabs": [
+    {
+      "name": "api:editor",
+      "lanes": [
+        {
+          "panes": [
+            {
+              "cwd": "$HOME/src/api",
+              "command": "vim ."
+            }
+          ]
+        },
+        {
+          "panes": [
+            {
+              "cwd": "$HOME/src/api"
+            },
+            {
+              "cwd": "$HOME/src/api/test",
+              "command": "go test ./..."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "api:server",
+      "lanes": [
+        {
+          "panes": [
+            {
+              "cwd": "$HOME/src/api",
+              "command": "make run"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "notes:main",
+      "lanes": [
+        {
+          "panes": [
+            {
+              "cwd": "/srv/notes"
+            },
+            {
+              "cwd": "/srv/notes",
+              "command": "tail -f notes.log | grep TODO"
+            },
+            {
+              "cwd": "/srv/notes/my drafts"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "notes": [
+    "tab \"notes:main\": a split nested inside a lane was flattened into that lane (rysh lanes stack panes top to bottom)"
+  ],
+  "writes": [
+    ".rysh/imports/tmux.rysh"
+  ]
+}

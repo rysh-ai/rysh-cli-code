@@ -117,6 +117,24 @@ func (s *Server) writeModelRefused(
 ) {
 	message := "rysh governance proxy: the model " + model + " " + why +
 		". Change it under [proxy] models in rysh.config.yaml, or call an allowed model."
+	s.refuseModel(w, d, paneID, tenant, model, why, message)
+}
+
+// writeUnpricedUnderCap refuses a model with no price while the workspace has
+// a spend cap (root-order-044 #8): metered at $0, it would slip past the cap.
+func (s *Server) writeUnpricedUnderCap(
+	w http.ResponseWriter, d Dialect, paneID, tenant, model string,
+) {
+	why := "has no price while this workspace has a spend cap"
+	message := "rysh governance proxy: the model " + model + " has no price, and this " +
+		"workspace has a spend cap, so a call to it would count as $0 against the cap. " +
+		"Add a price for it under usage.pricing in rysh.config.yaml, or call a priced model."
+	s.refuseModel(w, d, paneID, tenant, model, why, message)
+}
+
+func (s *Server) refuseModel(
+	w http.ResponseWriter, d Dialect, paneID, tenant, model, why, message string,
+) {
 	writeDialectError(w, d, http.StatusForbidden, message)
 
 	audit := AuditLine{

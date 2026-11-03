@@ -1,0 +1,90 @@
+{
+  "source": "tmux",
+  "name": "shop",
+  "inputs": [
+    "testdata/tmuxp"
+  ],
+  "tabs": [
+    {
+      "name": "dev",
+      "lanes": [
+        {
+          "panes": [
+            {
+              "cwd": "$HOME/work/shop",
+              "command": "source .venv/bin/activate; python manage.py runserver"
+            }
+          ]
+        },
+        {
+          "panes": [
+            {
+              "cwd": "$HOME/work/shop",
+              "command": "source .venv/bin/activate; npm run watch"
+            }
+          ]
+        },
+        {
+          "panes": [
+            {
+              "cwd": "$HOME/work/shop",
+              "command": "source .venv/bin/activate"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "db",
+      "lanes": [
+        {
+          "panes": [
+            {
+              "cwd": "/srv/db/sql",
+              "command": "source .venv/bin/activate; psql shop"
+            },
+            {
+              "cwd": "/srv/db",
+              "command": "source .venv/bin/activate"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "grid",
+      "lanes": [
+        {
+          "panes": [
+            {
+              "cwd": "$HOME/work/shop",
+              "command": "source .venv/bin/activate; htop"
+            },
+            {
+              "cwd": "$HOME/work/shop",
+              "command": "source .venv/bin/activate"
+            }
+          ]
+        },
+        {
+          "panes": [
+            {
+              "cwd": "$HOME/work/shop",
+              "command": "source .venv/bin/activate"
+            },
+            {
+              "cwd": "$HOME/work/shop",
+              "command": "source .venv/bin/activate"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "notes": [
+    "tab \"grid\": tiled is approximated as 2 lane(s) of stacked panes"
+  ],
+  "writes": [
+    ".rysh/imports/tmux-shop.rysh"
+  ]
+}

@@ -126,6 +126,13 @@ func ValidateName(name string) error {
 	if err := msg.ValidateBoardID(name); err != nil {
 		return fmt.Errorf("a fleet name must also be a legal board id: %w", err)
 	}
+	// Design 030 §9.6 Q1 (D-25): the two session-wide boards are reserved. A
+	// fleet's board defaults to its name, so a fleet called `fleet` would
+	// silently share the fleet board with every other fleet's head.
+	if msg.IsReservedBoardID(name) {
+		return fmt.Errorf("%q is reserved for the session-wide %s board; choose another fleet name",
+			msg.NormalizeBoardID(name), msg.NormalizeBoardID(name))
+	}
 	return nil
 }
 
@@ -164,6 +171,10 @@ func (r *Registry) Register(f Fleet) (*Fleet, error) {
 	if f.BoardID != f.Name {
 		if err := msg.ValidateBoardID(f.BoardID); err != nil {
 			return nil, fmt.Errorf("board id: %w", err)
+		}
+		if msg.IsReservedBoardID(f.BoardID) {
+			return nil, fmt.Errorf("board id %q is reserved for the session-wide %s board; a fleet needs its own board",
+				f.BoardID, f.BoardID)
 		}
 	}
 
@@ -315,6 +326,44 @@ func (r *Registry) RemoveMember(name, paneID string) bool {
 		}
 	}
 	return false
+}
+
+// TopRoles are the roles that head a fleet in every fleetctl template; only a
+// pane holding one may post to the reserved fleet board (design 030 §9.3,
+// founder ruling D-24).
+var TopRoles = []string{"roadmap-manager", "ceo", "portfolio-lead"}
+
+// IsTopRole reports whether role heads a fleet.
+func IsTopRole(role string) bool {
+	role = strings.ToLower(strings.TrimSpace(role))
+	for _, r := range TopRoles {
+		if role == r {
+			return true
+		}
+	}
+	return false
+}
+
+// FleetBoardPoster reports the fleet in which pane holds a top role, and
+// whether it may post to the reserved fleet board.
+//
+// THIS CHECKS A CLAIMED PANE ID, IT IS NOT AUTHENTICATION: anything on the
+// session bus can publish a post naming a head's pane. The doors refuse
+// non-heads and the recorder tags raw posts; signing posts is a separate
+// design (030 §9.3).
+func FleetBoardPoster(fleets []Fleet, pane string) (string, bool) {
+	pane = strings.TrimSpace(pane)
+	if pane == "" {
+		return "", false
+	}
+	for _, f := range fleets {
+		for _, m := range f.Members {
+			if m.PaneID == pane && IsTopRole(m.Role) {
+				return f.Name, true
+			}
+		}
+	}
+	return "", false
 }
 
 // FleetOfPane reports which fleet a pane belongs to, or "".

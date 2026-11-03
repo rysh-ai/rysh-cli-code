@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"github.com/rysh-ai/rysh-cli-code/internal/agentenv"
 	"github.com/rysh-ai/rysh-cli-code/internal/progname"
+	"github.com/rysh-ai/rysh-cli-code/internal/web"
 	"strings"
 	"sync"
 	"syscall"
@@ -37,6 +38,7 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 	coord "github.com/rysh-ai/rysh-cli-code/internal/peercoord"
 	"github.com/rysh-ai/rysh-cli-code/internal/pipeline"
+	"github.com/rysh-ai/rysh-cli-code/internal/sandbox"
 	"github.com/rysh-ai/rysh-cli-code/internal/session"
 	"github.com/rysh-ai/rysh-cli-code/internal/tui"
 )
@@ -65,6 +67,14 @@ func main() {
 	// discover a daemon or log — it is typed in front of every agent launch.
 	if len(os.Args) > 1 && os.Args[1] == "exec-clean" {
 		os.Exit(agentenv.Main(os.Args[2:], os.Environ(), os.Stdout, os.Stderr, agentenv.SysExec))
+	}
+	// The two ends of a network: proxy sandbox's bridge (gap01 slice 2). Like
+	// exec-clean: no config, no daemon, no log.
+	if len(os.Args) > 1 && os.Args[1] == "sandbox-bridge" {
+		os.Exit(sandbox.BridgeMain(os.Args[2:], os.Stderr))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "sandbox-forward" {
+		os.Exit(sandbox.ForwardMain(os.Args[2:], os.Stderr))
 	}
 
 	// Extract global flags before subcommand dispatch. These are accepted in any
@@ -372,6 +382,26 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 		mode := flagVal(args[3:], "--mode")
 		return cli.PaneSendInput(store, sessName, paneID, inputText, mode)
 
+	case "notify":
+		// rysh notify test — one synthetic needs-you alert through the
+		// configured sinks (gap02 / G6).
+		return runNotifyCmd(cfg, args, os.Stdout)
+
+	case "service":
+		// rysh service install|uninstall|status — a launchd/systemd unit that
+		// keeps a session running across logout and reboot (gap02 slice 2).
+		// Prints unless --write; never loads or unloads anything.
+		env, err := defaultServiceEnv()
+		if err != nil {
+			return err
+		}
+		return runServiceCmd(cfg, args, env)
+
+	case "remote-serve":
+		// rysh remote-serve [--session <name>] — the far end of `##remote add`
+		// (design 070): framed JSON on stdio, run by the local rysh over ssh.
+		return runRemoteServeCmd(cfg, args)
+
 	case "exec":
 		// rysh exec [flags] -- '##<command>' — the generic door into the ##
 		// language, replacing the hand-maintained --<name> allowlist. See
@@ -391,6 +421,14 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 		// the manifest under .rysh/fleet/ is a cache, not the truth. See
 		// fleet_cmd.go.
 		return runFleetCmd(cfg, args)
+
+	case "heymates", "family":
+		// rysh heymates ls|show|chat|watch|login|logout|serve|apply — heymates
+		// (design 093) from the terminal: a client of rysh-server's /api/family.
+		// See family_cmd.go. `family` is the old name, kept as an alias for one
+		// release (founder, 2026-11-01): the hosted runner still execs
+		// `rysh_local family apply|serve` from a digest-pinned image.
+		return runFamilyCmd(cfg, args)
 
 	case "meeting":
 		return runMeetingCmd(cfg, args)
@@ -416,6 +454,16 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 		// "##" command parser. See cron_cmd.go.
 		return runCronCmd(cfg, args)
 
+	case "schedule":
+		// rysh schedule <##cron args> — top-level alias of ##cron (gap06).
+		// See schedule_cmd.go.
+		return runScheduleCmd(cfg, args)
+
+	case "trigger":
+		// rysh trigger <##trigger args> — signed loopback webhooks that start
+		// an @agent or prompt (gap06). See schedule_cmd.go.
+		return runTriggerCmd(cfg, args)
+
 	case "script":
 		// rysh script <file.rysh> [args...] — run a bash script in which ##
 		// lines are rysh commands. See script_cmd.go (design 021).
@@ -425,6 +473,34 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 		// rysh prompt -- '<text>' — submit a prompt to a RUNNING session's pane
 		// and block until the turn ends. See prompt_cmd.go (design 021 §3.7).
 		return runPromptCmd(cfg, args)
+
+	case "hook":
+		// rysh hook emit --rysh-dir <d> — called by a bridged claude pane's
+		// hooks; exit 2 refuses a tool call. See hook_cmd.go (gap G8).
+		os.Exit(runHookCmd(args))
+		return nil
+
+	case "undo":
+		// rysh undo [--pane-id <p>] [--to <n> | --list] — put back the files
+		// the agent's last turn changed. See undo_cmd.go (gap G7).
+		return runUndoCmd(cfg, args)
+
+	case "wait":
+		// rysh wait --pane-id <p> --until idle|needs-you|exited|any — block
+		// until a pane reaches a state, from outside the daemon. See
+		// wait_cmd.go (design 069).
+		code, werr := runWaitCmd(cfg, args)
+		if werr != nil {
+			fmt.Fprintf(os.Stderr, progname.Rewrite("rysh: %v\n"), werr)
+		}
+		if code != 0 {
+			os.Exit(code)
+		}
+		return nil
+
+	case "screen":
+		// rysh screen --pane-id <p> [--json] — a pane's current screen rows.
+		return runScreenCmd(cfg, args)
 
 	case "web":
 		// rysh web start|stop <session> — design 007's top-level entry to the
@@ -525,6 +601,10 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 		// Company connect (design 037): claim a dashboard connect code, write
 		// the company workspace, open it. --json for the desktop app.
 		return runConnect(cfg, logger, args[1:])
+	case "mcp":
+		// rysh mcp serve [--session <name>] [--allow-write] — a stdio MCP
+		// server for this session, for outside clients (design 067).
+		return runMCPCmd(cfg, args)
 	case "company":
 		// The bound company at the shell, and as a stdio MCP server for agents
 		// (design 037, second cut): `rysh company status|orders|…|mcp`.
@@ -533,6 +613,13 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 		// Guided first-run wizard: provider + key (validated), optional first
 		// humanoid, start hand-off. Flag-driven fallback for scripts/no-TTY.
 		return runOnboard(cfg, configPath, args[1:], logger)
+
+	case "import":
+		// rysh import <source> [file] — tmux, Zellij, Warp, iTerm2, MCP and
+		// Claude Code setups into rysh (design 065). Preview by default;
+		// --apply writes behind a backup that --undo restores. See
+		// import_cmd.go.
+		return runImportCmd(args[1:])
 
 	case "doctor":
 		// Diagnostics: provider / channels / daemon / config checks, each
@@ -543,6 +630,11 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 		// Channel plugin management: install / list / remove out-of-process
 		// channel plugins (openclaw_roadmap design 002, WS2 P1-P3).
 		return runChannelCmd(cfg, args[1:])
+
+	case setupCommand:
+		// Guided remote setup (E33 G9): provider → chat app → bot steps →
+		// hidden token → validate → owner → daemon → verify → binding summary.
+		return runSetup(cfg, configPath, args[1:])
 
 	case "assistant":
 		// Personal assistant mode: one-command single-user always-on humanoid
@@ -573,6 +665,12 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 // daemon process. It is spawned by spawnDaemon() and blocks until SIGTERM/SIGINT.
 // TUI clients attach and detach independently via runAttachUI().
 func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error {
+	// First, before anything can start a child process: take the control
+	// door's secret handover out of the environment (web/control_secret.go).
+	// The value is never logged; a refused file keeps the door closed.
+	if err := web.TakeControlSecretHandover(); err != nil {
+		logger.Warn("web control door: secret handover refused; the door stays closed", "err", err)
+	}
 	// NOTE: goHeadless() is deferred until after critical init so that errors
 	// are visible if the daemon is run directly from a terminal for debugging
 	// (e.g. ./rysh daemon test4).
@@ -645,7 +743,8 @@ func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error 
 		Port:        cfg.NATS.Port,
 		// The project root, as in the session record below: a guest compares it
 		// with its host's, and an owner answers it (design 028 §9 limit 7).
-		Workspace: mustGetwd(),
+		Workspace:         mustGetwd(),
+		RefuseForeignHost: daemonRefusesForeignHost(cfg),
 	})
 	if err != nil {
 		return fmt.Errorf("start nats bus: %w", err)
@@ -662,6 +761,7 @@ func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error 
 		Path:       mustGetwd(),
 		State:      "detached",
 		PID:        os.Getpid(),
+		PIDStart:   selfStart(),
 		NATSPort:   b.ClientPort(),
 		Version:    daemonVer,
 		BinHash:    daemonHash,
@@ -858,6 +958,15 @@ func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error 
 			"err", ferr)
 	}
 
+	// The fleet board (design 030 §9.2, W2): one row per registered fleet,
+	// kept beside the AFA it reads. Singleton by name; a failure is logged,
+	// not fatal — a session must start when its monitoring view cannot.
+	fleetBoardActor := actors.NewFleetBoardActor(b.Conn(), b.Codecs(), b.FleetBoardKV())
+	fleetBoardProps := actor.PropsFromProducer(func() actor.Actor { return fleetBoardActor })
+	if _, fberr := b.ActorSystem().Root.SpawnNamed(fleetBoardProps, "fleet-board"); fberr != nil {
+		slog.Warn(progname.Rewrite("rysh: fleet board not started; fleet rows will not be kept"), "err", fberr)
+	}
+
 	// The WorkspaceFarmActor is the session root. It spawns one WorkspaceActor
 	// per workspace (config-defined, falling back to a single workspace) and
 	// keeps exactly one active at a time. The session-scoped ws.* subjects are
@@ -916,6 +1025,12 @@ func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error 
 			defer stopWatch()
 			slog.Info(progname.Rewrite("rysh: prompt auto-reload watching"), "dir", dir)
 		}
+	}
+
+	// gap02 (G6): tell the user, through the sinks they configured, when a
+	// pane in this session needs them and no one has answered (opt-in).
+	if stopNotify := startNeedsYouNotifier(cfg, sessionName, b.ClientPort(), logger); stopNotify != nil {
+		defer stopNotify()
 	}
 
 	// Block until shutdown signal (SIGTERM from "rysh stop" / "rysh delete-session").
@@ -1276,8 +1391,11 @@ func stopSession(store *session.Store, name string) error {
 		return nil
 	}
 	fmt.Printf("[stopping session %q (PID %d)]\n", name, rec.PID)
-	if err := session.Terminate(rec.PID, 8*time.Second); err != nil {
-		return fmt.Errorf("stop session %q (PID %d): %w", name, rec.PID, err)
+	if err := session.TerminateDaemon(rec, 8*time.Second); err != nil {
+		if !errors.Is(err, session.ErrNotOurDaemon) {
+			return fmt.Errorf("stop session %q (PID %d): %w", name, rec.PID, err)
+		}
+		fmt.Printf("[session %q's daemon is gone: PID %d now belongs to another process, which was not signalled]\n", name, rec.PID)
 	}
 	// The daemon marks its own record stopped on a graceful (SIGTERM) shutdown,
 	// but if it had to be SIGKILLed it never ran that handler — so record the
@@ -1519,10 +1637,17 @@ func stopDaemonAndWait(rec session.Record, timeout time.Duration) error {
 	if rec.PID <= 0 || !session.ProcessAlive(rec.PID) {
 		return nil // already dead — nothing to stop
 	}
-	if err := session.Terminate(rec.PID, timeout); err != nil {
+	if err := session.TerminateDaemon(rec, timeout); err != nil && !errors.Is(err, session.ErrNotOurDaemon) {
 		return fmt.Errorf("stop daemon (PID %d): %w", rec.PID, err)
 	}
 	return nil
+}
+
+// selfStart is this process's start time for its session record (PIDStart),
+// or 0 where the platform cannot read it.
+func selfStart() int64 {
+	v, _ := session.ProcessStart(os.Getpid())
+	return v
 }
 
 // detachSession sends SIGUSR1 to all TUI processes attached to the session,
@@ -1621,9 +1746,11 @@ func printUsage() {
 	usageLine("       rysh run [--timeout <dur>] [--json] [--keep] \"<prompt>\"")
 	usageLine("                    CI mode: boot a throwaway detached session, run the prompt")
 	usageLine("                    agentically, stream output, then stop+delete the session.")
-	usageLine("                    Fail-closed exits: 0 done, 1 error, 2 approval requested")
-	usageLine("                    (no human to approve), 3 timeout (default 10m). --keep")
-	usageLine("                    leaves the session running; --json prints a final result line.")
+	usageLine("                    Fail-closed exits:")
+	usageLine("                    0 done, 1 error, 2 partial, 3 gate-blocked, 4 budget, 5 timeout")
+	usageLine("                    (gate-blocked: an approval with no human to give it; timeout")
+	usageLine("                    default 10m). --keep leaves the session running; --json prints")
+	usageLine("                    a final result line.")
 	usageLine("       rysh web start <session-name> [--control] [--port <n>] [--host <h>] [--username <u> --password <p>]")
 	usageLine("       rysh web stop <session-name>")
 	usageLine("                    start/stop the session's web viewer and print its URL. The UI")
@@ -1639,8 +1766,10 @@ func printUsage() {
 	usageLine("                    and opens the session on the company view. --json prints the")
 	usageLine("                    directory and session for the desktop app and does not open.")
 	usageLine("       rysh company <status|orders|enquiries|activity|services|mcp> [--json] [--config <file>]")
+	usageLine("       rysh mcp serve [--session <name>] [--allow-write]   stdio MCP server for this session (docs/mcp-serve.md)")
 	usageLine("                    the company this directory is bound to (##config load <file> binds a")
 	usageLine("                    running session); `mcp` serves the same data to agents over stdio")
+	usageLine("       rysh setup   START HERE to talk to your agent from your phone (Telegram/Discord/Slack)")
 	usageLine("       rysh onboard [--provider <name> --key-env <VAR> [--model <m>] [--no-validate]]")
 	usageLine("                    guided first-run setup for using rysh AT the keyboard:")
 	usageLine("                    provider + key (validated) and terminal prefs written to")
@@ -1652,7 +1781,16 @@ func printUsage() {
 	usageLine("                    assistant that can operate the session. Fail-closed by default.")
 	usageLine("       rysh doctor  diagnostics: provider, channels, daemon/NATS, config checks,")
 	usageLine("                    each PASS/WARN/FAIL with a one-line fix.")
+	usageLine("       rysh import tmux [file] | zellij|warp|iterm2 <file> | mcp|claude [file] [--apply] [--json]")
+	usageLine("                    preview a tmux / tmuxinator / tmuxp / Zellij / Warp / iTerm2")
+	usageLine("                    setup as rysh tabs, lanes and panes, MCP servers (secrets")
+	usageLine("                    by name only) or Claude Code permissions as stricter policy;")
+	usageLine("                    --apply writes under .rysh/ behind a backup,")
+	usageLine("                    and rysh import --undo restores it.")
 	usageLine("       rysh exec [--session <n>] [--tab-id <t>] [--pane-id <p>] [--json] -- '##<cmd>'")
+	usageLine("       rysh remote-serve [--session <n>]   (run over ssh by ##remote add; framed JSON on stdio)")
+	usageLine("       rysh notify test                    (send one needs-you test alert through notify.needs_you sinks)")
+	usageLine("       rysh service install|uninstall|status [--session <name>] [--write]  (launchd/systemd unit for this session; prints unless --write)")
 	usageLine("                    run any ## command against a running session and print its")
 	usageLine("                    output. Exits non-zero when the command reports failure.")
 	usageLine("       rysh ansa send <@name|pane-id> [--as <pane-id>] -- '<text>'")
@@ -1684,13 +1822,32 @@ func printUsage() {
 	usageLine("                    cap on fleets up (R11 retired D-14); the token ceiling is the limit.")
 	usageLine("       rysh fleet member add|rm <fleet> --pane <id> [--role <r>] [--label <l>]")
 	usageLine("                    membership, reconciled against the panes that actually exist.")
+	usageLine("       rysh heymates ls|show <family>|watch <family> [--json]")
+	usageLine("                    heymates from the terminal: families, avatars, live status,")
+	usageLine("                    open tasks, and the family's event stream (rysh-server /api/family).")
+	usageLine("       rysh heymates chat <family> <avatar> [--timeout 120s] [-- '<message>']")
+	usageLine("                    talk to one avatar; the reply streams to stdout. Without a")
+	usageLine("                    message: a line-mode chat (Ctrl-D exits). `rysh heymates login`")
+	usageLine("                    signs in; --server and --token-env <NAME> override.")
+	usageLine("                    `rysh family …` is the old name and still works for one release.")
 	usageLine("       rysh prompt [--session <n>] [--pane-id <p>] [--timeout <d>] [--json] -- '<text>'")
 	usageLine("                    send a prompt to a RUNNING session's pane and block until the")
 	usageLine("                    agentic turn ends. Same exit codes as `rysh run` (0 done,")
 	usageLine("                    1 error, 2 partial, 3 gate-blocked, 4 budget, 5 timeout).")
 	usageLine("                    Unlike `rysh send` (fire-and-forget) it waits; unlike")
 	usageLine("                    `rysh run` it drives the session you already have.")
+	usageLine("       rysh wait [--session <n>] --pane-id <p> --until idle|needs-you|exited|any")
+	usageLine("       rysh undo [--session <n>] [--pane-id <p>] [--to <n> | --list]")
+	usageLine("       rysh hook emit --rysh-dir <dir>   (run by claude's hooks when claude_bridge is on)")
+	usageLine("                 [--timeout <d>] [--interval <d>] [--json]")
+	usageLine("                    block until a pane (id, title or given-name) reaches a state;")
+	usageLine("                    works on claude/codex panes too. Read-only: it never answers")
+	usageLine("                    or approves. Exit 0 reached, 1 error/pane gone, 5 timeout.")
+	usageLine("       rysh screen [--session <n>] --pane-id <p> [--json]")
+	usageLine("                    print a pane's current screen rows.")
 	usageLine("       rysh script <file.rysh> [--print|--check] [--session <n>] [args...]")
+	usageLine("       rysh schedule add <name> \"<cron>\" <input...> | list | logs <name>   (= ##cron)")
+	usageLine("       rysh trigger add <name> <@agent prompt> | listen | list | logs <name>   (= ##trigger)")
 	usageLine("                    run a bash script whose ##-prefixed lines are rysh commands.")
 	usageLine("                    The same file also runs under plain bash, where those lines")
 	usageLine("                    are comments. --print shows the transpiled bash; --check")

@@ -44,6 +44,7 @@ var patternFakes = []string{
 	"SVC_CREDENTIALS",    // *_CREDENTIALS
 	"DEPLOY_PRIVATE_KEY", // *_PRIVATE_KEY
 	"SIGNING_PASSPHRASE", // *_PASSPHRASE
+	"NFPM_PASSPHRASE",    // *_PASSPHRASE: the release's nfpm signing key passphrase (root-order-104 §3)
 	"X_SECRET_Y",         // *_SECRET*
 	"APP_SECRET",         // *_SECRET*
 	"GIT_CONFIG_KEY_0",   // GIT_CONFIG_KEY_*
@@ -300,4 +301,84 @@ func TestFilterStaticAndForRunner(t *testing.T) {
 	if cx := namesOf(ForRunner(env, "codex")); !cx["FOO_TOKEN"] || !cx["OPENAI_API_KEY"] || cx["AWS_ACCESS_KEY_ID"] {
 		t.Error("ForRunner(codex) must be FilterStatic until codex is verified")
 	}
+}
+
+// releaseStoreNames are the release names the session store holds (root-order-105
+// R2 section; root-order-104 §3). Each is dropped by EXACT name, so the static
+// paths (FilterStatic, StaticPrefix: codex and the no-exec-clean fallback) drop it
+// too, not only the pattern-aware Filter. R2_ACCESS_KEY_ID matched no pattern at
+// all (no R2_ prefix rule, no _KEY_ID suffix): E12 finding df26f811.
+var releaseStoreNames = []string{"R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_TOKEN", "NFPM_PASSPHRASE"}
+
+func TestReleaseStoreNamesAreDroppedByExactName(t *testing.T) {
+	static := map[string]bool{}
+	for _, n := range StaticNames() {
+		static[n] = true
+	}
+	prefix := " " + StaticPrefix() + " "
+	env := fakeEnv(append([]string{"RYSH_PANE"}, releaseStoreNames...)...)
+	st := namesOf(FilterStatic(env))
+	for _, n := range releaseStoreNames {
+		if !Denied(n) {
+			t.Errorf("Denied(%s) = false", n)
+		}
+		if !static[n] {
+			t.Errorf("%s is not an exact DENY name", n)
+		}
+		if !strings.Contains(prefix, " -u "+n+" ") {
+			t.Errorf("StaticPrefix does not unset %s", n)
+		}
+		if st[n] {
+			t.Errorf("FilterStatic kept %s", n)
+		}
+		for _, kind := range []Kind{Claude, Codex} {
+			if namesOf(Filter(env, kind))[n] {
+				t.Errorf("%s: Filter kept %s", kind, n)
+			}
+		}
+	}
+	if !st["RYSH_PANE"] {
+		t.Error("FilterStatic dropped an ordinary name")
+	}
+}
+
+// e20 nit on 1297577 (LEAD-PASS): R2_ACCESS_KEY_ID matched no pattern, so it needed an
+// exact entry. A *_KEY_ID suffix catches the next provider's key-id name without a code
+// change. Names only (fake env). The static paths stay exact-name only by design.
+func TestKeyIDSuffixIsDenied(t *testing.T) {
+	novel := []string{"B2_APPLICATION_KEY_ID", "DO_SPACES_KEY_ID", "WASABI_ACCESS_KEY_ID"}
+	lookalikes := []string{"MY_KEY_IDENTITY", "KEY_ID", "PRIMARY_KEY_IDX"}
+	env := fakeEnv(append(append([]string{"RYSH_PANE"}, novel...), lookalikes...)...)
+	for _, n := range novel {
+		if !Denied(n) {
+			t.Errorf("Denied(%s) = false", n)
+		}
+		for _, kind := range []Kind{Claude, Codex} {
+			if namesOf(Filter(env, kind))[n] {
+				t.Errorf("%s: Filter kept %s", kind, n)
+			}
+			if !contains(Dropped(env, kind), n) {
+				t.Errorf("%s: Dropped does not list %s", kind, n)
+			}
+		}
+	}
+	for _, n := range append(lookalikes, "RYSH_PANE") {
+		if Denied(n) {
+			t.Errorf("Denied(%s) = true; only a trailing _KEY_ID after a name is credential-shaped", n)
+		}
+	}
+	// An exact KEEP still wins: Bedrock users authenticate claude with AWS_ACCESS_KEY_ID.
+	bedrock := fakeEnv("CLAUDE_CODE_USE_BEDROCK", "AWS_ACCESS_KEY_ID")
+	if !namesOf(Filter(bedrock, Claude))["AWS_ACCESS_KEY_ID"] {
+		t.Error("Bedrock claude lost AWS_ACCESS_KEY_ID: the exact KEEP must win over *_KEY_ID")
+	}
+}
+
+func contains(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }

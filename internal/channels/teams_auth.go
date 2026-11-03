@@ -94,7 +94,7 @@ func newTeamsAuth(appID, appSecret, tenantID string, client *http.Client) *teams
 	if authority == "" {
 		authority = teamsMultiTenantAuthority
 	}
-	return &teamsAuth{
+	a := &teamsAuth{
 		appID:           appID,
 		appSecret:       appSecret,
 		tenantID:        strings.TrimSpace(tenantID),
@@ -102,6 +102,82 @@ func newTeamsAuth(appID, appSecret, tenantID string, client *http.Client) *teams
 		tokenURL:        fmt.Sprintf("%s/%s/oauth2/v2.0/token", teamsLoginBase, authority),
 		openIDConfigURL: teamsOpenIDConfigURL,
 	}
+	teamsAuthSeam.Lock()
+	if teamsAuthSeam.set {
+		a.tokenURL, a.openIDConfigURL = teamsAuthSeam.tokenURL, teamsAuthSeam.openIDConfigURL
+	}
+	teamsAuthSeam.Unlock()
+	return a
+}
+
+// teamsAuthSeam redirects the token and OpenID endpoints to a local fake
+// platform (gap05 level E; root ruling 2026-10-28). It is a test seam only:
+// it has no YAML or environment binding, SetTeamsAuthEndpointsForTest is its
+// only writer, and a test fails if any non-test file calls that.
+var teamsAuthSeam struct {
+	sync.Mutex
+	set                       bool
+	tokenURL, openIDConfigURL string
+}
+
+// SetTeamsAuthEndpointsForTest points every Teams adapter created afterwards
+// at a fake Bot Framework: tokenURL for client-credentials tokens,
+// openIDConfigURL for the metadata whose jwks_uri signs inbound activities.
+// FOR TESTS ONLY — whoever controls these endpoints can sign activities this
+// adapter accepts. Both must be http(s) on the loopback literals 127.0.0.1 or
+// ::1; anything else is refused and nothing changes. restore puts the
+// production endpoints back.
+func SetTeamsAuthEndpointsForTest(tokenURL, openIDConfigURL string) (restore func(), err error) {
+	for _, u := range []string{tokenURL, openIDConfigURL} {
+		if err := teamsLoopbackURL(u); err != nil {
+			return func() {}, err
+		}
+	}
+	teamsAuthSeam.Lock()
+	teamsAuthSeam.set, teamsAuthSeam.tokenURL, teamsAuthSeam.openIDConfigURL = true, tokenURL, openIDConfigURL
+	teamsAuthSeam.Unlock()
+	return func() {
+		teamsAuthSeam.Lock()
+		teamsAuthSeam.set, teamsAuthSeam.tokenURL, teamsAuthSeam.openIDConfigURL = false, "", ""
+		teamsAuthSeam.Unlock()
+	}, nil
+}
+
+// teamsLoopbackURL accepts only http(s)://127.0.0.1 or ::1 with no userinfo —
+// a literal address, never a name such as localhost that a hosts file can move.
+func teamsLoopbackURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
+		return fmt.Errorf("teams: auth endpoint must be http(s) on 127.0.0.1 or ::1")
+	}
+	if h := u.Hostname(); h != "127.0.0.1" && h != "::1" {
+		return fmt.Errorf("teams: auth endpoint must be http(s) on 127.0.0.1 or ::1")
+	}
+	return nil
+}
+
+// teamsProductionHosts are the only non-loopback hosts the auth helper talks
+// to: the Entra authority and the Bot Framework metadata/JWKS host.
+var teamsProductionHosts = map[string]bool{"login.microsoftonline.com": true, "login.botframework.com": true}
+
+// checkTeamsAuthEndpoint is the fail-closed check run before every auth
+// request (token, OpenID metadata, JWKS): https on a Microsoft auth host, or
+// loopback ONLY while the test seam is set — otherwise a jwks_uri on
+// 127.0.0.1 would let a local process serve the keys a released build
+// trusts. Anything else is refused before a request is made, so a
+// verification that needed it rejects the token.
+func checkTeamsAuthEndpoint(raw string) error {
+	teamsAuthSeam.Lock()
+	seam := teamsAuthSeam.set
+	teamsAuthSeam.Unlock()
+	if seam && teamsLoopbackURL(raw) == nil {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err == nil && u.Scheme == "https" && u.User == nil && teamsProductionHosts[u.Hostname()] && u.Port() == "" {
+		return nil
+	}
+	return fmt.Errorf("teams: refusing auth endpoint %q (not a Microsoft auth host or the loopback test seam)", raw)
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +204,9 @@ func (a *teamsAuth) accessToken(ctx context.Context) (string, error) {
 	}
 	a.mu.Unlock()
 
+	if err := checkTeamsAuthEndpoint(a.tokenURL); err != nil {
+		return "", err
+	}
 	form := url.Values{}
 	form.Set("grant_type", "client_credentials")
 	form.Set("client_id", a.appID)
@@ -367,11 +446,17 @@ func (a *teamsAuth) refreshKeys(ctx context.Context) error {
 	var meta struct {
 		JwksURI string `json:"jwks_uri"`
 	}
+	if err := checkTeamsAuthEndpoint(a.openIDConfigURL); err != nil {
+		return err
+	}
 	if err := a.getJSON(ctx, a.openIDConfigURL, &meta); err != nil {
 		return fmt.Errorf("teams: fetch OpenID metadata: %w", err)
 	}
 	if meta.JwksURI == "" {
 		return fmt.Errorf("teams: OpenID metadata has no jwks_uri")
+	}
+	if err := checkTeamsAuthEndpoint(meta.JwksURI); err != nil {
+		return err
 	}
 
 	var doc struct {

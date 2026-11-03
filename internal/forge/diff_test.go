@@ -18,7 +18,7 @@ func TestDiffAPIs(t *testing.T) {
 		// getUser gains a query param → changed
 		{ID: "getUser", Method: "GET", Path: "/users/{id}", Params: []ir.Param{{Name: "id", In: "path", Required: true}, {Name: "expand", In: "query"}}},
 		{ID: "createUser", Method: "POST", Path: "/users", Mutating: true}, // added
-		{ID: "stay", Method: "GET", Path: "/x"},                            // unchanged
+		{ID: "stay", Method: "GET", Path: "/x"}, // unchanged
 	}}
 
 	d := DiffAPIs(oldAPI, newAPI)

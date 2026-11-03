@@ -58,6 +58,10 @@ func (w *WorkspaceActor) handleSubmitInput(ctx actor.Context, m *msg.MsgSubmitIn
 		return
 	}
 
+	// Only input a person typed counts as theirs: ##memory add records
+	// everything else (an agent's rysh tool, a script) as source: agent.
+	w.inputTyped = !m.Programmatic
+	defer func() { w.inputTyped = false }()
 	w.routeInput(ctx, activePaneID, tab, m.Mode, m.Text)
 }
 
@@ -305,10 +309,7 @@ func (w *WorkspaceActor) cmdPaneListInTabWithMeta(out *strings.Builder, tab *tab
 				// The program suffix goes AFTER id= so the long-standing
 				// "[N] <name> id=<uuid>" prefix every parser keys on is
 				// untouched by panes that happen to be running something.
-				running := ""
-				if ps.Program != "" {
-					running = "  running=" + ps.Program
-				}
+				running := paneListSuffix(ps)
 				meta := ""
 				if withMeta && len(ps.Meta) > 0 {
 					parts := make([]string, 0, len(ps.Meta))
@@ -560,6 +561,18 @@ func (w *WorkspaceActor) handleCLIRyshCommand(ctx actor.Context, m *msg.MsgCLIRy
 				}
 			}
 		}
+		// A mirror tab (a shared tab, or a ##remote host's tab) is on screen:
+		// its panes are synthetic and run no ## command locally. An untargeted
+		// CLI command runs on a real local pane instead of failing outright.
+		if paneID == "" && w.activeMirrorTab() != nil {
+			for _, t := range w.tabs {
+				if ts := w.queryTabSnapshot(t.id); ts != nil && ts.ActivePaneID != "" {
+					paneID = ts.ActivePaneID
+					defer w.scopeToTab(t)()
+					break
+				}
+			}
+		}
 	}
 	if paneID == "" {
 		return &msg.MsgCLIResponse{OK: false, Error: "no target pane (specify --pane-id or --tab-id)"}
@@ -571,4 +584,18 @@ func (w *WorkspaceActor) handleCLIRyshCommand(ctx actor.Context, m *msg.MsgCLIRy
 		return &msg.MsgCLIResponse{OK: false, Output: out, Error: cmdErr.Error()}
 	}
 	return &msg.MsgCLIResponse{OK: true, Output: out}
+}
+
+// paneListSuffix is what `##pane list` prints after id=: the running program,
+// and for a sandboxed agent pane its profile (design 066). Both go AFTER id= so
+// the "[N] <name> id=<uuid>" prefix parsers key on is untouched.
+func paneListSuffix(ps domain.PaneSnapshot) string {
+	s := ""
+	if ps.Program != "" {
+		s = "  running=" + ps.Program
+	}
+	if p := strings.TrimSpace(ps.Meta[metaAgentSandbox]); p != "" {
+		s += "  sandbox=" + p
+	}
+	return s
 }

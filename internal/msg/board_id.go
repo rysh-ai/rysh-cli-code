@@ -38,6 +38,26 @@ import "strings"
 // shape, and for this id the wire shape is the legacy three-token subject.
 const DefaultBoardID = "session"
 
+// FleetBoardID names the session-wide fleet board: the one every fleet's head
+// posts its status to (design 030 §9, founder ruling D-25, 2026-11-01).
+const FleetBoardID = "fleet"
+
+// IsReservedBoardID reports whether id is one of the two session-wide boards,
+// `session` and `fleet` (design 030 §9.6 Q1, D-25).
+//
+// RESERVED IS NOT FORBIDDEN. Both stay ordinary boards that anyone may post
+// to and read (agents post to `--board fleet` today, and ValidateBoardID
+// accepts both). What the reservation forbids is a FLEET taking one as its
+// name or its board: a fleet named `fleet` or `session` would silently share
+// that board with every other poster. fleet.ValidateName and Register refuse it.
+func IsReservedBoardID(id string) bool {
+	switch NormalizeBoardID(id) {
+	case DefaultBoardID, FleetBoardID:
+		return true
+	}
+	return false
+}
+
 // MaxBoardIDLen bounds a board id. A board id becomes a SUBJECT TOKEN and,
 // through internal/board, a KV key prefix; both are cheaper to keep short than
 // to explain later.

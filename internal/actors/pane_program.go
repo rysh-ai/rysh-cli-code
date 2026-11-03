@@ -3,7 +3,6 @@
 package actors
 
 import (
-	"os"
 	"time"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
@@ -33,7 +32,7 @@ const foregroundPollEvery = 500 * time.Millisecond
 
 // watchForeground polls the pane's foreground process group until stop closes
 // (which rawReadLoop does when the PTY goes away).
-func (p *PaneActor) watchForeground(ptyFile *os.File, stop <-chan struct{}) {
+func (p *PaneActor) watchForeground(ptyFile paneTerm, stop <-chan struct{}) {
 	ticker := time.NewTicker(foregroundPollEvery)
 	defer ticker.Stop()
 	for {
@@ -92,6 +91,7 @@ func (p *PaneActor) syncForegroundProgram(pgid int) {
 	for _, ev := range events {
 		p.publishProcessEvent(ev.event, ev.program, pgid)
 	}
+	p.noteProgramEvents(events)
 }
 
 // programIdent is one identification: the program at pgid whose kernel name

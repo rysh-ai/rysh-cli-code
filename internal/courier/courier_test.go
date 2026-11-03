@@ -308,3 +308,64 @@ func TestSendCodexQueue(t *testing.T) {
 		t.Errorf("err = %v, want codex's own message", err)
 	}
 }
+
+// Design 093 H1: a native-profile pane has no shell, so it is told to answer
+// with its family_reply tool on the thread — never with a shell ack it cannot
+// run. A pane without that tool keeps Compose's text exactly.
+func TestComposeForNativeProfilePane(t *testing.T) {
+	p := cmd("ceo-pane-uuid", "wkr", "msg-0042")
+	p.ThreadID = msg.CmdThreadID("ceo-pane-uuid", "msg-0042")
+
+	native := map[string]string{"agent.tools": "family_ask, family_reply,family_status", MetaFleetAgent: "rysh"}
+	got := ComposeFor("alpha", p, "/opt/rysh/bin/rysh", "my sess", native)
+	for _, want := range []string{"rysh board alpha", "command msg-0042", "thread " + p.ThreadID,
+		"do msg-0042", `Answer with the family_reply tool: thread_id "` + p.ThreadID + `"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("native composed text missing %q:\n%s", want, got)
+		}
+	}
+	for _, never := range []string{"board ack", "--as", "/opt/rysh/bin/rysh"} {
+		if strings.Contains(got, never) {
+			t.Errorf("native composed text carries a shell instruction (%q):\n%s", never, got)
+		}
+	}
+
+	for _, meta := range []map[string]string{nil, {MetaFleetAgent: "rysh"}, {"agent.tools": "family_ask,family_status"}} {
+		if got, want := ComposeFor("alpha", p, "/opt/rysh/bin/rysh", "my sess", meta), Compose("alpha", p, "/opt/rysh/bin/rysh", "my sess"); got != want {
+			t.Errorf("meta %v: ComposeFor changed the generic text:\n%s\nwant\n%s", meta, got, want)
+		}
+	}
+}
+
+// The courier composes per delivery from the recipient's snapshot.
+func TestCourierDeliversNativeTextToProfiledPane(t *testing.T) {
+	var mu sync.Mutex
+	var texts []string
+	c := New(Deps{
+		Snapshot: func(paneID string) (Target, error) {
+			return Target{PaneID: paneID, Meta: map[string]string{MetaFleetAgent: "rysh", "agent.tools": "family_reply"}}, nil
+		},
+		Deliver: func(_ context.Context, r Route, _ Target, text string) error {
+			if r.Adapter != RouteRyshNative {
+				t.Errorf("route = %s", r.Adapter)
+			}
+			mu.Lock()
+			texts = append(texts, text)
+			mu.Unlock()
+			return nil
+		},
+		Backoff: []time.Duration{},
+	})
+	defer c.Close()
+	p := cmd("ceo-pane-uuid", "wkr", "msg-0050")
+	p.ThreadID = msg.CmdThreadID("ceo-pane-uuid", "msg-0050")
+	c.Handle(board.Event{Kind: board.EventPost, Board: "alpha", Post: p})
+	if !c.Drain(3 * time.Second) {
+		t.Fatal("not drained")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(texts) != 1 || !strings.Contains(texts[0], "family_reply tool") {
+		t.Fatalf("delivered %q", texts)
+	}
+}

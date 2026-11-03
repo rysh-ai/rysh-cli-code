@@ -106,6 +106,8 @@ type workspaceChild struct {
 // Receive().
 type WorkspaceFarmActor struct {
 	peerRuntime *coord.Runtime
+	// peerFeedStop stops the peer-feed poller (design 044 N1/N2).
+	peerFeedStop chan struct{}
 	// guestOf is the daemon Bus's GuestOf, handed to every workspace for
 	// `##rysh status` and /health (design 028 §9 limit 7). See SetGuestOf.
 	guestOf     func() (bus.GuestOf, bool)
@@ -169,6 +171,7 @@ func (f *WorkspaceFarmActor) Receive(ctx actor.Context) {
 	switch m := ctx.Message().(type) {
 	case *actor.Started:
 		f.startPeerRuntime(ctx)
+		f.startPeerFeed(ctx)
 		wss := f.cfg.ResolvedWorkspaces()
 		f.names = make([]string, len(wss))
 		for i, wc := range wss {
@@ -210,7 +213,18 @@ func (f *WorkspaceFarmActor) Receive(ctx actor.Context) {
 			}
 		}
 		ctx.Respond(coord.HostResponse{Err: fmt.Errorf("local workspace unavailable")})
+	case *peerFeedKeyRequest:
+		if c := f.activeChild(); c != nil {
+			ctx.Forward(c.pid)
+			return
+		}
+		ctx.Respond("")
+	case *peerFeedAlert:
+		if c := f.activeChild(); c != nil {
+			ctx.Send(c.pid, m)
+		}
 	case *actor.Stopping:
+		f.stopPeerFeed()
 		if f.peerRuntime != nil {
 			f.peerRuntime.Close()
 		}

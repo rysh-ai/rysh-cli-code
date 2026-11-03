@@ -1,0 +1,39 @@
+{
+  "mcpServers": {
+    "files": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "$HOME/projects"]
+    },
+    "tracker": {
+      "type": "stdio",
+      "command": "tracker-mcp",
+      "args": ["--workspace", "demo"],
+      "env": {
+        "FIXTURE_TRACKER_TOKEN": "placeholder-value-1",
+        "FIXTURE_LOG_LEVEL": "debug"
+      }
+    },
+    "docs": {
+      "type": "http",
+      "url": "https://mcp.example.test/mcp",
+      "headers": {
+        "Authorization": "Bearer placeholder-value-2"
+      }
+    },
+    "events": {
+      "type": "sse",
+      "url": "https://events.example.test/sse"
+    },
+    "leaky": {
+      "command": "leaky-mcp",
+      "args": ["--api-key", "placeholder-value-3"]
+    },
+    "leaky-url": {
+      "type": "http",
+      "url": "https://user:placeholder-value-4@mcp.example.test/mcp?token=placeholder-value-5"
+    },
+    "broken": {
+      "type": "stdio"
+    }
+  }
+}

@@ -28,8 +28,8 @@ func fixtureSnapshot() *msg.CompanySnapshot {
 			{ID: "e1", Reference: "RES1", Kind: "reservation", Status: "new", Name: "Deniz", CreatedAt: t0},
 			{ID: "e2", Reference: "CON1", Kind: "contact", Status: "new", Name: "Ece", CreatedAt: t0.Add(time.Minute)},
 		},
-		Activity: []msg.CompanyActivity{{Kind: "order", Action: "created", Reference: "AAA11", Summary: "Order AAA11 received", OccurredAt: t0}},
-		Link:     msg.CompanyLink{Connected: true, Live: true, LastFetch: t0},
+		Activity:  []msg.CompanyActivity{{Kind: "order", Action: "created", Reference: "AAA11", Summary: "Order AAA11 received", OccurredAt: t0}},
+		Link:      msg.CompanyLink{Connected: true, Live: true, LastFetch: t0},
 		FetchedAt: t0,
 	}
 }

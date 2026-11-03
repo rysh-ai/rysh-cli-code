@@ -83,6 +83,13 @@ type lease struct {
 	// everGranted distinguishes "we have talked to the server about this scope"
 	// from "we never have" — the first start / offline row of §4.3's matrix.
 	everGranted bool
+
+	// The workspace spend cap as of the last reply (root-order-044 #8), and
+	// which limit refused when exhausted. Zero values: no cap / old server.
+	refusal     string
+	capMicroUSD int64
+	capSpentUSD int64
+	capPeriod   string
 }
 
 // LedgerClient owns all four flows in design 023 §4.1.
@@ -100,8 +107,11 @@ type LedgerClient struct {
 	mu      sync.Mutex
 	pending map[rollupKey]*sharedmsg.GatewayUsageRollup
 	calls   int64
-	seq     int64
-	leases  map[string]*lease
+	// unreportedMicroUSD is priced spend not yet carried on a lease call. The
+	// spend cap is workspace-wide, so this is one counter, not one per scope.
+	unreportedMicroUSD int64
+	seq                int64
+	leases             map[string]*lease
 
 	// policy is the last-known-good central document (023 §4.7).
 	policyETag string
@@ -261,6 +271,9 @@ func (c *LedgerClient) Record(rec msg.MsgUsageRecord) {
 	r.CostMicroUSD += rec.CostMicroUSD
 	r.Calls++
 	c.calls++
+	if rec.CostMicroUSD > 0 {
+		c.unreportedMicroUSD += rec.CostMicroUSD
+	}
 	due := c.calls >= FlushMaxCalls
 	c.mu.Unlock()
 
@@ -332,6 +345,9 @@ const (
 	VerdictExhausted    = "exhausted"     // the SERVER says the scope is out of budget
 	VerdictLeaseSpent   = "lease_spent"   // local slice used up, renewal not back yet
 	VerdictPartition    = "partition"     // no usable lease; partition mode decided
+	// VerdictSpendCap: the SERVER says the workspace's USD spend cap is used up
+	// (root-order-044 #8). Same value as the wire's refusal reason.
+	VerdictSpendCap = sharedmsg.GatewayRefusalSpendCap
 )
 
 // Allow reports whether a tenant may spend right now.
@@ -355,6 +371,7 @@ func (c *LedgerClient) Allow(tenant string) (bool, string) {
 	valid := ok && l.everGranted && now.Before(l.expires)
 	remaining := l.granted - l.spent
 	exhausted := l.exhausted
+	refusal := l.refusal
 	needRenew := c.needsRenewLocked(l, now)
 	c.mu.Unlock()
 
@@ -363,6 +380,8 @@ func (c *LedgerClient) Allow(tenant string) (bool, string) {
 	}
 
 	switch {
+	case exhausted && refusal == sharedmsg.GatewayRefusalSpendCap:
+		return false, VerdictSpendCap
 	case exhausted:
 		// The server answered "0". Not a partition — a decision.
 		return false, VerdictExhausted
@@ -401,8 +420,14 @@ func (c *LedgerClient) Spend(tenant string, tokens int64) {
 // remaining, or 60 s before expiry, whichever comes first. Also true when there
 // is no lease at all, which is how the first one is acquired.
 func (c *LedgerClient) needsRenewLocked(l *lease, now time.Time) bool {
-	if l.renewing || l.exhausted {
+	if l.renewing {
 		return false
+	}
+	if l.exhausted {
+		// Ask again once per lease TTL (root-order-044 #8): a raised cap or a
+		// new period must reach a running daemon. Allow keeps refusing until a
+		// grant comes back, so this never opens anything by itself.
+		return !now.Before(l.expires)
 	}
 	if !l.everGranted || now.After(l.expires) {
 		return true
@@ -440,9 +465,10 @@ func (c *LedgerClient) renew(scope string) {
 	l.renewing = true
 	spentSince := l.spentSince
 	remaining := l.remaining
+	spentUSD := c.unreportedMicroUSD
 	c.mu.Unlock()
 
-	reply, err := c.acquireLease(context.Background(), scope, wantTokens(remaining), spentSince)
+	reply, err := c.acquireLease(context.Background(), scope, wantTokens(remaining), spentSince, spentUSD)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -462,19 +488,33 @@ func (c *LedgerClient) renew(scope string) {
 	if l.spentSince < 0 {
 		l.spentSince = 0
 	}
+	// Same rule for money: deduct what was reported, keep what arrived since.
+	c.unreportedMicroUSD -= spentUSD
+	if c.unreportedMicroUSD < 0 {
+		c.unreportedMicroUSD = 0
+	}
 	l.everGranted = true
 	l.remaining = reply.RemainingToday
 	l.ceiling = reply.CeilingTokens
+	l.refusal = reply.Refusal
+	l.capMicroUSD, l.capSpentUSD, l.capPeriod = reply.SpendCapMicroUSD, reply.SpentPeriodMicroUSD, reply.SpendCapPeriod
 	if reply.GrantedTokens <= 0 {
 		l.exhausted = true
+		// When to ask again (needsRenewLocked). An old server always sends an
+		// expiry; if one does not, wait a TTL rather than ask per request.
+		l.expires = reply.ExpiresAt
+		if !l.expires.After(c.now()) {
+			l.expires = c.now().Add(sharedmsg.GatewayLeaseTTL)
+		}
 		// spentSince is deliberately left carrying: the next successful lease
 		// call reconciles it.
 		l.granted, l.spent = 0, 0
 		slog.Warn("gateway: scope is out of budget upstream", "scope", scope,
-			"ceiling", reply.CeilingTokens)
+			"ceiling", reply.CeilingTokens, "refusal", reply.Refusal)
 		return
 	}
 	l.exhausted = false
+	l.refusal = ""
 	l.granted = reply.GrantedTokens
 	// The new slice starts already drawn down by whatever was spent but not yet
 	// reconciled, so in-flight spend is charged once — here — rather than
@@ -487,11 +527,12 @@ func (c *LedgerClient) renew(scope string) {
 // because it needs a synchronous answer and a real error — a lost publish would
 // silently become "no lease".
 func (c *LedgerClient) acquireLease(
-	ctx context.Context, scope string, want, spentSince int64,
+	ctx context.Context, scope string, want, spentSince, spentSinceMicroUSD int64,
 ) (sharedmsg.GatewayLeaseReply, error) {
 	var out sharedmsg.GatewayLeaseReply
 	body, err := json.Marshal(sharedmsg.GatewayLeaseRequest{
 		Scope: scope, WantTokens: want, DaemonID: c.daemonID, SpentSince: spentSince,
+		SpentSinceMicroUSD: spentSinceMicroUSD,
 	})
 	if err != nil {
 		return out, err
@@ -611,6 +652,7 @@ type LeaseState struct {
 	Ceiling   int64
 	Remaining int64
 	Exhausted bool
+	Refusal   string
 }
 
 // Leases snapshots every scope the daemon holds a lease for.
@@ -625,7 +667,27 @@ func (c *LedgerClient) Leases() []LeaseState {
 		out = append(out, LeaseState{
 			Scope: scope, Granted: l.granted, Spent: l.spent, Expires: l.expires,
 			Ceiling: l.ceiling, Remaining: l.remaining, Exhausted: l.exhausted,
+			Refusal: l.refusal,
 		})
 	}
 	return out
+}
+
+// SpendCap reports the workspace spend cap as of the last lease reply for the
+// tenant's scope (root-order-044 #8). active is false when the server has not
+// reported a cap (none set, no reply yet, or an old server). The spent figure
+// is rysh's estimate from its price table, not a provider invoice.
+func (c *LedgerClient) SpendCap(tenant string) (sharedmsg.GatewaySpendCap, bool) {
+	if c == nil || !c.Enabled() {
+		return sharedmsg.GatewaySpendCap{}, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	l, ok := c.leases[sharedmsg.TenantScope(tenant)]
+	if !ok || l.capMicroUSD <= 0 {
+		return sharedmsg.GatewaySpendCap{}, false
+	}
+	return sharedmsg.GatewaySpendCap{
+		Period: l.capPeriod, CapMicroUSD: l.capMicroUSD, SpentMicroUSD: l.capSpentUSD,
+	}, true
 }

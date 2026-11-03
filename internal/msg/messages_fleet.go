@@ -26,3 +26,18 @@ func FleetQuerySubject() string { return T("fleet", "query") }
 // FleetUpdateSubject is where the fleet actor accepts registrations, membership
 // changes and state transitions.
 func FleetUpdateSubject() string { return T("fleet", "update") }
+
+// FleetEventSubject is where the fleet actor publishes status-ledger changes
+// (fleet.LedgerEvent, plain JSON like the query and update subjects): one event
+// per member whose state, task, note, progress or health changed (design 093
+// §12.3 H3 — "ledger change events added to the fleet actor"). One exact
+// subject, so a reader never needs a wildcard subscription.
+func FleetEventSubject() string { return T("fleet", "events") }
+
+// FleetBoardQuerySubject is where the FleetBoardActor answers with the fleet
+// board's rows (design 030 §9.2, W2).
+func FleetBoardQuerySubject() string { return T("fleetboard", "query") }
+
+// FleetBoardUpdateSubject carries one fleetboard.ReplyRow per changed row. No
+// agent pane subscribes to it, so reading the fleet board wakes nobody.
+func FleetBoardUpdateSubject() string { return T("fleetboard", "update") }

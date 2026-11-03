@@ -42,8 +42,8 @@ case "$OS" in
   darwin|linux) ;;
   mingw*|msys*|cygwin*)
     fail "Native Windows is not supported by this installer." \
-         "rysh needs a PTY. Run it under WSL2, or take the cli-only zip from
-    https://github.com/${RYSH_REPO}/releases/latest" ;;
+         "Run it under WSL2 (the tested path), or take the Windows zip from
+    https://github.com/${RYSH_REPO}/releases/latest (native panes, not yet tested on real Windows)" ;;
   *) fail "Unsupported OS: $OS" ;;
 esac
 

@@ -349,6 +349,20 @@ func printOnboardUsage() {
 // runOnboardHeadless is the non-TTY provider step: same writes as the wizard,
 // driven by flags. Validation runs unless --no-validate.
 func runOnboardHeadless(cfg config.Config, configPath string, args []string) error {
+	if err := onboardProviderStepHeadless(cfg, configPath, args); err != nil {
+		return err
+	}
+	fmt.Println("note: rysh config is project-local — this setup applies to the current directory only.")
+	fmt.Println(progname.Rewrite("next: \"rysh doctor\" to verify, \"rysh onboard\" in a terminal to finish setup and"))
+	fmt.Println(progname.Rewrite("open a session, or \"rysh assistant\" to drive a session from Slack/Telegram/WhatsApp."))
+	fmt.Println(progname.Rewrite("to talk to your agent from your phone: rysh " + setupCommand))
+	return nil
+}
+
+// onboardProviderStepHeadless is the flag-driven provider step without
+// onboard's closing hints, for the commands that continue past it
+// (rysh assistant, rysh setup).
+func onboardProviderStepHeadless(cfg config.Config, configPath string, args []string) error {
 	name := flagVal(args, "--provider")
 	if name == "" {
 		name = "anthropic"
@@ -399,9 +413,6 @@ func runOnboardHeadless(cfg config.Config, configPath string, args []string) err
 	for _, n := range notes {
 		fmt.Println(n)
 	}
-	fmt.Println("note: rysh config is project-local — this setup applies to the current directory only.")
-	fmt.Println(progname.Rewrite("next: \"rysh doctor\" to verify, \"rysh onboard\" in a terminal to finish setup and"))
-	fmt.Println(progname.Rewrite("open a session, or \"rysh assistant\" to drive a session from Slack/Telegram/WhatsApp."))
 	return nil
 }
 
@@ -882,6 +893,7 @@ func runOnboardWizard(cfg config.Config, configPath string, logger *slog.Logger,
 	if m.sessionNote != "" {
 		fmt.Println(m.sessionNote)
 	}
+	fmt.Println(progname.Rewrite("to talk to your agent from your phone: rysh " + setupCommand))
 	out := m.outcome
 	if !allowLaunch {
 		out.LaunchNow = false // --no-launch overrides the wizard's answer

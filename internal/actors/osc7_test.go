@@ -78,3 +78,27 @@ func TestOSC7EmptyHost(t *testing.T) {
 		t.Fatalf("got %q ok=%v", path, ok)
 	}
 }
+
+// On Windows the prompt hooks (conpty.ShellHook) report the drive path after
+// the host: PowerShell as /C:/Users/me, cmd.exe's $P as /C:\Users\me. Both
+// must come back as a native path; any other OS keeps the path as sent.
+func TestOSC7PathNormalisation(t *testing.T) {
+	for _, tc := range []struct {
+		in      string
+		windows bool
+		want    string
+	}{
+		{"/C:/Users/me/proj", true, `C:\Users\me\proj`},
+		{`/C:\Users\me`, true, `C:\Users\me`},
+		{"/d:/", true, `d:\`},
+		{"/d:", true, `d:\`},
+		{"//server/share/x", true, `\\server\share\x`},
+		{"/Users/me", true, `\Users\me`},
+		{"/C:/Users/me", false, "/C:/Users/me"},
+		{"/Users/me", false, "/Users/me"},
+	} {
+		if got := normalizeOSC7Path(tc.in, tc.windows); got != tc.want {
+			t.Errorf("normalizeOSC7Path(%q, windows=%v) = %q, want %q", tc.in, tc.windows, got, tc.want)
+		}
+	}
+}

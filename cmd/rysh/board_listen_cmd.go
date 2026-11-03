@@ -143,6 +143,9 @@ func runBoardListen(cfg config.Config, rest []string) error {
 		Deliver: func(ctx context.Context, r courier.Route, t courier.Target, text string) error {
 			return courier.Dispatch(ctx, pub, r, t, text)
 		},
+		WaitIdle: func(ctx context.Context, paneID string) error {
+			return courier.WaitNativeIdle(ctx, pub, paneID)
+		},
 		Notify: func(b string, p *msg.MsgBoardPost) {
 			if err := msg.SendBoardPost(pub, b, p); err != nil {
 				log.Warn("could not post undelivered notice", "err", err)

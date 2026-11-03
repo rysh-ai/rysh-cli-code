@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/nats-io/nats.go"
+
+	"github.com/rysh-ai/rysh-cli-code/internal/bustoken"
 )
 
 // TestPortZeroNeverJoinsAnExistingServer: Port 0 must start a private server
@@ -14,6 +16,7 @@ import (
 // default config would use. It used to become 24242, so `port: 0` test
 // daemons joined the developer's live NATS as guests.
 func TestPortZeroNeverJoinsAnExistingServer(t *testing.T) {
+	tokenHome(t)
 	b, err := New(Config{Mode: "embedded", Port: 0, SessionName: "private", DataDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -25,8 +28,13 @@ func TestPortZeroNeverJoinsAnExistingServer(t *testing.T) {
 	if p := b.ClientPort(); p <= 0 || p == 24242 {
 		t.Fatalf("ClientPort = %d, want the kernel-assigned port", p)
 	}
-	// The recorded port is what the session file advertises; it must dial.
-	nc, err := nats.Connect("nats://127.0.0.1:" + strconv.Itoa(b.ClientPort()))
+	// The recorded port is what the session file advertises; it must dial
+	// (with the server's token, gap01 slice 3).
+	opt, err := bustoken.Option(b.ClientPort())
+	if err != nil {
+		t.Fatal(err)
+	}
+	nc, err := nats.Connect("nats://127.0.0.1:"+strconv.Itoa(b.ClientPort()), opt)
 	if err != nil {
 		t.Fatalf("dial the advertised port %d: %v", b.ClientPort(), err)
 	}

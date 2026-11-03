@@ -10,11 +10,12 @@ package main
 // personal-scope defaults — `profile: assistant`, `pairing_policy: request`,
 // and an allowlist seeded with ONLY the owner's contact, so the WS3 admission
 // gate is active by construction. That allowlist is what keeps strangers out.
-// The remaining defaults are permissive on purpose, because the owner is
-// reaching the assistant from a chat app with nobody at the keyboard:
-// `governance: ai` (replies post without a release step), `reply_mode:
-// mentions`, and `auto_approve: true` (tool calls run without an approval
-// dialog — set it to false to be asked first). Hard stops belong in policy
+// Replies are permissive on purpose, because the owner is reaching the
+// assistant from a chat app with nobody at the keyboard: `governance: ai`
+// (replies post without a release step) and `reply_mode: mentions`. Tool
+// calls are not: `auto_approve:` is set from assistantScaffoldAutoApprove
+// (false: a tool call is held and the owner is asked first, over the chat —
+// set it to true to run tools without asking). Hard stops belong in policy
 // (design 013 `always_gate` / `bash.deny`), which no flag here can un-gate.
 // Rendering reuses onboard's buildSkillMarkdown so the file round-trips
 // through the exact frontmatter format parseHumanoidFile reads.
@@ -24,6 +25,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/rysh-ai/rysh-cli-code/internal/channels"
 )
 
 // assistantName is the profile's fixed humanoid name (design 007 §4.1).
@@ -41,7 +44,6 @@ I am reaching you from a chat app, so I am not at the keyboard.
 What you can do:
 - rysh_command — run rysh system commands (tabs, panes, agents, sharing,
   worktrees, cost). Start with "help" if you are unsure what exists.
-- pane_inspect — read what a pane currently shows.
 - pane_send — type a shell command or prompt into a pane.
 - session_history / agents_list — see what has been happening and who is running.
 
@@ -83,6 +85,12 @@ func assistantPresets() []assistantPreset {
 			Note: "out-of-process signal-cli sidecar required; device-link QR via signal-cli"},
 		{Channel: "imessage", Label: "iMessage",
 			Note: "macOS host only (reads ~/Library/Messages/chat.db); most constrained", DarwinOnly: true},
+		{Channel: "mattermost", Label: "Mattermost",
+			Note: "bot account token on your own server; no QR"},
+		{Channel: "matrix", Label: "Matrix",
+			Note: "bot account access token on your homeserver; unencrypted rooms only"},
+		{Channel: "line", Label: "LINE",
+			Note: "Messaging API channel; the webhook needs a tunnel to this host"},
 	}
 }
 
@@ -143,6 +151,24 @@ func ownerContactHint(channel string) ownerHint {
 			What:  "your Signal number in international format (e.g. +15550100)",
 			Label: "your Signal number",
 		}
+	case "mattermost":
+		return ownerHint{
+			What:  "your Mattermost user ID (26 characters, e.g. 8xq3k1b5ajgz7e4w9m2n6p0rst) — NOT your @username",
+			Where: "System Console → User Management → Users → your name shows the User ID",
+			Label: "your Mattermost user ID",
+		}
+	case "matrix":
+		return ownerHint{
+			What:  "your full Matrix user ID (e.g. @you:example.org)",
+			Where: "Element shows it under your avatar (Settings → Account)",
+			Label: "your Matrix user ID",
+		}
+	case "line":
+		return ownerHint{
+			What:  "your LINE user ID (U followed by 32 characters) — NOT your LINE ID",
+			Where: "LINE Developers console → your channel → Basic settings → Your user ID",
+			Label: "your LINE user ID",
+		}
 	case "imessage":
 		return ownerHint{
 			What:  "your iMessage handle — the Apple ID email or phone your messages come from",
@@ -163,39 +189,62 @@ func buildAssistantSkill(providerName, model, channel string, fields []credField
 	if owner = strings.TrimSpace(owner); owner != "" {
 		allowlist = []string{owner}
 	}
+	if channel == "discord" {
+		// Refuse a channel name here, at setup, instead of writing an
+		// allow-list that matches nothing (E33 G2).
+		for i, f := range fields {
+			if f.Key == "channels" && i < len(values) {
+				if err := channels.ValidateDiscordChannelIDs(strings.Split(values[i], ",")); err != nil {
+					return "", err
+				}
+			}
+		}
+	}
 	return buildSkillMarkdown(skillSpec{
 		Name:        assistantName,
 		Description: "My personal assistant",
 		Provider:    providerName,
 		Model:       model,
 		Profile:     assistantName, // personal-scope defaults (design 007 PM1)
-		// Written explicitly so the generated file shows the knob. True is the
-		// default for every humanoid: the assistant is reached from a chat app
-		// with nobody at the keyboard, so a gated tool call would wait on an
-		// approval dialog in a pane the owner is not looking at. Flip this to
-		// false to be asked before every consequential tool call — policy
-		// always_gate / bash.deny (design 013) gates regardless either way.
-		AutoApprove: boolPtr(true),
+		// Written explicitly so the generated file shows the knob; the value
+		// is assistantScaffoldAutoApprove (see there).
+		AutoApprove: boolPtr(assistantScaffoldAutoApprove),
 		Channel:     channel,
 		Fields:      fields,
 		Values:      values,
 		// Replies flow straight back to the owner. Draft-and-confirm governs
 		// the assistant messaging OTHER people; on a single-user assistant it
-		// only meant the owner's own answer sat in the pane unsent. The gate
-		// that matters is unchanged: `profile: assistant` makes
-		// autoApproveTools() false, so every consequential tool call still
-		// raises an approval routed to the owner (design 007 PM3).
+		// only meant the owner's own answer sat in the pane unsent. Governance
+		// gates replies, not tool calls: whether a tool call asks first is the
+		// auto_approve field above, nothing else. (`profile: assistant` once
+		// forced gating on its own; it no longer does — humanoid.go
+		// autoApproveTools. What the profile still decides is that a request
+		// which IS raised is held and routed to the owner over the chat,
+		// released only by the owner's "yes" — handleApprovalRequest.)
 		Governance: "ai",
 		// Mentions-only: the assistant is normally bridged into a channel that
 		// carries other traffic, and answering every message in it is both
 		// noisy and a way to spend tokens on conversations nobody addressed
-		// to it. @mention is the explicit "this one is for you".
+		// to it. @mention is the explicit "this one is for you". A 1:1 DM is
+		// addressed without one (channels/direct_message.go, E33 G1).
 		ReplyMode:     "mentions",
 		PairingPolicy: "request", // unknown senders become pending requests, never auto-answered
 		Allowlist:     allowlist, // allowlist = the owner ONLY (WS3 gate active by construction)
 		Body:          assistantSystemPrompt,
 	})
 }
+
+// assistantScaffoldAutoApprove is the auto_approve value `rysh assistant`
+// writes into a new profile — the one place to change it.
+//
+// False (E33 Q4, root-order-052): every consequential tool call triggered
+// from the chat raises an approval that is sent to the owner over the same
+// chat and released only by their "yes" (proven in internal/actors
+// e33_approval_gate_test.go). True would run such calls without asking.
+// Either way, policy always_gate / bash.deny (design 013) still gates:
+// auto-approval never un-gates what policy gates. Only new profiles get this
+// value; an existing profile keeps whatever its file says.
+const assistantScaffoldAutoApprove = false
 
 // assistantSkillPath is the profile's project-local skill file location.
 func assistantSkillPath() string { return skillFilePath(assistantName) }

@@ -26,8 +26,8 @@ package tui
 import (
 	"encoding/json"
 	"hash/fnv"
-	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -117,6 +117,20 @@ type paneVTLoadedMsg struct {
 	cursorRow   int
 	cursorCol   int
 	ok          bool
+	// Row-delta reply (MsgGetPaneVT.RowHashes): only the changed rows, to be
+	// patched onto the screen whose VTRowsHash is baseHash.
+	delta    bool
+	rows     int
+	changed  []msgpkg.VTLineDelta
+	baseHash uint64
+}
+
+// paneFramesLoadedMsg carries the replies of one batched fetch round (raw VT
+// pulls and/or full content pulls) so the whole round is applied and rendered
+// once, instead of one Update+View per pane reply.
+type paneFramesLoadedMsg struct {
+	vt      []paneVTLoadedMsg
+	content []paneContentLoadedMsg
 }
 
 // layoutDirtyMsg / layoutRefreshMsg drive the event-driven, coalesced layout
@@ -182,7 +196,7 @@ var outputStreamSubs = []struct{ sub, mode string }{
 // just changed (rysh.pane.{id}.rawDirty). The TUI uses it as the trigger for
 // push-based, per-change fetches of raw panes — the 50ms rawFetchTickMsg path
 // is kept only as a defensive safety net.
-func setupContentSubscriptions(b *bus.Bus) (contentCh chan paneContentItem, layoutCh chan struct{}, rawDirtyCh chan string, vtFrameCh chan *msgpkg.MsgMirrorPaneVTFrame) {
+func setupContentSubscriptions(b *bus.Bus, visible *visiblePaneSet) (contentCh chan paneContentItem, layoutCh chan struct{}, rawDirtyCh chan string, vtFrameCh chan *msgpkg.MsgMirrorPaneVTFrame) {
 	contentCh = make(chan paneContentItem, 2048)
 	layoutCh = make(chan struct{}, 1)
 	// rawDirtyCh is generously sized so a burst of fine-grained source-side
@@ -248,6 +262,13 @@ func setupContentSubscriptions(b *bus.Bus) (contentCh chan paneContentItem, layo
 		if paneID == "" {
 			return
 		}
+		// Only panes on screen are fetched. A busy claude pane signals up to
+		// ~60 times a second; with dozens of them in other tabs that was a
+		// steady stream of TUI messages (each one an Update+View) for nothing.
+		// A pane that becomes visible is marked dirty then (markNewlyVisible).
+		if !visible.has(paneID) {
+			return
+		}
 		select {
 		case rawDirtyCh <- paneID:
 		default:
@@ -295,6 +316,50 @@ func paneIDFromSubject(subject string) string {
 		return rest[:j]
 	}
 	return rest
+}
+
+// visiblePaneSet is the active tab's pane IDs, shared between the Update loop
+// (which replaces it whenever the layout changes) and the NATS callbacks (which
+// read it to drop rawDirty signals from panes nobody is looking at). Before the
+// first layout arrives it is unset and admits every pane.
+type visiblePaneSet struct {
+	mu  sync.RWMutex
+	set bool
+	ids map[string]struct{}
+}
+
+func (v *visiblePaneSet) has(id string) bool {
+	if v == nil {
+		return true
+	}
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	if !v.set {
+		return true
+	}
+	_, ok := v.ids[id]
+	return ok
+}
+
+// replace installs ids as the visible set and returns the IDs that were not
+// visible before (all of them on the first call).
+func (v *visiblePaneSet) replace(ids []string) []string {
+	if v == nil {
+		return nil
+	}
+	next := make(map[string]struct{}, len(ids))
+	var added []string
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for _, id := range ids {
+		next[id] = struct{}{}
+		if _, ok := v.ids[id]; !ok || !v.set {
+			added = append(added, id)
+		}
+	}
+	v.ids = next
+	v.set = true
+	return added
 }
 
 // decodeOutputText extracts the text payload from a pane output message. The
@@ -522,14 +587,27 @@ func (m Model) fetchPaneContentCmd(paneID string) tea.Cmd {
 		// nothing to fetch here.
 		return nil
 	}
+	req := m.paneContentRequest(paneID)
+	return func() tea.Msg { return req() }
+}
+
+// paneContentRequest returns the blocking request behind fetchPaneContentCmd.
+// It sends the hash of the content this TUI already holds, so an unchanged
+// pane answers NotModified (ok=false → no apply, no render) instead of
+// shipping every buffer again. A pane with no content yet asks unconditionally.
+func (m Model) paneContentRequest(paneID string) func() paneContentLoadedMsg {
 	codecs := m.bus.Codecs()
 	nc := m.bus.Conn()
 	subject := msgpkg.T("pane", paneID, "snapshot")
-	return func() tea.Msg {
+	var have uint64
+	if buf := m.paneContent[paneID]; buf != nil && buf.haveContent {
+		have = m.paneContentHash[paneID]
+	}
+	return func() paneContentLoadedMsg {
 		// LayoutOnly=false for the content; NoHistories because arrow-key recall
 		// reads history from the layout snapshot, never from this reply, and
 		// this runs per visible pane on every reconcile tick.
-		payload, _ := json.Marshal(&msgpkg.MsgGetPaneSnapshot{NoHistories: true})
+		payload, _ := json.Marshal(&msgpkg.MsgGetPaneSnapshot{NoHistories: true, IfContentHash: have})
 		envData, _ := json.Marshal(msgpkg.NATSEnvelope{TypeTag: msgpkg.TagGetPaneSnapshot, Payload: payload})
 		reply, err := nc.Request(subject, envData, 2*time.Second)
 		if err != nil {
@@ -544,23 +622,39 @@ func (m Model) fetchPaneContentCmd(paneID string) tea.Cmd {
 			return paneContentLoadedMsg{paneID: paneID}
 		}
 		r, ok := decoded.(*msgpkg.MsgPaneSnapshotReply)
-		if !ok {
+		if !ok || r.NotModified {
 			return paneContentLoadedMsg{paneID: paneID}
 		}
 		return paneContentLoadedMsg{paneID: paneID, snap: r.Snapshot, ok: true}
 	}
 }
 
-// fetchPanesContentCmd batches direct content fetches for several panes.
+// fetchPanesContentCmd fetches several panes' full content in one round and
+// returns a single paneFramesLoadedMsg, so the round costs one render.
 func (m Model) fetchPanesContentCmd(ids []string) tea.Cmd {
-	if len(ids) == 0 {
+	var reqs []func() paneContentLoadedMsg
+	for _, id := range ids {
+		if isMirrorID(id) {
+			continue // no PaneActor; see fetchPaneContentCmd
+		}
+		reqs = append(reqs, m.paneContentRequest(id))
+	}
+	if len(reqs) == 0 {
 		return nil
 	}
-	cmds := make([]tea.Cmd, 0, len(ids))
-	for _, id := range ids {
-		cmds = append(cmds, m.fetchPaneContentCmd(id))
+	return func() tea.Msg {
+		out := paneFramesLoadedMsg{content: make([]paneContentLoadedMsg, len(reqs))}
+		var wg sync.WaitGroup
+		for i, req := range reqs {
+			wg.Add(1)
+			go func(i int, req func() paneContentLoadedMsg) {
+				defer wg.Done()
+				out.content[i] = req()
+			}(i, req)
+		}
+		wg.Wait()
+		return out
 	}
-	return tea.Batch(cmds...)
 }
 
 // isLocalRawPane reports whether a pane is a LOCAL interactive pane (vim/claude)
@@ -581,32 +675,66 @@ func (m Model) isLocalRawPane(id string) bool {
 // content (its text content rides that path). This replaces the per-frame full
 // pane-snapshot fetch that made keystrokes sluggish for inline TUIs in multi-pane
 // layouts.
+//
+// All the requests of one round run concurrently and come back as ONE
+// paneFramesLoadedMsg, so N busy panes cost one Update+View per round rather
+// than N.
 func (m Model) fetchRawPanesCmd(ids []string) tea.Cmd {
-	if len(ids) == 0 {
-		return nil
-	}
-	cmds := make([]tea.Cmd, 0, len(ids))
+	var vtReqs []func() paneVTLoadedMsg
+	var contentReqs []func() paneContentLoadedMsg
 	for _, id := range ids {
 		if m.isLocalRawPane(id) {
-			cmds = append(cmds, m.fetchPaneVTCmd(id))
-		} else {
-			cmds = append(cmds, m.fetchPaneContentCmd(id))
+			vtReqs = append(vtReqs, m.paneVTRequest(id))
+		} else if !isMirrorID(id) {
+			contentReqs = append(contentReqs, m.paneContentRequest(id))
 		}
 	}
-	return tea.Batch(cmds...)
+	if len(vtReqs)+len(contentReqs) == 0 {
+		return nil
+	}
+	return func() tea.Msg {
+		out := paneFramesLoadedMsg{
+			vt:      make([]paneVTLoadedMsg, len(vtReqs)),
+			content: make([]paneContentLoadedMsg, len(contentReqs)),
+		}
+		var wg sync.WaitGroup
+		for i, req := range vtReqs {
+			wg.Add(1)
+			go func(i int, req func() paneVTLoadedMsg) {
+				defer wg.Done()
+				out.vt[i] = req()
+			}(i, req)
+		}
+		for i, req := range contentReqs {
+			wg.Add(1)
+			go func(i int, req func() paneContentLoadedMsg) {
+				defer wg.Done()
+				out.content[i] = req()
+			}(i, req)
+		}
+		wg.Wait()
+		return out
+	}
 }
 
-// fetchPaneVTCmd issues a direct 1-hop request for ONLY a local pane's live VT
-// frame (MsgGetPaneVT). The reply is tiny (screen rows + cursor) compared to the
-// full pane snapshot (5+ output buffers up to ~20KB each plus histories), so the
-// per-frame build (PaneActor side), wire payload, and decode (TUI side) are all
-// far cheaper — the win that keeps keystrokes snappy under a redraw-heavy app.
-func (m Model) fetchPaneVTCmd(paneID string) tea.Cmd {
+// paneVTRequest returns a blocking direct 1-hop request for ONLY a local
+// pane's live VT frame (MsgGetPaneVT). The reply is tiny (screen rows + cursor)
+// compared to the full pane snapshot (5+ output buffers up to ~20KB each plus
+// histories), so the per-frame build (PaneActor side), wire payload, and decode
+// (TUI side) are all far cheaper — the win that keeps keystrokes snappy under a
+// redraw-heavy app. When the TUI already holds a screen for the pane it sends
+// that screen's row hashes and gets back only the rows that changed — a spinner
+// tick is one row, not the whole ANSI screen.
+func (m Model) paneVTRequest(paneID string) func() paneVTLoadedMsg {
 	codecs := m.bus.Codecs()
 	nc := m.bus.Conn()
 	subject := msgpkg.T("pane", paneID, "snapshot")
-	return func() tea.Msg {
-		payload, _ := json.Marshal(&msgpkg.MsgGetPaneVT{})
+	var rowHashes []uint64
+	if buf := m.paneContent[paneID]; buf != nil && buf.haveContent && len(buf.vtScreen) > 0 {
+		rowHashes = msgpkg.VTRowHashes(buf.vtScreen)
+	}
+	return func() paneVTLoadedMsg {
+		payload, _ := json.Marshal(&msgpkg.MsgGetPaneVT{RowHashes: rowHashes})
 		envData, _ := json.Marshal(msgpkg.NATSEnvelope{TypeTag: msgpkg.TagGetPaneVT, Payload: payload})
 		reply, err := nc.Request(subject, envData, 2*time.Second)
 		if err != nil {
@@ -631,6 +759,10 @@ func (m Model) fetchPaneVTCmd(paneID string) tea.Cmd {
 			cursorRow:   r.CursorRow,
 			cursorCol:   r.CursorCol,
 			ok:          true,
+			delta:       r.Delta,
+			rows:        r.Rows,
+			changed:     r.Changed,
+			baseHash:    r.BaseHash,
 		}
 	}
 }
@@ -683,51 +815,10 @@ func (m *Model) applyContentDelta(paneID, mode, text string) {
 
 // snapContentHash is an FNV-1a hash of the display-relevant fields of a pulled
 // pane snapshot. Two pulls with the same hash render identically, so a matching
-// hash lets the caller skip the re-apply and the full View() re-render.
-func snapContentHash(s domain.PaneSnapshot) uint64 {
-	h := fnv.New64a()
-	writeStr := func(str string) {
-		_, _ = h.Write([]byte(str))
-		_, _ = h.Write([]byte{0}) // field separator so a||b != ab
-	}
-	writeStr(s.Output)
-	writeStr(s.AIOutput)
-	writeStr(s.ChatOutput)
-	writeStr(s.RyshOutput)
-	writeStr(s.ExternalOutput)
-	// Dynamic per-humanoid modes (snapshot-only render) — hash in sorted-key
-	// order so a new channel message in a humanoid's mode triggers a re-render.
-	if len(s.ModeOutputs) > 0 {
-		modes := make([]string, 0, len(s.ModeOutputs))
-		for k := range s.ModeOutputs {
-			modes = append(modes, k)
-		}
-		sort.Strings(modes)
-		for _, k := range modes {
-			writeStr(k)
-			writeStr(s.ModeOutputs[k])
-		}
-	}
-	for _, line := range s.VTScreen {
-		writeStr(line)
-	}
-	for _, line := range s.RemoteVTScreen {
-		writeStr(line)
-	}
-	var cur [6]byte
-	mix := func(off, v int) {
-		cur[off] = byte(v)
-		cur[off+1] = byte(v >> 8)
-	}
-	mix(0, s.VTCursorRow)
-	mix(2, s.VTCursorCol)
-	// Fold remote cursor in via a second write so it contributes too.
-	_, _ = h.Write(cur[:])
-	mix(0, s.RemoteVTCursorRow)
-	mix(2, s.RemoteVTCursorCol)
-	_, _ = h.Write(cur[:4])
-	return h.Sum64()
-}
+// hash lets the caller skip the re-apply and the full View() re-render. It is
+// msgpkg.PaneContentHash so the PaneActor can answer NotModified with the same
+// function.
+func snapContentHash(s domain.PaneSnapshot) uint64 { return msgpkg.PaneContentHash(s) }
 
 // applyPaneContentLoaded replaces a pane's buffers with the authoritative full
 // snapshot (backfill / reconcile / raw VT). Replacing — not appending — makes
@@ -799,6 +890,20 @@ func vtFrameHash(screen []string, cursorRow, cursorCol int, interactive bool) ui
 func (m *Model) applyPaneVTLoaded(loaded paneVTLoadedMsg) bool {
 	if !loaded.ok || !loaded.interactive {
 		return false
+	}
+	if loaded.delta {
+		buf := m.paneContent[loaded.paneID]
+		if buf == nil || !buf.haveContent {
+			return false
+		}
+		// The delta is against the screen we held when we asked. If another
+		// reply has replaced that screen since, patching would mix two frames:
+		// drop it and ask again (the raw safety tick picks the dirty pane up).
+		if msgpkg.VTRowsHash(msgpkg.VTRowHashes(buf.vtScreen)) != loaded.baseHash {
+			m.markRawDirty(loaded.paneID)
+			return false
+		}
+		loaded.screen = applyMirrorVTPatch(buf.vtScreen, loaded.changed, loaded.rows)
 	}
 	hash := vtFrameHash(loaded.screen, loaded.cursorRow, loaded.cursorCol, loaded.interactive)
 	if prev, ok := m.paneVTHash[loaded.paneID]; ok && prev == hash {
@@ -1066,6 +1171,35 @@ func (m *Model) syncPaneContentSet() (visible, needBackfill []string) {
 		}
 	}
 	return visible, needBackfill
+}
+
+// batchTouchesVisiblePane reports whether any streamed delta in items belongs
+// to a pane in the active tab (or the visible set is not known yet).
+func (m Model) batchTouchesVisiblePane(items []paneContentItem) bool {
+	for _, it := range items {
+		if m.visiblePanes.has(it.paneID) {
+			return true
+		}
+	}
+	return false
+}
+
+// markRawDirty adds a pane to the raw-dirty set so the next raw fetch round
+// (rawDirtyBatchMsg, the trailing flush, or the raw safety tick) re-pulls it.
+func (m *Model) markRawDirty(id string) {
+	if m.dirtyRawPanes == nil {
+		m.dirtyRawPanes = make(map[string]struct{})
+	}
+	m.dirtyRawPanes[id] = struct{}{}
+}
+
+// updateVisiblePanes publishes the active tab's pane IDs to the rawDirty
+// filter and marks every pane that just came into view dirty: its signals were
+// dropped while it was hidden, so its screen is refetched once now.
+func (m *Model) updateVisiblePanes(visible []string) {
+	for _, id := range m.visiblePanes.replace(visible) {
+		m.markRawDirty(id)
+	}
 }
 
 // consumeDirtyRawPanes returns the intersection of the given visible pane IDs

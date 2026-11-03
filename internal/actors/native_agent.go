@@ -96,6 +96,14 @@ type nativeAgentSpec struct {
 	// handleNativeAgentCommand sets it: it is never derived from pane meta, so
 	// no restore path — nativeResumePlan, `##ansa resume` — can replay it.
 	PromptFile string
+	// Sandbox, when set, is the sandbox profile the agent runs under (design
+	// 066). SandboxRyshDir and Workspace must then be set too, or the line
+	// starts nothing — see nativeAgentSandboxed.
+	Sandbox        string
+	SandboxRyshDir string
+	// Workspace is the directory the sandbox exposes read-write (the pane's
+	// cwd at launch, agent.cwd on a resume). Unlike Cwd it adds no `cd`.
+	Workspace string
 }
 
 // AUTONOMY BY DEFAULT. A pane opened with `##claude` / `##codex` is an agent
@@ -212,11 +220,22 @@ func nativeAgentHasApprovalFlag(kind string, fields []string) bool {
 // autonomous too, instead of resuming into an agent that stops on its first
 // approval prompt with nobody watching.
 func nativeAgentCommand(s nativeAgentSpec) string {
+	if why := claudeHooksRefusal(s.Kind); why != "" {
+		return claudeRefusalLine(why)
+	}
 	args := ""
 	if a := nativeAgentArgs(s.Kind, s.Args); a != "" {
 		args = " " + a
 	}
+	// gap G8: a bridged claude reports its tool and turn events to rysh.
+	args += claudeBridgeArgs(s)
 	sid := strings.TrimSpace(s.SessionID)
+	if s.Kind == nativeAgentCodex && strings.TrimSpace(s.Sandbox) != "" {
+		// A codex id is discovered in the HOST ~/.codex. Inside the sandbox
+		// (CODEX_HOME = the sandbox home) it names nothing, and --last would
+		// pick whatever ran last there: a sandboxed codex starts fresh.
+		s.Resume, sid = false, ""
+	}
 
 	var cmd string
 	switch s.Kind {
@@ -249,7 +268,11 @@ func nativeAgentCommand(s nativeAgentSpec) string {
 	if f != "" {
 		cmd += ` "$` + nativeAgentPromptVar + `"`
 	}
-	cmd = nativeAgentScrubbed(s.Kind, cmd)
+	if strings.TrimSpace(s.Sandbox) != "" {
+		cmd = nativeAgentSandboxed(s, cmd)
+	} else {
+		cmd = nativeAgentScrubbed(s.Kind, cmd)
+	}
 	if dir := strings.TrimSpace(s.Cwd); dir != "" {
 		cmd = nativeAgentInDir(dir, nativeAgentKind(s.Kind), cmd)
 	}
@@ -411,7 +434,17 @@ func claudeSessionExists(sessionID string) bool {
 	if strings.ContainsAny(sid, `/\`) {
 		return false
 	}
-	matches, err := filepath.Glob(filepath.Join(claudeProjectsDir(), "*", sid+".jsonl"))
+	return claudeSessionExistsIn(claudeProjectsDir(), sid)
+}
+
+// claudeSessionExistsIn is claudeSessionExists against an explicit projects
+// directory (a sandbox home's, design 066).
+func claudeSessionExistsIn(projectsDir, sessionID string) bool {
+	sid := strings.TrimSpace(sessionID)
+	if sid == "" || projectsDir == "" || strings.ContainsAny(sid, `/\`) {
+		return false
+	}
+	matches, err := filepath.Glob(filepath.Join(projectsDir, "*", sid+".jsonl"))
 	return err == nil && len(matches) > 0
 }
 

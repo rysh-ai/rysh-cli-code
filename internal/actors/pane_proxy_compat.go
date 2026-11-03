@@ -70,20 +70,23 @@ func (p *PaneActor) noteForegroundProgram(pgid int) {
 }
 
 // foregroundCLI names the program a process group leader is, in the terms the
-// CLI profile table uses: the known agent CLI it is, or — when it is none —
+// CLI profile table uses: the allowed agent CLI it is, or (when it is none)
 // the kernel's name for it, which the proxy then declines to watch (F-13).
 //
-// processName alone is the kernel's accounting name, and for the native-
-// installer `claude` that is its version, "2.1.288" (F-15); the exec path and
-// argv are what still say "claude".
+// The identity comes from the process's real executable (processRealExe), the
+// one attribute its launcher cannot choose. The kernel name is only the
+// display fallback: for the native-installer `claude` it is the version,
+// "2.1.288" (F-15).
 func foregroundCLI(pid int) string {
 	return identifyCLI(pid, processName(pid))
 }
 
 // identifyCLI is foregroundCLI for a pid whose kernel name is already known.
+// argv is read only for an interpreter, whose script is checked against the
+// CLI's install locations; it never establishes an identity on its own.
 func identifyCLI(pid int, comm string) string {
-	exe, argv := processExecArgs(pid)
-	if name, ok := proxy.IdentifyCLI(comm, exe, argv); ok {
+	_, argv := processExecArgs(pid)
+	if name, ok := proxy.IdentifyCLI(processRealExe(pid), argv); ok {
 		return name
 	}
 	return comm
@@ -100,6 +103,11 @@ func identifyCLI(pid int, comm string) string {
 // would rather stop an innocent CLI than let an ungoverned one keep talking to
 // a provider — design 022 §8.2's "honest v2 shape" — so the warning is followed
 // by stopping the program.
+//
+// Both act only on an allowed CLI at its known install location, identified by
+// its real executable (foregroundCLI). Strict mode is not an anti-evasion
+// boundary against the user's own machine: a copy run from an unlisted
+// location is unknown, so it is not watched (F-13).
 func (p *PaneActor) emitUnproxiedWarning() {
 	srv := p.proxyServer()
 	if srv == nil {

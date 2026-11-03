@@ -360,7 +360,8 @@ func TestAuthStatus_ReportsSignedIn(t *testing.T) {
 	}
 }
 
-// No login configured: the status endpoint must not make the UI ask for one.
+// No login configured outside control mode: the gate refuses session data, so
+// the status must not tell the UI it is in — it says a login is required.
 func TestAuthStatus_NoLoginConfigured(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	s := &Server{}
@@ -375,8 +376,8 @@ func TestAuthStatus_NoLoginConfigured(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if st.LoginRequired || !st.Authenticated {
-		t.Fatalf("status = %+v, want login_required=false authenticated=true", st)
+	if !st.LoginRequired || st.Authenticated {
+		t.Fatalf("status = %+v, want login_required=true authenticated=false", st)
 	}
 	// And POSTing a login to a server that has none is a 404, not a 500.
 	if got := postLogin(r, "halil", "s3cret"); got.Code != http.StatusNotFound {
@@ -417,8 +418,8 @@ func TestSetCredentials_AppliesLive(t *testing.T) {
 	s.registerAuthAPI(r)
 	r.GET("/api/env", func(c *gin.Context) { c.String(http.StatusOK, "env") })
 
-	if w := getWithBearer(r, "/api/env", ""); w.Code != http.StatusOK {
-		t.Fatalf("before credentials /api/env = %d, want 200", w.Code)
+	if w := getWithBearer(r, "/api/env", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("before credentials /api/env = %d, want 401 (no login, not control: closed)", w.Code)
 	}
 	creds, err := SaveCredentials(t.TempDir(), "halil", "s3cret")
 	if err != nil {
@@ -431,9 +432,10 @@ func TestSetCredentials_AppliesLive(t *testing.T) {
 	if w := getWithBearer(r, "/api/env", ""); w.Code != http.StatusUnauthorized {
 		t.Fatalf("after credentials /api/env = %d, want 401", w.Code)
 	}
+	// Clearing the login on a running server closes it; it never opens it.
 	s.SetCredentials(nil)
-	if w := getWithBearer(r, "/api/env", ""); w.Code != http.StatusOK {
-		t.Fatalf("after clearing /api/env = %d, want 200", w.Code)
+	if w := getWithBearer(r, "/api/env", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("after clearing /api/env = %d, want 401", w.Code)
 	}
 }
 

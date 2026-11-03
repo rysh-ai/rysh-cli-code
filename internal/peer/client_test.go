@@ -28,7 +28,7 @@ func TestPeerClientRefusesRedirectsAndUnsafeOrigins(t *testing.T) {
 		t.Error("redirect leaked a request")
 	}))
 	defer second.Close()
-	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, second.URL, 302) }))
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, second.URL, http.StatusFound) }))
 	defer first.Close()
 	_, err := (Client{Connection: Connection{URL: first.URL}, Key: "rysh_secret"}).ResolveWorkspace(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "302") || secondCalled {

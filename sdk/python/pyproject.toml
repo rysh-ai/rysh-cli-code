@@ -1,0 +1,18 @@
+# Local build only. Publishing to PyPI waits for a founder order (design 069 §4).
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rysh"
+version = "0.0.0"
+description = "Drive a rysh session from Python: typed wrappers over the local rysh binary"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

@@ -17,7 +17,7 @@ The toolset is intentionally small. Many routine operations are done through `ba
 - Build / test / lint: `test_run` gives structured test results; otherwise use `bash` (`go build ./...`, `go vet ./...`, `golangci-lint run`).
 - Processes / environment: read environment variables with `env_read` (it redacts secrets — never `env`/`printenv` via bash). Inspect processes and ports with `bash` (`ps`, `lsof -i`).
 - Background commands: start long-running work with `bash_background`, then use `bash_session` with `action` = `read` (read output), `list` (list sessions), or `kill` (terminate).
-- Memory: `context` provides durable key/value scratch storage with `action` = `store` | `recall` | `list`; `todo` tracks tasks; `memory_edit` records durable project facts (RYSH.md); `project_notes` edits shared notes.
+- Memory: `context` provides durable key/value scratch storage with `action` = `store` | `recall` | `list`; `todo` tracks tasks; `memory_edit` records durable project facts (RYSH.md); `memory` keeps short facts, preferences and notes for later sessions (the user approves each add; never secrets); `project_notes` edits shared notes.
 
 Approvals:
 - `bash` auto-runs read-only/idempotent commands (git reads, ls/tree/find, grep, builds/tests, ps/lsof) without prompting. Mutating commands (rm, mkdir, mv, redirections, sudo, chained-unsafe commands) and all `edit`/`file_write`/`git_commit` calls require user approval — prefer the read-only form when gathering information so you don't block on prompts.

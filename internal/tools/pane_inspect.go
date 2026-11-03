@@ -76,10 +76,12 @@ func (t *PaneInspectTool) Execute(ctx context.Context, params json.RawMessage) (
 		return ErrOutput(ErrKindMissing, "NATS connection not available"), nil
 	}
 
-	// Request pane snapshot via NATS request/reply.
+	// Request pane snapshot via NATS request/reply. The pane's bridge decodes
+	// by TypeTag and drops a tag the codec registry does not know, so the
+	// tag must be the registered request type (an unknown one times out).
 	subject := msg.T("pane", p.PaneID, "snapshot")
 	envelope := msg.NATSEnvelope{
-		TypeTag: "MsgPaneSnapshot",
+		TypeTag: msg.TagGetPaneSnapshot,
 		Payload: []byte("{}"),
 	}
 	data, err := json.Marshal(envelope)

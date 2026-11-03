@@ -26,9 +26,9 @@ func processName(pid int) string {
 // /proc/<pid>/exe and /proc/<pid>/cmdline.
 //
 // Unlike darwin's, the exe link is already resolved: for the native-installer
-// `claude` it reads ~/.local/share/claude/versions/<version>, which is why
-// proxy.IdentifyCLI also recognises that layout, and why argv[0] ("claude")
-// matters (F-15). Unreadable entries yield "", nil.
+// `claude` it reads ~/.local/share/claude/versions/<version>. Identity does not
+// come from here; see processRealExe and proxy.IdentifyCLI. Unreadable entries
+// yield "", nil.
 func processExecArgs(pid int) (string, []string) {
 	if pid <= 0 {
 		return "", nil
@@ -40,4 +40,20 @@ func processExecArgs(pid int) (string, []string) {
 		return exe, nil
 	}
 	return exe, strings.Split(strings.TrimRight(string(b), "\x00"), "\x00")
+}
+
+// processRealExe returns the real executable of a pid from /proc/<pid>/exe,
+// which the kernel resolves to the file it actually exec'd. It is the one
+// process attribute the launcher cannot choose. An unreadable link, or an
+// executable that has since been deleted, yields "", which IdentifyCLI treats
+// as unknown.
+func processRealExe(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	exe, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/exe")
+	if err != nil || strings.HasSuffix(exe, " (deleted)") {
+		return ""
+	}
+	return exe
 }

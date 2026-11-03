@@ -1,0 +1,35 @@
+// Zellij layout, as it would sit in $HOME/.config/zellij/layouts/web.kdl
+layout {
+    cwd "/fixture-home/src/web"
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        children
+        pane size=2 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+    tab name="code" focus=true {
+        pane split_direction="vertical" {
+            pane command="nvim" size="60%" {
+                args "."
+            }
+            pane split_direction="horizontal" {
+                pane command="npm" cwd="frontend" {
+                    args "run" "dev"
+                }
+                pane name="scratch"
+            }
+        }
+    }
+    tab name="logs" cwd="/var/log" {
+        pane command="tail" {
+            args "-f" "system log.txt"
+        }
+        /- pane command="ignored-by-slashdash"
+        /* a block comment
+           spanning lines */
+        pane edit="notes.md"; pane { plugin location="zellij:strider"; }
+    }
+}

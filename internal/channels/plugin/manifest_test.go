@@ -12,17 +12,17 @@ import (
 )
 
 const goodManifestTOML = `
-name        = "matrix"
+name        = "zulip"
 version     = "0.3.1"
 transport   = "nats"
-exec        = "rysh-channel-matrix"
+exec        = "rysh-channel-zulip"
 min_rysh    = "0.9.0"
 checksum    = "sha256:abc123"
 signature   = "sig-bytes"
 
-declares_creds   = ["MATRIX_TOKEN", "MATRIX_HS_URL"]
-declares_scopes  = ["channel:matrix"]
-network_egress   = ["matrix.org:443"]
+declares_creds   = ["ZULIP_API_KEY", "ZULIP_SITE"]
+declares_scopes  = ["channel:zulip"]
+network_egress   = ["zulip.example.com:443"]
 `
 
 func TestParseManifestGood(t *testing.T) {
@@ -30,11 +30,11 @@ func TestParseManifestGood(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseManifest: %v", err)
 	}
-	if m.Name != "matrix" || m.Version != "0.3.1" || m.Transport != "nats" ||
-		m.Exec != "rysh-channel-matrix" || m.MinRysh != "0.9.0" {
+	if m.Name != "zulip" || m.Version != "0.3.1" || m.Transport != "nats" ||
+		m.Exec != "rysh-channel-zulip" || m.MinRysh != "0.9.0" {
 		t.Fatalf("fields wrong: %+v", m)
 	}
-	if len(m.DeclaresCreds) != 2 || m.DeclaresCreds[0] != "MATRIX_TOKEN" {
+	if len(m.DeclaresCreds) != 2 || m.DeclaresCreds[0] != "ZULIP_API_KEY" {
 		t.Fatalf("creds = %v", m.DeclaresCreds)
 	}
 	if len(m.DeclaresScopes) != 1 || len(m.NetworkEgress) != 1 {
@@ -44,7 +44,7 @@ func TestParseManifestGood(t *testing.T) {
 
 func TestManifestValidateTable(t *testing.T) {
 	base := func() Manifest {
-		return Manifest{Name: "matrix", Transport: "stdio", Exec: "run"}
+		return Manifest{Name: "zulip", Transport: "stdio", Exec: "run"}
 	}
 	cases := []struct {
 		name    string
@@ -54,7 +54,7 @@ func TestManifestValidateTable(t *testing.T) {
 		{"good", func(*Manifest) {}, ""},
 		{"good nats", func(m *Manifest) { m.Transport = "nats" }, ""},
 		{"missing name", func(m *Manifest) { m.Name = "" }, "name is required"},
-		{"uppercase name", func(m *Manifest) { m.Name = "Matrix" }, "invalid name"},
+		{"uppercase name", func(m *Manifest) { m.Name = "Zulip" }, "invalid name"},
 		{"single-char name", func(m *Manifest) { m.Name = "x" }, "invalid name"},
 		{"digit-leading name", func(m *Manifest) { m.Name = "9chan" }, "invalid name"},
 		{"underscore name", func(m *Manifest) { m.Name = "my_chan" }, "invalid name"},
@@ -97,14 +97,14 @@ func TestConsentText(t *testing.T) {
 	text := ConsentText(m)
 
 	for _, want := range []string{
-		`Channel plugin "matrix" 0.3.1`,
+		`Channel plugin "zulip" 0.3.1`,
 		"transport: nats",
 		"signing tier: community",
 		signatureStubNotice, // honest v1 stub: never fake crypto
-		"MATRIX_TOKEN",
-		"MATRIX_HS_URL",
-		"channel:matrix",
-		"matrix.org:443",
+		"ZULIP_API_KEY",
+		"ZULIP_SITE",
+		"channel:zulip",
+		"zulip.example.com:443",
 		"NOT enforced by rysh in v1",
 		"nothing runs at install time",
 	} {

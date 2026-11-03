@@ -1,0 +1,79 @@
+{
+  "source": "mcp",
+  "inputs": [
+    ".mcp.json"
+  ],
+  "secrets": [
+    {
+      "name": "Authorization",
+      "where": "mcp server \"docs\" header",
+      "how": "not copied; add it under \"headers\" for this server in .rysh/mcp.json yourself"
+    },
+    {
+      "name": "--api-key",
+      "where": "mcp server \"leaky\" argument",
+      "how": "not copied; add the server by hand with ##mcp add, passing the credential from rysh's secret store"
+    },
+    {
+      "name": "URL user info",
+      "where": "mcp server \"leaky-url\" url",
+      "how": "not copied; add the server by hand without a credential in its URL"
+    },
+    {
+      "name": "token",
+      "where": "mcp server \"leaky-url\" url",
+      "how": "not copied; add the server by hand without a credential in its URL"
+    },
+    {
+      "name": "FIXTURE_LOG_LEVEL",
+      "where": "mcp server \"tracker\" env",
+      "how": "not copied (no env value is); export it in the shell that starts rysh — MCP servers inherit rysh's environment"
+    },
+    {
+      "name": "FIXTURE_TRACKER_TOKEN",
+      "where": "mcp server \"tracker\" env",
+      "how": "not copied (no env value is); export it in the shell that starts rysh — MCP servers inherit rysh's environment"
+    }
+  ],
+  "mcp": [
+    {
+      "name": "docs",
+      "transport": "http",
+      "url": "https://mcp.example.test/mcp"
+    },
+    {
+      "name": "events",
+      "transport": "http",
+      "url": "https://events.example.test/sse"
+    },
+    {
+      "name": "files",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "$HOME/projects"
+      ]
+    },
+    {
+      "name": "tracker",
+      "transport": "stdio",
+      "command": "tracker-mcp",
+      "args": [
+        "--workspace",
+        "demo"
+      ]
+    }
+  ],
+  "notes": [
+    "server \"broken\" is incomplete (stdio transport requires a command); not imported",
+    "server \"events\" uses the older SSE transport; rysh speaks Streamable HTTP — check the server supports it",
+    "server \"leaky\" passes a credential as an argument (--api-key); not imported",
+    "server \"leaky-url\" has a credential in its URL; not imported",
+    "imported MCP servers are written with requires_approval: every tool call is gated until you review the server and remove it"
+  ],
+  "writes": [
+    ".rysh/mcp.json"
+  ]
+}

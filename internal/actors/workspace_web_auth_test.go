@@ -3,9 +3,12 @@
 package actors
 
 import (
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/config"
+	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 	"github.com/rysh-ai/rysh-cli-code/internal/web"
 )
 
@@ -99,5 +102,51 @@ func TestSetWebCredentials_AppliesEvenInControlMode(t *testing.T) {
 	}
 	if control.LoginEnabled() {
 		t.Error("credentials should be cleared")
+	}
+}
+
+// `##rysh web auth clear` must not leave a running UI outside control mode
+// without its login: it refuses and says to stop the UI first. In control mode
+// the desktop app's own door needs no login, so clearing applies there.
+func TestWebAuthClear_RefusedWhileTheUIRunsOutsideControlMode(t *testing.T) {
+	nc := newABLATestNATS(t)
+	pub := msg.NewNATSPublisher(nc, msg.DefaultCodecRegistry())
+	for _, control := range []bool{false, true} {
+		dir := t.TempDir()
+		w := &WorkspaceActor{cfg: config.Config{RyshDir: dir}, sessionName: "s1"}
+		if _, err := web.SaveCredentialsFor(w.credentialsRef(), "halil", "s3cret"); err != nil {
+			t.Fatal(err)
+		}
+		srv := web.NewServer(freePort(t), "s1", pub, nc, pub.Codecs())
+		srv.SetHost("127.0.0.1")
+		srv.SetControl(control)
+		srv.TrackCredentialsRef(w.credentialsRef()) // as ##rysh web start does
+		if err := srv.Start(); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		t.Cleanup(func() { _ = srv.Stop() })
+		w.webServer = srv
+
+		var out strings.Builder
+		w.handleWebAuth(&out, []string{"clear"})
+		_, statErr := os.Stat(w.credentialsRef().OwnPath())
+		if control {
+			if statErr == nil {
+				t.Errorf("control mode: clear did not remove the login:\n%s", out.String())
+			}
+			continue
+		}
+		if statErr != nil {
+			t.Errorf("running, not control: the login was removed (%v):\n%s", statErr, out.String())
+		}
+		if !srv.LoginEnabled() {
+			t.Errorf("running, not control: the live server lost its login")
+		}
+		if !strings.Contains(out.String(), "##rysh web stop") {
+			t.Errorf("refusal must say to stop the UI first, got:\n%s", out.String())
+		}
+		if w.takeRyshFailure() == nil {
+			t.Errorf("refusal must fail the command")
+		}
 	}
 }

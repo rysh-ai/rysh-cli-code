@@ -17,7 +17,8 @@ import (
 
 // router builds a gin engine with the auth middleware and a couple of stub
 // routes, mirroring server.go's setup, for isolated middleware testing.
-// creds nil ⇒ the ungated control-mode posture.
+// The server is not in control mode, so every door is gated; creds nil means
+// no login is configured, which refuses session data outright.
 func router(creds *Credentials) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	s := &Server{creds: creds}
@@ -50,13 +51,19 @@ func testCreds(t *testing.T) *Credentials {
 	return creds
 }
 
-// No credentials is the control-mode posture: the desktop app spawns the daemon
-// on loopback and is its only client, so nothing is gated.
-func TestAuth_NoCredentials_AllowsEverything(t *testing.T) {
+// No credentials outside control mode is not an open door: session data is
+// refused, while the app shell and /health stay public as on any gated door.
+// (Control mode's open loopback door: private_door_test.go.)
+func TestAuth_NoCredentials_ClosesSessionData(t *testing.T) {
 	r := router(nil)
-	for _, p := range []string{"/", "/assets/app.js", "/ws", "/health", "/api/env"} {
+	for _, p := range []string{"/ws", "/api/env"} {
+		if w := do(r, http.MethodGet, p); w.Code != http.StatusUnauthorized {
+			t.Fatalf("no login, not control: %s = %d, want 401", p, w.Code)
+		}
+	}
+	for _, p := range []string{"/", "/assets/app.js", "/health"} {
 		if w := do(r, http.MethodGet, p); w.Code != http.StatusOK {
-			t.Fatalf("ungated %s = %d, want 200", p, w.Code)
+			t.Fatalf("%s = %d, want 200 (public)", p, w.Code)
 		}
 	}
 }

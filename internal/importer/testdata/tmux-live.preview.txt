@@ -1,0 +1,30 @@
+rysh import tmux — preview (nothing is written without --apply)
+  from: testdata/tmux-live
+
+Layout: 3 tab(s), 4 lane(s), 7 pane(s)
+  tab 1 "api:editor"
+    lane 1
+      pane 1  cwd: $HOME/src/api
+              start: vim .
+    lane 2
+      pane 1  cwd: $HOME/src/api
+      pane 2  cwd: $HOME/src/api/test
+              start: go test ./...
+  tab 2 "api:server"
+    lane 1
+      pane 1  cwd: $HOME/src/api
+              start: make run
+  tab 3 "notes:main"
+    lane 1
+      pane 1  cwd: /srv/notes
+      pane 2  cwd: /srv/notes
+              start: tail -f notes.log | grep TODO
+      pane 3  cwd: /srv/notes/my drafts
+  Start commands are not run now: they run when you run the generated script.
+
+Notes:
+  - tab "notes:main": a split nested inside a lane was flattened into that lane (rysh lanes stack panes top to bottom)
+
+With --apply this writes (after backing up what it replaces):
+  .rysh/imports/tmux.rysh
+Undo with: rysh import --undo

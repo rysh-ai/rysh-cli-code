@@ -5,6 +5,8 @@ package cdp
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -36,6 +38,34 @@ func TestLaunchArgs(t *testing.T) {
 	}
 	if !strings.Contains(headed, "about:blank") {
 		t.Error("empty URL should default to about:blank")
+	}
+}
+
+// A temp-dir profile must not touch the macOS keychain (that is what popped
+// "A keychain cannot be found" on every e2e launch); a saved profile must keep
+// it, or its encrypted cookies become unreadable.
+func TestLaunchArgsMockKeychainOnlyForTempProfiles(t *testing.T) {
+	tmpProfile := filepath.Join(t.TempDir(), "profile")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir to stand in for a saved profile")
+	}
+	savedProfile := filepath.Join(home, ".rysh-test-not-created", "profile")
+	if isThrowawayProfile(savedProfile) {
+		t.Skip("home is inside the temp dir on this host")
+	}
+	for _, headless := range []bool{true, false} {
+		got := strings.Join(launchArgs(LaunchOptions{UserDataDir: tmpProfile, Headless: headless}), " ")
+		if !strings.Contains(got, "--use-mock-keychain") {
+			t.Errorf("headless=%v temp profile: missing --use-mock-keychain: %s", headless, got)
+		}
+		got = strings.Join(launchArgs(LaunchOptions{UserDataDir: savedProfile, Headless: headless}), " ")
+		if strings.Contains(got, "--use-mock-keychain") {
+			t.Errorf("headless=%v saved profile: must keep the real keychain: %s", headless, got)
+		}
+	}
+	if isThrowawayProfile(os.TempDir()) {
+		t.Error("the temp dir itself is not a profile inside it")
 	}
 }
 

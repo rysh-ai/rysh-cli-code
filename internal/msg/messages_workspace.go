@@ -341,3 +341,33 @@ type MsgCLICronApply struct {
 	JobName string `json:"job_name"`
 	Input   string `json:"input"` // new Input, read verbatim from the edited file
 }
+
+// MsgCLIPaneProfile reads, sets or clears a pane's agent profile (design 093
+// H1) for `rysh family apply` (H2). It is `##pane profile` without the
+// command line: the prompt travels as TEXT in a typed field and the daemon
+// writes it to the pane's one profile file
+// (<workspace>/.rysh/pane-profiles/<pane-id>.md, 0600) itself, so no caller
+// ever names a path (e20 W4) and a multi-line prompt is never token-parsed.
+//
+// Op is "get", "set" or "clear". PaneID must be the pane's full id (no
+// aliases or names). "set" replaces the profile: Tools and Prompt are both
+// required. The reply is a MsgCLIPaneProfileReply.
+type MsgCLIPaneProfile struct {
+	Op     string   `json:"op"`
+	PaneID string   `json:"pane_id"`
+	Tools  []string `json:"tools,omitempty"`
+	Prompt string   `json:"prompt,omitempty"`
+}
+
+// MsgCLIPaneProfileReply answers MsgCLIPaneProfile. For "get": Tools is the
+// pane's allow-list from its meta, HasPrompt says whether meta names a prompt
+// file, and Prompt is that file's content read through the same exact-path,
+// no-symlink check the pane uses (PromptErr says why it could not be read).
+type MsgCLIPaneProfileReply struct {
+	OK        bool     `json:"ok"`
+	Error     string   `json:"error,omitempty"`
+	Tools     []string `json:"tools,omitempty"`
+	HasPrompt bool     `json:"has_prompt,omitempty"`
+	Prompt    string   `json:"prompt,omitempty"`
+	PromptErr string   `json:"prompt_err,omitempty"`
+}

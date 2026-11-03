@@ -34,6 +34,19 @@ func (w *WorkspaceActor) handlePaneCommand(ctx actor.Context, out *strings.Build
 		// ##pane list [--tab <tab-id>]  -> list panes of a tab
 		// (defaults to the active tab when --tab is omitted).
 		listArgs, withMeta := extractBoolArg(args[1:], "--meta")
+		listArgs, asJSON := extractBoolArg(listArgs, "--json")
+		listArgs, allTabs := extractBoolArg(listArgs, "--all")
+		if allTabs {
+			// ##pane list --all: every pane in every tab (design 069).
+			if asJSON {
+				w.cmdPaneListJSON(out, w.tabs)
+				break
+			}
+			for _, t := range w.tabs {
+				w.cmdPaneListInTabWithMeta(out, t, withMeta)
+			}
+			break
+		}
 		tabArg := extractTabFlag(listArgs)
 		tab := w.resolveTabArg(tabArg)
 		if tab == nil {
@@ -44,6 +57,10 @@ func (w *WorkspaceActor) handlePaneCommand(ctx actor.Context, out *strings.Build
 				fmt.Fprintf(out, "\n[rysh] tab not found: %s\n", tabArg)
 				w.failRysh("tab not found: %s", tabArg)
 			}
+			break
+		}
+		if asJSON {
+			w.cmdPaneListJSON(out, []*tabInfo{tab})
 			break
 		}
 		w.cmdPaneListInTabWithMeta(out, tab, withMeta)
@@ -73,6 +90,7 @@ func (w *WorkspaceActor) handlePaneCommand(ctx actor.Context, out *strings.Build
 		//  3. NO ARGUMENT KEEPS WORKING. Bare `##pane info` still reports the
 		//     ambient pane. That is long-standing behaviour people rely on and
 		//     turning it into an error would be a second defect, not a fix.
+		args, asJSON := extractBoolArg(args, "--json")
 		target := paneID
 		tab := w.currentTab()
 		if ref := paneInfoRef(args); ref != "" {
@@ -113,6 +131,7 @@ func (w *WorkspaceActor) handlePaneCommand(ctx actor.Context, out *strings.Build
 		var ps *domain.PaneSnapshot
 		var laneFlex int
 		var laneID string
+		var rec PaneRecord
 		for _, lane := range tabSnap.Lanes {
 			for _, g := range lane.PaneGroups {
 				for i := range g.Panes {
@@ -120,6 +139,7 @@ func (w *WorkspaceActor) handlePaneCommand(ctx actor.Context, out *strings.Build
 						ps = &g.Panes[i]
 						laneFlex = lane.Flex
 						laneID = lane.ID
+						rec = paneRecordFrom(tab, lane, g, g.Panes[i], w.activePaneID)
 						break
 					}
 				}
@@ -134,6 +154,10 @@ func (w *WorkspaceActor) handlePaneCommand(ctx actor.Context, out *strings.Build
 		if ps == nil {
 			fmt.Fprintf(out, "\n[rysh] pane not found: %s\n", target)
 			w.failRysh("pane not found: %s", target)
+			break
+		}
+		if asJSON {
+			writeJSONLine(out, rec)
 			break
 		}
 		givenNameDisplay := ps.GivenName
@@ -279,6 +303,11 @@ func (w *WorkspaceActor) handlePaneCommand(ctx actor.Context, out *strings.Build
 				w.failRyshUsage("usage: ##pane meta set <key> <value>")
 				break
 			}
+			if why := paneMetaReserved(rest[1]); why != "" {
+				fmt.Fprintf(out, "\n[rysh] %s\n", why)
+				w.failRysh("%s", why)
+				break
+			}
 			// The value keeps the remaining words: a ## line arrives already
 			// split on whitespace, so a value with spaces would otherwise lose
 			// everything after the first one.
@@ -289,6 +318,11 @@ func (w *WorkspaceActor) handlePaneCommand(ctx actor.Context, out *strings.Build
 			if len(rest) < 2 {
 				ryshWriter(out).UsageLine("##pane meta delete <key>")
 				w.failRyshUsage("usage: ##pane meta delete <key>")
+				break
+			}
+			if why := paneMetaReserved(rest[1]); why != "" {
+				fmt.Fprintf(out, "\n[rysh] %s\n", why)
+				w.failRysh("%s", why)
 				break
 			}
 			if _, ok := snapMeta[rest[1]]; !ok {
@@ -418,6 +452,11 @@ func (w *WorkspaceActor) handlePaneCommand(ctx actor.Context, out *strings.Build
 	case "approval-pane":
 		w.handleApprovalPaneCommand(out, paneID, args[1:])
 
+	case "profile":
+		// ##pane profile set|show|clear <pane> — per-pane agent profile:
+		// system prompt + tool allow-list (design 093 H1).
+		w.handlePaneProfileCommand(out, args[1:])
+
 	case "delete":
 		// ##pane delete <pane-id>  -> delete the pane with that id (see ##pane list)
 		if len(args) < 2 {
@@ -447,6 +486,7 @@ func (w *WorkspaceActor) handlePaneCommand(ctx actor.Context, out *strings.Build
 			"##pane delete <pane-id>",
 			"##pane share start|stop|status",
 			"##pane approval-pane <name1> [name2] ... | clear | list",
+			paneProfileUsage,
 		)
 		w.failRyshUsage("unknown subcommand for ##%s: %q", "pane", sub)
 	}

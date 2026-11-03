@@ -55,5 +55,5 @@ func boardTeamHeader(f board.Flow) string {
 	if blocked > 0 {
 		b = fmt.Sprintf("%d blocked", blocked)
 	}
-	return fmt.Sprintf("showing team · %s · %s · keys s p a f t", plural(members, "member"), b)
+	return fmt.Sprintf("showing team · %s · %s · keys s p a f t P", plural(members, "member"), b)
 }

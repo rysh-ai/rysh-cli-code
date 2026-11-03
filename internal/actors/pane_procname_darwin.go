@@ -7,6 +7,7 @@ package actors
 import (
 	"bytes"
 	"encoding/binary"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -80,4 +81,37 @@ func processExecArgs(pid int) (string, []string) {
 		rest = rest[end+1:]
 	}
 	return exe, argv
+}
+
+// proc_info(2) call and flavor for proc_pidpath(3), from <sys/proc_info.h>.
+const (
+	procInfoCallPidinfo = 2
+	procPidPathInfo     = 11
+	procPidPathMaxSize  = 4 * 1024 // PROC_PIDPATHINFO_MAXSIZE, 4*MAXPATHLEN
+)
+
+// processRealExe returns the real executable of a pid, as proc_pidpath(3)
+// reports it: the file the kernel actually exec'd, with symlinks resolved. It
+// is the one process attribute the launcher cannot choose. That is unlike
+// p_comm and kern.procargs2, which carry argv[0] and the path as invoked.
+//
+// proc_pidpath is a libproc wrapper around the proc_info syscall, called here
+// directly so the build stays CGO_ENABLED=0. Any error, including EPERM for
+// another user's process, yields "", which IdentifyCLI treats as unknown.
+func processRealExe(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	buf := make([]byte, procPidPathMaxSize)
+	//nolint:staticcheck // SA1019: the libproc wrapper needs cgo and this build is CGO_ENABLED=0 (see the doc above)
+	_, _, errno := unix.Syscall6(unix.SYS_PROC_INFO, procInfoCallPidinfo, uintptr(pid),
+		procPidPathInfo, 0, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	if errno != 0 {
+		return ""
+	}
+	n := bytes.IndexByte(buf, 0)
+	if n <= 0 {
+		return ""
+	}
+	return string(buf[:n])
 }

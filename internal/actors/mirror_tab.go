@@ -76,6 +76,36 @@ type mirrorTab struct {
 	// the subscriber is actively viewing — the full-rate tier), tracked separately
 	// so a focus change with an unchanged visible set still re-announces.
 	lastFocus []string
+	// host is the ssh alias of a remote-host tab (##remote add, design 070);
+	// empty for an upstream share mirror. A host tab's listenerPID is the
+	// host's RemoteHostActor, shared by all of that host's tabs and owned by
+	// the workspace's remoteHosts entry — removing one tab never stops it.
+	host string
+	// hostState / hostNote mirror the host's connection state and last
+	// problem (e.g. input not delivered) so the tab title can show them.
+	hostState string
+	hostNote  string
+}
+
+// snapshotTitle is the tab title the snapshot shows: a share mirror is
+// "📡 <name>"; a remote-host tab names its host and, when it is not live, its
+// state and last problem.
+func (mt *mirrorTab) snapshotTitle() string {
+	if mt.host == "" {
+		return "📡 " + mt.displayName()
+	}
+	t := "⇄ " + mt.host + ": " + mt.displayName()
+	if mt.hostState != "" && mt.hostState != remoteStateConnected {
+		t += " [" + mt.hostState + "]"
+	}
+	if mt.hostNote != "" {
+		note := mt.hostNote
+		if r := []rune(note); len(r) > 48 {
+			note = string(r[:47]) + "…"
+		}
+		t += " ⚠ " + note
+	}
+	return t
 }
 
 // mirrorVTKeyframeInterval is the longest gap between keyframes on the pushed VT

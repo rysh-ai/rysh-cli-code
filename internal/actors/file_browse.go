@@ -21,6 +21,7 @@ import (
 
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
+	"github.com/rysh-ai/rysh-cli-code/internal/policy"
 )
 
 // File-browse responder.
@@ -352,6 +353,10 @@ func fsListCore(root, abs, relPath, requestID string) (fsListReply, string, stri
 		if err != nil {
 			continue
 		}
+		// Entries the fs: rules deny are left out (design 068).
+		if policy.ActiveFS().Check(filepath.Join(abs, de.Name()), policy.FSRead) != nil {
+			continue
+		}
 		e := fsEntry{
 			Name:    de.Name(),
 			Size:    fi.Size(),
@@ -570,6 +575,15 @@ func resolveSandboxedPath(root, reqPath string, allowAbsolute bool) (abs, rel, e
 	// Re-check after symlink resolution: catches symlinks whose target leaves root.
 	if !allowAbsolute && !withinRoot(realRoot, realTarget) {
 		return "", "", "denied", "path escapes the shared root"
+	}
+
+	// Policy fs: rules (design 068). Every browse op is a read; the lexical
+	// and the resolved target are both checked, so a symlink named outside a
+	// denied path cannot reach into it, nor a denied name out of it.
+	for _, p := range []string{target, realTarget} {
+		if err := policy.CheckFS(p, policy.FSRead); err != nil {
+			return "", "", "denied", err.Error()
+		}
 	}
 
 	rel, err = filepath.Rel(realRoot, realTarget)

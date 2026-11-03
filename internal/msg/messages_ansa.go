@@ -75,6 +75,17 @@ const (
 	// purpose: "I looked and it is not there" and "I could not look" are
 	// different facts, and only one of them means the caller should give up.
 	AnsaErrDirectory = "directory_unavailable"
+	// AnsaErrBadKey — `ansa keys` was given no key, an unknown key name, a bad
+	// repeat count or too many presses. Nothing was sent.
+	AnsaErrBadKey = "bad_key"
+	// AnsaErrNeedsForce — `ansa keys` was asked for a guarded key (enter, tab,
+	// ctrl+c, …: anything that can submit, confirm or signal) without --force.
+	AnsaErrNeedsForce = "needs_force"
+	// AnsaErrAudit — the key send could not be written to the audit log, so
+	// it was not sent. The audit line is the control, not a courtesy.
+	AnsaErrAudit = "audit_unavailable"
+	// AnsaErrBadMinutes — `ansa hung --minutes` is outside 1..1440.
+	AnsaErrBadMinutes = "bad_minutes"
 )
 
 // MsgAnsaRoute is a routing request: deliver Text to the pane named by To.
@@ -154,6 +165,42 @@ type MsgCLIAnsaSend struct {
 	To   string `json:"to"`
 	Mode string `json:"mode,omitempty"`
 	Text string `json:"text"`
+}
+
+// MsgCLIAnsaKeys is `rysh ansa keys`: press named keys in ONE pane.
+//
+// Its own CLI message for the same reasons as MsgCLIAnsaSend: it focuses no
+// pane and echoes into none. Keys travel as NAMES ("esc", "ctrl+c*2") and the
+// daemon maps them to bytes with internal/ansakeys; there is no field for raw
+// bytes or text.
+type MsgCLIAnsaKeys struct {
+	// AsPaneID is the sender, for the audit line. Optional, never inferred.
+	AsPaneID string `json:"as_pane_id,omitempty"`
+	// To is a pane id or @given-name. Exactly one of To and ClaudeSession.
+	To string `json:"to,omitempty"`
+	// ClaudeSession addresses the pane whose claude.session_id meta equals it.
+	ClaudeSession string   `json:"claude_session,omitempty"`
+	Keys          []string `json:"keys"`
+	// Force allows guarded keys (enter, tab, shift+tab, ctrl+<letter> other
+	// than ctrl+u).
+	Force bool `json:"force,omitempty"`
+}
+
+// MsgCLIAnsaHung is `rysh ansa hung`: is the claude in a pane hung?
+//
+// Read-only. The daemon reads each claude transcript's FILE TIME (never its
+// content: founder ruling D-67 (a), 2026-11-01) and the pane's screen for the
+// working marker. Exactly one of To, ClaudeSession and All.
+type MsgCLIAnsaHung struct {
+	// To is a pane id or @given-name.
+	To string `json:"to,omitempty"`
+	// ClaudeSession addresses the pane whose claude.session_id meta equals it.
+	ClaudeSession string `json:"claude_session,omitempty"`
+	// All checks every pane that carries claude.session_id meta.
+	All bool `json:"all,omitempty"`
+	// Minutes is how long the transcript must be unchanged for HUNG; 0 means
+	// the default (10).
+	Minutes int `json:"minutes,omitempty"`
 }
 
 // AnsaInboxSubject is where the router listens. Session-scoped like every other

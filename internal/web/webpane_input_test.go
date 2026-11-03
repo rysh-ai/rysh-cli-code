@@ -82,6 +82,7 @@ func newWebPaneInputServer(t *testing.T, paneID string, srcW, srcH float64) (*Se
 	port := freePort(t)
 	s := NewServer(port, "wpi-session", pub, nc, pub.Codecs())
 	s.SetHost("127.0.0.1")
+	s.SetControl(true) // the open posture: the desktop app's own loopback daemon
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

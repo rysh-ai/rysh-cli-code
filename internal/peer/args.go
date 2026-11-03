@@ -17,15 +17,21 @@ peer post [--id <uuid>] [--board <name>] [--json] -- <text>
 peer reply <root-id> [--id <uuid>] [--board <name>] [--json] -- <text>
 peer tail [--after <sequence>] [--limit 1..200] [--board <name>] [--json]
 rysh peer watch [--after <sequence>] [--board <name>] [--json]
+peer publish [<local-board> [--all]] | unpublish <local-board>
 Native CLI: --session <name>, --as <pane-id> (defaults to RYSH_SESSION/RYSH_PANE).
 The key is read from the named rysh secret, or an environment variable of that name.
-Peer messages are shared workspace data; they never execute commands.`
+Peer messages are shared workspace data; they never execute commands.
+publish is an explicit opt-in per local board: from then on its status posts
+(--all: every kind) are sent as text; unpublish stops it at once.`
 
 type Args struct {
 	Verb, URL, KeySecret, Workspace, Board, ID, Thread, Text string
 	After                                                    *int64
 	Limit                                                    int
 	JSON                                                     bool
+	// LocalBoard and All are publish/unpublish's local board and kinds (N3).
+	LocalBoard string
+	All        bool
 }
 
 func Parse(args []string) (Args, error) {
@@ -52,6 +58,10 @@ func Parse(args []string) (Args, error) {
 		allowed["--board"] = true
 		allowed["--json"] = true
 	case "disconnect":
+	case "publish":
+		allowed["--all"] = true
+		allowed["--json"] = true
+	case "unpublish":
 	default:
 		return p, fmt.Errorf("unknown peer command %q\n%s", p.Verb, Usage)
 	}
@@ -73,6 +83,10 @@ func Parse(args []string) (Args, error) {
 		seen[a] = true
 		if a == "--json" {
 			p.JSON = true
+			continue
+		}
+		if a == "--all" {
+			p.All = true
 			continue
 		}
 		if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
@@ -139,6 +153,19 @@ func Parse(args []string) (Args, error) {
 		p.Text = strings.Join(positional, " ")
 		if strings.TrimSpace(p.Text) == "" || len(p.Text) > 16384 {
 			return p, fmt.Errorf("peer message text must be 1–16384 bytes")
+		}
+	case "publish", "unpublish":
+		if len(positional) > 1 || (p.Verb == "unpublish" && len(positional) != 1) {
+			return p, fmt.Errorf("peer %s takes one local board name", p.Verb)
+		}
+		if len(positional) == 1 {
+			p.LocalBoard = positional[0]
+			if !ValidLocalBoard(p.LocalBoard) {
+				return p, fmt.Errorf("local board must be 1–64 letters, digits, '.', '_' or '-', starting with a letter or digit")
+			}
+		}
+		if p.All && p.LocalBoard == "" {
+			return p, fmt.Errorf("--all needs a local board")
 		}
 	default:
 		if len(positional) > 0 {

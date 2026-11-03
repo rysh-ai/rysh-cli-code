@@ -26,6 +26,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/bustoken"
 	"github.com/rysh-ai/rysh-cli-code/internal/channels"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 )
@@ -257,7 +258,7 @@ func (s *PluginSupervisor) spawn(ctx context.Context) error {
 		if s.opts.NATSConn == nil {
 			return fmt.Errorf("plugin %q: transport %q requires a session bus connection", s.manifest.Name, TransportNATS)
 		}
-		env = append(env, "RYSH_PLUGIN_NATS_URL="+s.opts.NATSURL)
+		env = append(env, pluginBusEnv(s.opts.NATSURL)...)
 		cmd.Env = env
 		cmd.Stdout = os.Stderr // a nats plugin's stdout is just logging
 		cmd.Stderr = os.Stderr
@@ -542,4 +543,15 @@ func killProcess(cmd *exec.Cmd) {
 func fileExists(path string) bool {
 	st, err := os.Stat(path)
 	return err == nil && !st.IsDir()
+}
+
+// pluginBusEnv is the env a nats-transport plugin gets: the bus URL and, for a
+// loopback bus, the PATH of its token file (gap01 slice 3). The token itself
+// never goes into a child's env.
+func pluginBusEnv(natsURL string) []string {
+	env := []string{"RYSH_PLUGIN_NATS_URL=" + natsURL}
+	if p, ok := bustoken.PathForURL(natsURL); ok {
+		env = append(env, "RYSH_PLUGIN_NATS_TOKEN_FILE="+p)
+	}
+	return env
 }

@@ -178,6 +178,7 @@ type MemberStatus struct {
 
 	// Observed.
 	Activity   string `json:"activity,omitempty"`
+	Attention  string `json:"attention,omitempty"`
 	ActiveAt   int64  `json:"active_at,omitempty"`   // last time seen working
 	ObservedAt int64  `json:"observed_at,omitempty"` // last observation
 	JoinedAt   int64  `json:"joined_at,omitempty"`   // first time the ledger saw this member

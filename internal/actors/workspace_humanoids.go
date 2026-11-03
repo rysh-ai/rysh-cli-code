@@ -1081,7 +1081,7 @@ func (w *WorkspaceActor) humanoidHelp(out *strings.Builder) {
 		"##humanoid attention enable <name>                   enable attention alerts",
 		"##humanoid attention disable <name>                  disable attention alerts",
 		"",
-		"channel types: " + strings.Join(channels.ValidChannelTypes, ", "),
+		"channel types: "+strings.Join(channels.ValidChannelTypes, ", "),
 		"",
 		"skill lookup: bare names resolve to <base>/humanoids/<name>/SKILL.md, where",
 		"  <base> is ./.rysh if a project .rysh exists, else $HOME/.rysh.",

@@ -36,6 +36,32 @@ func SnapshotVia(pub *msg.NATSPublisher, paneID string) (Target, error) {
 	return Target{PaneID: paneID, Program: s.Program, PGID: s.ProgramPGID, Meta: s.Meta}, nil
 }
 
+// NativeIdlePoll is how often WaitNativeIdle asks a busy agent again.
+var NativeIdlePoll = 500 * time.Millisecond
+
+// WaitNativeIdle blocks until the pane's LLM actor reports no run in flight
+// (MsgGetRunStatus on its inbox, the same request `##auto runs` makes), or ctx
+// ends. A pane whose actor does not answer is treated as idle: there is no
+// turn to protect, and the delivery's own retries handle a dead pane.
+func WaitNativeIdle(ctx context.Context, pub *msg.NATSPublisher, paneID string) error {
+	for {
+		reply, err := pub.Request(msg.T("pane", paneID, "llm_prompt_execution", "inbox"),
+			&msg.MsgGetRunStatus{}, snapshotTimeout)
+		if err != nil {
+			return nil
+		}
+		st, ok := reply.(*msg.MsgRunStatusReply)
+		if !ok || !st.InFlight {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(NativeIdlePoll):
+		}
+	}
+}
+
 // Dispatch performs one delivery over a planned route. rysh-native is the only
 // route that touches a pane subject, and it is the pane's prompt INBOX — the
 // same non-PTY door fleetctl's native kickoff uses — never rawinput.

@@ -14,8 +14,9 @@ import (
 // if it cannot be determined. On Unix the master fd answers TIOCGPGRP with the
 // terminal's foreground process group, which equals the shell's pgid when the
 // shell is at its prompt and a child's pgid while a command runs.
-func foregroundPgrp(ptyFile *os.File) int {
-	if ptyFile == nil {
+func foregroundPgrp(t paneTerm) int {
+	ptyFile, ok := t.(*os.File)
+	if !ok || ptyFile == nil {
 		return -1
 	}
 	// SyscallConn, never Fd(): Fd() would switch the pollable PTY master back

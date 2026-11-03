@@ -191,7 +191,10 @@ func (a *AgentBoardListenerActor) Start() {
 	// keeps history ahead of the live tail for that board too.
 	a.ensureBoard(msg.DefaultBoardID)
 
-	sub, err := board.Subscribe(a.nc, a.codecs, board.DefaultBufferSize, a.persistFor)
+	// The fleet board's posts are tagged before they are recorded (design 030
+	// §9.3, W3): never dropped, Unverified unless a door stamped them.
+	sub, err := board.SubscribeTagged(a.nc, a.codecs, board.DefaultBufferSize, a.persistFor,
+		newFleetBoardTagger(a.nc).tag)
 	if err != nil {
 		return
 	}

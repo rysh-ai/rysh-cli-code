@@ -111,6 +111,11 @@ func (w *WorkspaceActor) handleCLIBoardPost(m *msg.MsgCLIBoardPost) *msg.MsgCLIR
 	if err := w.addressBoardPost(post, m); err != nil {
 		return &msg.MsgCLIResponse{OK: false, Error: err.Error()}
 	}
+	// Design 030 §9.3 / D-24 (W3): only a fleet head may post to the fleet
+	// board; the door refuses the rest and stamps what it accepts.
+	if err := w.guardFleetBoardPost(boardID, post); err != nil {
+		return &msg.MsgCLIResponse{OK: false, Error: err.Error()}
+	}
 	if err := msg.SendBoardPost(w.pub, boardID, post); err != nil {
 		return &msg.MsgCLIResponse{OK: false, Error: fmt.Sprintf("publish board post: %v", err)}
 	}
@@ -299,6 +304,12 @@ func (w *WorkspaceActor) handleBoardCommand(out *strings.Builder, paneID string,
 		w.openAgentsBoardPane(out, paneID, boardID)
 		return nil
 
+	case "attach":
+		// Turn an existing idle shell pane into this board's pane (design 030
+		// W5): workspace_board_attach.go, with the pane's own final check in
+		// pane_board_attach.go.
+		return w.attachBoardToPane(out, paneID, boardID, args[1:])
+
 	case "copy":
 		// Messages to the clipboard, unwrapped (workspace_board_copy.go).
 		return w.handleBoardCopy(out, paneID, boardID, args[1:])
@@ -353,6 +364,11 @@ func (w *WorkspaceActor) boardPostFromPane(out *strings.Builder, paneID, boardID
 		kind = msg.BoardKindReply
 	}
 	post := w.buildBoardPost(paneID, kind, text, threadID)
+	if err := w.guardFleetBoardPost(boardID, post); err != nil {
+		w.failRysh("%v", err)
+		fmt.Fprintf(out, "##board: %v\n", err)
+		return err
+	}
 	if err := msg.SendBoardPost(w.pub, boardID, post); err != nil {
 		w.failRysh("publish board post: %v", err)
 		fmt.Fprintf(out, "##board: publish failed: %v\n", err)
@@ -368,6 +384,7 @@ func (w *WorkspaceActor) boardPostFromPane(out *strings.Builder, paneID, boardID
 func (w *WorkspaceActor) boardUsage(out *strings.Builder, why string) error {
 	fmt.Fprintf(out, "%s\n", why)
 	out.WriteString("  ##board open [--board <id>]    open the agents board pane (default board: session)\n")
+	out.WriteString("  ##board attach <pane> [--board <id>]  show the board in an idle shell pane (ends its shell)\n")
 	out.WriteString("  ##board post <text>            post a milestone to the agents board\n")
 	out.WriteString("  ##board reply <thread> <text>  reply under an existing thread\n")
 	writeBoardItemUsage(out)

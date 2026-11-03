@@ -67,7 +67,7 @@ func boardFlowHeader(f board.Flow) string {
 	if s.Blocked > 0 {
 		blocked = fmt.Sprintf(" · %d blocked", s.Blocked)
 	}
-	return fmt.Sprintf("showing flow · %s%s · %s (%d answered · %d undelivered · %d open) · %d status · keys s p a f t",
+	return fmt.Sprintf("showing flow · %s%s · %s (%d answered · %d undelivered · %d open) · %d status · keys s p a f t P",
 		plural(s.Panes, "pane"), blocked, plural(s.Prompts, "prompt"), s.Answered, s.Undelivered, s.Open, s.Status)
 }
 

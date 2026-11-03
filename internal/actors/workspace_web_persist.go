@@ -195,6 +195,9 @@ func (w *WorkspaceActor) recordWebMeta(srv *web.Server) {
 		Port: srv.Port(),
 		Host: srv.Host(),
 		User: srv.LoginUsername(),
+		// Where the app finds the secret of a control door this server opened
+		// for itself; "" when the app handed it one. A path, never the secret.
+		ControlSecretFile: srv.ControlSecretFile(),
 	}
 	if w.webTunnel != nil {
 		meta.PublicURL = w.webTunnel.URL

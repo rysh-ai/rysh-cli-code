@@ -318,7 +318,8 @@ func elevenLabsTranscribe(ctx context.Context, key, endpoint string, audio <-cha
 						// Wait briefly for the last committed transcript.
 						select {
 						case <-committed:
-						case <-readErr:
+						case err := <-readErr:
+							_ = err // the stream ended: no last transcript is coming; decodeErr below is the answer
 						case <-time.After(3 * time.Second):
 						}
 					}
@@ -456,10 +457,10 @@ func speechLangError(tts, stt, lang string, room bool) error {
 		return nil
 	}
 	if tts == ProviderDeepgram {
-		return fmt.Errorf("Deepgram voices here speak English; for --lang %s use --tts elevenlabs (or openai)", lang)
+		return fmt.Errorf("--tts deepgram: Deepgram voices here speak English; for --lang %s use --tts elevenlabs (or openai)", lang)
 	}
 	if room && stt == ProviderDeepgram && kurdish(lang) {
-		return errors.New("Deepgram does not transcribe Kurdish; use --stt elevenlabs")
+		return errors.New("--stt deepgram: Deepgram does not transcribe Kurdish; use --stt elevenlabs")
 	}
 	return nil
 }

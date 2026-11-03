@@ -9,8 +9,9 @@
 // Index interface.
 //
 // S1 (E25 T6) is the in-memory index, the markdown chunker and the Embedder
-// seam. Nothing calls it yet: persistence, a real embedder, the IndexerActor
-// and `context action: search` are later slices.
+// seam; S2 (persist.go) saves and loads it as one crash-safe, format-versioned
+// file. Nothing calls it yet: a real embedder, the IndexerActor and
+// `context action: search` are later slices.
 package vecindex
 
 import (

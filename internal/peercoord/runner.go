@@ -260,7 +260,7 @@ func RunnerArgs(spec RunnerSpec, conversation, prompt string) ([]string, io.Read
 			args = append(args, "-c", "sandbox_mode=\"workspace-write\"", "-c", "sandbox_workspace_write.network_access=true")
 		} else {
 			if !filepath.IsAbs(spec.Socket) || filepath.Clean(spec.Socket) == string(filepath.Separator) {
-				return nil, nil, fmt.Errorf("Codex review requires an absolute peer control socket")
+				return nil, nil, fmt.Errorf("codex review requires an absolute peer control socket")
 			}
 			// Read-only Codex otherwise denies the AF_UNIX connection to the
 			// local listener. Permit only this capability-checked socket, with

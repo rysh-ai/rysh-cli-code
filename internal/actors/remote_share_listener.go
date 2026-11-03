@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/asynkron/protoactor-go/actor"
@@ -43,6 +44,12 @@ type RemoteShareListenerActor struct {
 	localInvokeSub *nats.Subscription // local responder bridging a pane proxy's invoke to the upstream (phase 2b)
 	connected      bool
 	stopRetry      chan struct{}
+	// readOnlyKey is set when the upstream refused this connection's key as
+	// read-only (read_only_key.go): commands are no longer sent. Read from NATS
+	// callback goroutines too, hence atomic; cleared on every (re)connect, since
+	// a member's role change closes their bus sessions and the redial may have
+	// write access.
+	readOnlyKey atomic.Bool
 
 	remoteVTerm   *vterm.VTerm // VTerm sized per effectiveVTermDims (source dims in view mode, owner dims in control mode)
 	isInteractive bool         // source pane is in interactive mode
@@ -384,7 +391,9 @@ func (r *RemoteShareListenerActor) connectRemote() {
 			slog.Warn("remote-share-listener: disconnected",
 				"share", r.shareID, "pane", r.ownerPaneID, "err", err)
 		}),
+		readOnlyKeyErrorHandler("remote-share-listener", r.noteReadOnlyKey),
 		nats.ReconnectHandler(func(_ *nats.Conn) {
+			r.readOnlyKey.Store(false)
 			// Signal the actor thread to update state.
 			if r.selfPID != nil && r.actorSystem != nil {
 				r.actorSystem.Root.Send(r.selfPID, &msg.MsgUpstreamReconnected{})
@@ -414,6 +423,7 @@ func (r *RemoteShareListenerActor) connectRemote() {
 	}
 	opts = append(opts, nats.ReconnectWait(reconnectInterval))
 
+	r.readOnlyKey.Store(false)
 	nc, err := nats.Connect(wsURL, opts...)
 	if err != nil {
 		slog.Error("remote-share-listener: connect failed",
@@ -540,6 +550,10 @@ func (r *RemoteShareListenerActor) bridgeInvoke(m *nats.Msg) {
 	}
 	if r.remoteNC == nil || !r.connected {
 		respondErr(sharedtools.ErrKindTransient, "remote share %s is not connected", shortID(r.shareID))
+		return
+	}
+	if r.readOnlyKey.Load() {
+		respondErr(sharedtools.ErrKindPermissionDenied, "remote share %s: the upstream key is read-only; operations cannot be invoked", shortID(r.shareID))
 		return
 	}
 	// m.Data is the msg.ForgedInvokeRequest JSON; pass it through verbatim as the
@@ -721,12 +735,32 @@ func (r *RemoteShareListenerActor) publishSubscriberJoin() {
 	_ = r.remoteNC.Flush()
 }
 
+// noteReadOnlyKey runs (on a nats.go callback goroutine) when the upstream
+// refused one of this viewer's publishes as read-only: the first refusal on a
+// connection prints one notice in the pane, and sendCommand stops sending.
+func (r *RemoteShareListenerActor) noteReadOnlyKey() {
+	if !r.readOnlyKey.CompareAndSwap(false, true) {
+		return
+	}
+	slog.Warn("remote-share-listener: upstream key is read-only; input is not sent",
+		"share", r.shareID, "pane", r.ownerPaneID)
+	if r.pub != nil {
+		_ = r.pub.SendPaneRyshOutput(r.ownerPaneID,
+			fmt.Sprintf("[rysh] remote share %s: read-only key: input is not sent (watching only)\n", shortID(r.shareID)))
+	}
+}
+
 // sendCommand publishes a command to the share command topic on the remote NATS
 // server. This is only valid in "control" mode.
 func (r *RemoteShareListenerActor) sendCommand(commandType, payload string) {
 	if r.remoteNC == nil || !r.connected {
 		slog.Warn("remote-share-listener: cannot send command, not connected",
 			"share", r.shareID, "pane", r.ownerPaneID)
+		return
+	}
+	if r.readOnlyKey.Load() {
+		slog.Debug("remote-share-listener: command not sent (read-only key)",
+			"share", r.shareID, "type", commandType)
 		return
 	}
 

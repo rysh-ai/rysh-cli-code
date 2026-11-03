@@ -4,6 +4,7 @@ package actors
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
@@ -207,6 +208,97 @@ func (w *WorkspaceActor) handleCLIAnsaSend(m *msg.MsgCLIAnsaSend) *msg.MsgCLIRes
 	}
 }
 
+// handleCLIAnsaKeys is `rysh ansa keys`, the agent door: focuses nothing,
+// echoes into no pane.
+func (w *WorkspaceActor) handleCLIAnsaKeys(m *msg.MsgCLIAnsaKeys) *msg.MsgCLIResponse {
+	if m == nil {
+		return &msg.MsgCLIResponse{OK: false, Error: "empty ansa keys request"}
+	}
+	out := ansaKeysAtEdge(w.ansaRouterFor(), ansaKeysRequest{
+		Door:          "cli",
+		From:          m.AsPaneID,
+		To:            m.To,
+		ClaudeSession: m.ClaudeSession,
+		Keys:          m.Keys,
+		Force:         m.Force,
+	}, w.appendAnsaKeysAudit)
+	if !out.Result.OK {
+		line := ansaRefusalLine(out.Result)
+		for _, id := range out.Result.Candidates {
+			line += "\n    " + id
+		}
+		return &msg.MsgCLIResponse{OK: false, Error: line}
+	}
+	return &msg.MsgCLIResponse{OK: true, ID: out.Result.TargetPaneID, Output: ansaKeysReceipt(out)}
+}
+
+// handleCLIAnsaHung is `rysh ansa hung`: read-only, so no audit line.
+func (w *WorkspaceActor) handleCLIAnsaHung(m *msg.MsgCLIAnsaHung) *msg.MsgCLIResponse {
+	if m == nil {
+		return &msg.MsgCLIResponse{OK: false, Error: "empty ansa hung request"}
+	}
+	req := ansaHungRequest{To: m.To, ClaudeSession: m.ClaudeSession, All: m.All, Minutes: m.Minutes}
+	rows, res := ansaHungCheck(w.ansaRouterFor().tr, req, ansaHungEnvNow())
+	if res != nil {
+		line := ansaRefusalLine(res)
+		for _, id := range res.Candidates {
+			line += "\n    " + id
+		}
+		return &msg.MsgCLIResponse{OK: false, Error: line}
+	}
+	return &msg.MsgCLIResponse{OK: true, Output: ansaHungReport(rows, m.Minutes)}
+}
+
+// ansaHungFromPane is `##ansa hung`, typed by a human.
+func (w *WorkspaceActor) ansaHungFromPane(out *strings.Builder, args []string) error {
+	req, err := parseAnsaHungArgs(args)
+	if err != nil {
+		return w.ansaUsage(out, "##ansa hung: "+err.Error())
+	}
+	rows, res := ansaHungCheck(w.ansaRouterFor().tr, req, ansaHungEnvNow())
+	if res != nil {
+		fmt.Fprintf(out, "##ansa: %s\n", ansaRefusalLine(res))
+		for _, id := range res.Candidates {
+			fmt.Fprintf(out, "    %s\n", id)
+		}
+		w.failRysh("%s", ansaRefusalLine(res))
+		return fmt.Errorf("%s", ansaRefusalLine(res))
+	}
+	out.WriteString(ansaHungReport(rows, req.Minutes))
+	return nil
+}
+
+// ansaKeysFromPane is `##ansa keys`, typed by a human; the sender is the pane
+// the line was typed in.
+func (w *WorkspaceActor) ansaKeysFromPane(out *strings.Builder, paneID string, args []string) error {
+	req, err := parseAnsaKeysArgs(args)
+	if err != nil {
+		return w.ansaUsage(out, "##ansa keys: "+err.Error())
+	}
+	req.Door = "##"
+	req.From = paneID
+	res := ansaKeysAtEdge(w.ansaRouterFor(), req, w.appendAnsaKeysAudit)
+	if !res.Result.OK {
+		fmt.Fprintf(out, "##ansa: %s\n", ansaRefusalLine(res.Result))
+		for _, id := range res.Result.Candidates {
+			fmt.Fprintf(out, "    %s\n", id)
+		}
+		w.failRysh("%s", ansaRefusalLine(res.Result))
+		return fmt.Errorf("%s", ansaRefusalLine(res.Result))
+	}
+	out.WriteString(ansaKeysReceipt(res))
+	return nil
+}
+
+// appendAnsaKeysAudit writes to <session dir>/<session>/ansa-keys-audit.jsonl.
+func (w *WorkspaceActor) appendAnsaKeysAudit(e ansaKeysAuditEntry) error {
+	path := ""
+	if w.cfg.SessionDir != "" {
+		path = filepath.Join(w.cfg.SessionDir, w.cfg.SessionName, ansaKeysAuditFile)
+	}
+	return appendAnsaKeysAudit(path, e)
+}
+
 // ansaRefusalLine renders a refusal for a human or a log, code included. The
 // code is kept in the text as well as in the typed result because the CLI
 // response only carries a string — a caller reading stderr must still be able
@@ -264,6 +356,16 @@ func (w *WorkspaceActor) handleAnsaCommand(out *strings.Builder, paneID string, 
 	case "interrupt":
 		// ##ansa interrupt <@name|pane-id> | --fleet
 		return w.ansaInterrupt(out, args[1:])
+
+	case "keys":
+		// ##ansa keys <@name|pane-id> | --claude-session <id> [--force] <key>...
+		// — press named keys in ONE pane. See ansa_keys.go for the guard.
+		return w.ansaKeysFromPane(out, paneID, args[1:])
+
+	case "hung":
+		// ##ansa hung <@name|pane-id> | --claude-session <id> | --all
+		// [--minutes N] — read-only; see ansa_hung.go.
+		return w.ansaHungFromPane(out, args[1:])
 
 	case "kill":
 		// ##ansa kill --fleet <name> | --all-fleets — the HARD stop: signal
@@ -425,6 +527,7 @@ func (w *WorkspaceActor) ansaInterruptFleet(out *strings.Builder, fleet string) 
 		}
 		fmt.Fprintf(out, "  %s  %s  %s [%s]\n", ansaDrainLabel(o.Drain), o.PaneID, o.Persona, o.Role)
 	}
+	out.WriteString(ansaDrainLabelNote)
 	// Say what was sent, not what was interrupted. Nothing acknowledges a raw
 	// key, so "interrupted 12 agents" would be a claim this code cannot make.
 	//
@@ -640,6 +743,17 @@ func (w *WorkspaceActor) ansaUsage(out *strings.Builder, why string) error {
 	out.WriteString("  ##ansa interrupt --all-fleets         same, for every pane carrying fleet.role meta,\n")
 	out.WriteString("                                        in every fleet; panes without it are spared\n")
 	out.WriteString("                                        by construction\n")
+	out.WriteString("  ##ansa keys <@name|pane-id> <key>...  press named keys in ONE pane, e.g. esc,\n")
+	out.WriteString("                                        esc*2, up, ctrl+u; enter/tab/ctrl+c and other\n")
+	out.WriteString("                                        keys that submit or signal need --force\n")
+	out.WriteString("  ##ansa keys --claude-session <id> <key>...  same, addressed by claude.session_id\n")
+	out.WriteString("                                        every send is logged (key names, never text) to\n")
+	out.WriteString("                                        <session dir>/<session>/" + ansaKeysAuditFile + "\n")
+	out.WriteString("  ##ansa hung <@name|pane-id>|--all [--minutes N]  is the claude hung? HUNG = working\n")
+	out.WriteString("                                        marker on screen + transcript file unchanged\n")
+	out.WriteString("                                        N min (default 10); reads file times and the\n")
+	out.WriteString("                                        screen only, never transcript content\n")
+	out.WriteString("  ##ansa hung --claude-session <id>     same, addressed by claude.session_id\n")
 	out.WriteString("  ##ansa kill --fleet <name>|--all-fleets    HARD stop: signal each fleet pane's claude\n")
 	out.WriteString("                                        and VERIFY dead by process state — nothing\n")
 	out.WriteString("                                        can re-wake a dead process (F-41); sessions\n")
@@ -652,8 +766,9 @@ func (w *WorkspaceActor) ansaUsage(out *strings.Builder, why string) error {
 
 // ansaDrainLabel says, per pane, what the drained stop actually achieved.
 //
-// Four states and they are not collapsible. "stopped" means a screen was read
-// and showed no work. "unread" means the pane never answered, so nothing is
+// Four states and they are not collapsible. "stopped*" means a screen was read
+// and showed no work — and the * says that is a reading, not a proof that the
+// queue is empty (F-32; ansaDrainLabelNote explains it on the receipt). "unread" means the pane never answered, so nothing is
 // known — reporting that as stopped is the receipt-without-delivery this whole
 // track exists to kill. "+N" records how many extra interrupts the queue cost,
 // which is the only visible evidence that a queue existed at all.
@@ -669,10 +784,10 @@ func ansaDrainLabel(d ansaDrainOutcome) string {
 		// it down again. The headline is the wake, not the drain arithmetic:
 		// this is the pane an operator must expect to wake AGAIN if it still
 		// holds a pending task.
-		return fmt.Sprintf("rewoke+%d", d.Rewoke)
+		return fmt.Sprintf("rewoke+%d*", d.Rewoke)
 	case d.Rounds == 0:
-		return "stopped"
+		return "stopped*"
 	default:
-		return fmt.Sprintf("drained+%d", d.Rounds)
+		return fmt.Sprintf("drained+%d*", d.Rounds)
 	}
 }

@@ -1,0 +1,33 @@
+rysh import tmux — preview (nothing is written without --apply)
+  from: testdata/tmuxinator
+
+Layout: 4 tab(s), 6 lane(s), 7 pane(s)
+  tab 1 "editor"
+    lane 1
+      pane 1  cwd: $HOME/code/blog
+              start: nvm use 20; vim
+    lane 2
+      pane 1  cwd: $HOME/code/blog
+              start: nvm use 20; guard
+      pane 2  cwd: $HOME/code/blog
+              start: nvm use 20; cd log; tail -f development.log
+  tab 2 "server"
+    lane 1
+      pane 1  cwd: $HOME/code/blog
+              start: nvm use 20; bundle exec rails s
+  tab 3 "deploy"
+    lane 1
+      pane 1  cwd: $HOME/code/blog-infra
+              start: nvm use 20; terraform plan
+    lane 2
+      pane 1  cwd: $HOME/code/blog-infra
+              start: nvm use 20
+  tab 4 "shell"
+    lane 1
+      pane 1  cwd: $HOME/code/blog
+              start: nvm use 20
+  Start commands are not run now: they run when you run the generated script.
+
+With --apply this writes (after backing up what it replaces):
+  .rysh/imports/tmux-blog.rysh
+Undo with: rysh import --undo

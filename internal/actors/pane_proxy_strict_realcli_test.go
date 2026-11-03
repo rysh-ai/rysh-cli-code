@@ -725,7 +725,7 @@ func TestStrictStopsAnUnknownLongRunningProgram(t *testing.T) {
 func TestStrictNamesAVersionNamedClaudeByItsRealName(t *testing.T) {
 	const version = "9.9.999"
 	root := t.TempDir()
-	versions := filepath.Join(root, "share", "claude", "versions")
+	versions := filepath.Join(root, ".local", "share", "claude", "versions")
 	binDir := filepath.Join(root, "bin")
 	for _, d := range []string{versions, binDir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -734,6 +734,10 @@ func TestStrictNamesAVersionNamedClaudeByItsRealName(t *testing.T) {
 	}
 	real := filepath.Join(versions, version)
 	buildSleeper(t, real)
+	// HOME is the fake home, so the layout sits at the native installer's known
+	// install location, ~/.local/share/claude/versions (WO-7). It is set after
+	// the stand-in is built, so the build keeps the real Go cache.
+	t.Setenv("HOME", root)
 	if err := os.Symlink(real, filepath.Join(binDir, "claude")); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}

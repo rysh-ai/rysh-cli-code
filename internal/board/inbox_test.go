@@ -122,7 +122,7 @@ func TestCmdIDHelpers(t *testing.T) {
 	if err := msg.ValidateCmdID(id); err != nil {
 		t.Fatalf("minted id %q does not validate: %v", id, err)
 	}
-	if msg.MintCmdID(1) == msg.MintCmdID(1) {
+	if a, b := msg.MintCmdID(1), msg.MintCmdID(1); a == b {
 		t.Error("two ids minted in the same millisecond collided")
 	}
 	for _, bad := range []string{"", "-x", "a b", "a/b", string(make([]byte, 65))} {

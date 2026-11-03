@@ -26,6 +26,9 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "exec-clean" {
 		os.Exit(agentenv.Main(os.Args[2:], os.Environ(), os.Stdout, os.Stderr, agentenv.SysExec))
 	}
+	// No test reads or writes the real $HOME/.rysh/claude-account; the account
+	// tests point claudeAccountHome at a temp dir.
+	claudeAccountHome = func() string { return "" }
 	os.Exit(m.Run())
 }
 

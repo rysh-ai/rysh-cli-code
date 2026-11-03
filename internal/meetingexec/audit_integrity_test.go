@@ -33,6 +33,8 @@ import (
 	"github.com/rysh-ai/rysh-cli-shared/msg"
 	"github.com/rysh-ai/rysh-cli-shared/provider"
 	"github.com/rysh-ai/rysh-cli-shared/tools"
+
+	clitools "github.com/rysh-ai/rysh-cli-code/internal/tools"
 )
 
 // assertAuditInvariant: each tool that ran (runs) has exactly one "started"
@@ -167,6 +169,11 @@ func relayRunWith(t *testing.T, holdOf string, holdFn func(*msg.MsgAgenticStep) 
 		Build: func(id string) *sharedagentic.LLMPromptExecutionActor {
 			reg := tools.NewToolRegistry()
 			reg.Register("bash", tool)
+			// As production: a meeting agent's registry (CreateAgentLLMPromptExecutionActor,
+			// a child of the global registry) offers sub_agent. Since design 093 H1
+			// round 2 (e20 C-1) the orchestrator intercepts sub_agent only when the
+			// run's registry offers it, so the fixture must offer it like prod does.
+			reg.Register("sub_agent", clitools.NewSubAgentTool())
 			return sharedagentic.NewLLMPromptExecutionActor(id, 8, pubA, a, prov, reg, "You are Scribe.", "", "", nil)
 		},
 		NC:     b,

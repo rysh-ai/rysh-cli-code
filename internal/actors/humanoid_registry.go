@@ -366,17 +366,25 @@ func (r *HumanoidRegistryActor) getHumanoidInfos() []msg.HumanoidInfo {
 
 		// Build channel statuses from the entry's contacts.
 		channelStatuses := make([]msg.ChannelStatus, 0, len(entry.contacts))
-		for channelType := range entry.contacts {
+		for channelType, cc := range entry.contacts {
+			// The configured mode, restrictive-wins across both spellings
+			// (emailGovernanceFrom reads any channel's block the same way).
+			gov := emailGovernanceFrom(cc)
+			if gov == "" {
+				gov = "ai"
+			}
 			if st, ok := entry.channelStatus[channelType]; ok {
+				st.Governance = gov
 				channelStatuses = append(channelStatuses, st)
 				continue
 			}
 			// Nothing reported yet — say so rather than inferring connectivity
 			// from whether the humanoid is active, which is a different fact.
 			channelStatuses = append(channelStatuses, msg.ChannelStatus{
-				Type:      channelType,
-				Connected: false,
-				Details:   "not started",
+				Type:       channelType,
+				Connected:  false,
+				Details:    "not started",
+				Governance: gov,
 			})
 		}
 

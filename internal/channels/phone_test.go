@@ -64,6 +64,12 @@ func postForm(p *PhoneAdapter, form url.Values, signature string) *httptest.Resp
 	return rec
 }
 
+// postSigned posts form signed the way Twilio would sign it for p's config
+// (webhook_url + auth_token). Every inbound POST must be signed (E25).
+func postSigned(p *PhoneAdapter, form url.Values) *httptest.ResponseRecorder {
+	return postForm(p, form, signTwilio(p.config.WebhookURL, form, p.config.AuthToken))
+}
+
 // signTwilio produces the signature Twilio would send for this body.
 func signTwilio(publicURL string, form url.Values, authToken string) string {
 	mac := hmac.New(sha1.New, []byte(authToken))
@@ -127,9 +133,9 @@ func TestPhoneStartRequiresCredentials(t *testing.T) {
 
 func TestPhoneInboundWebhookReachesTheHumanoid(t *testing.T) {
 	t.Chdir(t.TempDir())
-	p := NewPhoneAdapter(phoneCfg())
+	p := NewPhoneAdapter(signedPhoneCfg())
 
-	rec := postForm(p, inboundForm("SM1", "+15550142", "what is rysh?"), "")
+	rec := postSigned(p, inboundForm("SM1", "+15550142", "what is rysh?"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("webhook status = %d, want 200", rec.Code)
 	}
@@ -170,11 +176,11 @@ func TestPhoneInboundWebhookReachesTheHumanoid(t *testing.T) {
 // — the same customer-visible failure the WhatsApp relay hit.
 func TestPhoneInboundDedupesRetriedWebhook(t *testing.T) {
 	t.Chdir(t.TempDir())
-	p := NewPhoneAdapter(phoneCfg())
+	p := NewPhoneAdapter(signedPhoneCfg())
 
 	form := inboundForm("SM-dup", "+15550142", "hello")
-	postForm(p, form, "")
-	postForm(p, form, "")
+	postSigned(p, form)
+	postSigned(p, form)
 
 	if got := drainPhone(p); len(got) != 1 {
 		t.Fatalf("humanoid received %d copies of one message, want 1", len(got))
@@ -189,15 +195,15 @@ func TestPhoneInboundDedupesRetriedWebhook(t *testing.T) {
 func TestPhoneDedupeSurvivesRestart(t *testing.T) {
 	t.Chdir(t.TempDir())
 
-	first := NewPhoneAdapter(phoneCfg())
+	first := NewPhoneAdapter(signedPhoneCfg())
 	form := inboundForm("SM-answered", "+15550142", "already handled")
-	postForm(first, form, "")
+	postSigned(first, form)
 	if got := drainPhone(first); len(got) != 1 {
 		t.Fatalf("setup: first run received %d, want 1", len(got))
 	}
 
-	second := NewPhoneAdapter(phoneCfg())
-	postForm(second, form, "")
+	second := NewPhoneAdapter(signedPhoneCfg())
+	postSigned(second, form)
 	if got := drainPhone(second); len(got) != 0 {
 		t.Fatalf("after restart the retried webhook was answered again (%d dispatches)", len(got))
 	}
@@ -269,14 +275,14 @@ func TestPhoneStatusCallbackIsNotAConversation(t *testing.T) {
 
 func TestPhoneFailedDeliverySurfacesInStatus(t *testing.T) {
 	t.Chdir(t.TempDir())
-	p := NewPhoneAdapter(phoneCfg())
+	p := NewPhoneAdapter(signedPhoneCfg())
 
-	postForm(p, url.Values{
+	postSigned(p, url.Values{
 		"MessageSid":    {"SMout2"},
 		"MessageStatus": {"undelivered"},
 		"To":            {"+15550142"},
 		"ErrorCode":     {"21610"},
-	}, "")
+	})
 
 	st := p.Status()
 	if !strings.Contains(st.Details, "21610") {
@@ -293,14 +299,14 @@ func TestPhoneFailedDeliverySurfacesInStatus(t *testing.T) {
 // answered with silence, and must never become a message.
 func TestPhoneVoiceCallIsRejectedNotAnswered(t *testing.T) {
 	t.Chdir(t.TempDir())
-	p := NewPhoneAdapter(phoneCfg())
+	p := NewPhoneAdapter(signedPhoneCfg())
 
-	rec := postForm(p, url.Values{
+	rec := postSigned(p, url.Values{
 		"CallSid":    {"CA123"},
 		"From":       {"+15550142"},
 		"To":         {"+15550100"},
 		"CallStatus": {"ringing"},
-	}, "")
+	})
 
 	if !strings.Contains(rec.Body.String(), "<Reject/>") {
 		t.Errorf("a voice call should be rejected explicitly, got %q", rec.Body.String())
@@ -314,11 +320,11 @@ func TestPhoneVoiceCallIsRejectedNotAnswered(t *testing.T) {
 // silently vanished would have it answer as though it had seen one.
 func TestPhoneMMSDisclosesUndownloadedMedia(t *testing.T) {
 	t.Chdir(t.TempDir())
-	p := NewPhoneAdapter(phoneCfg())
+	p := NewPhoneAdapter(signedPhoneCfg())
 
 	form := inboundForm("SM-mms", "+15550142", "look at this")
 	form.Set("NumMedia", "2")
-	postForm(p, form, "")
+	postSigned(p, form)
 
 	got := drainPhone(p)
 	if len(got) != 1 {
@@ -335,9 +341,9 @@ func TestPhoneMMSDisclosesUndownloadedMedia(t *testing.T) {
 // A webhook with neither body nor media carries nothing to answer.
 func TestPhoneIgnoresEmptyInbound(t *testing.T) {
 	t.Chdir(t.TempDir())
-	p := NewPhoneAdapter(phoneCfg())
+	p := NewPhoneAdapter(signedPhoneCfg())
 
-	postForm(p, url.Values{"MessageSid": {"SM-empty"}, "From": {"+15550142"}, "Body": {""}}, "")
+	postSigned(p, url.Values{"MessageSid": {"SM-empty"}, "From": {"+15550142"}, "Body": {""}})
 	if got := drainPhone(p); len(got) != 0 {
 		t.Fatalf("an empty message was forwarded (%d)", len(got))
 	}
@@ -361,7 +367,7 @@ func TestPhoneValidateChecksCredentialsWithoutBinding(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ok := NewPhoneAdapter(phoneCfg())
+	ok := NewPhoneAdapter(signedPhoneCfg())
 	ok.baseURL = srv.URL
 	if err := ok.Validate(context.Background()); err != nil {
 		t.Errorf("valid credentials should pass, got %v", err)
@@ -372,7 +378,7 @@ func TestPhoneValidateChecksCredentialsWithoutBinding(t *testing.T) {
 		t.Error("Validate must not connect the adapter")
 	}
 
-	bad := phoneCfg()
+	bad := signedPhoneCfg()
 	bad.AuthToken = "wrong"
 	badAdapter := NewPhoneAdapter(bad)
 	badAdapter.baseURL = srv.URL

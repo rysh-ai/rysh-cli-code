@@ -130,7 +130,18 @@ type Subscriber struct {
 // built with msg.T(...) — never literals, because T's prefix is the SESSION
 // NAME and a literal "rysh.board.post" breaks the moment a session is called
 // anything else (rysh-shared/msg/topics.go).
+// TagFunc may adjust a post before it is recorded and delivered. The fleet
+// board's recorder uses it to set or clear MsgBoardPost.Unverified (design
+// 030 §9.3, W3). It runs on the subscription goroutine.
+type TagFunc func(board string, p *msg.MsgBoardPost)
+
 func Subscribe(nc *nats.Conn, codecs *msg.CodecRegistry, buf int, persist PersistenceFor) (*Subscriber, error) {
+	return SubscribeTagged(nc, codecs, buf, persist, nil)
+}
+
+// SubscribeTagged is Subscribe with a TagFunc applied to every post before
+// it is persisted and pushed. A nil tag is Subscribe.
+func SubscribeTagged(nc *nats.Conn, codecs *msg.CodecRegistry, buf int, persist PersistenceFor, tag TagFunc) (*Subscriber, error) {
 	if buf <= 0 {
 		buf = DefaultBufferSize
 	}
@@ -163,6 +174,9 @@ func Subscribe(nc *nats.Conn, codecs *msg.CodecRegistry, buf int, persist Persis
 		}
 		if d, ok := decode(n.Data); ok {
 			if p, ok := d.(*msg.MsgBoardPost); ok {
+				if tag != nil {
+					tag(board, p)
+				}
 				// Unconditional: see the note at the top of this file.
 				if err := s.persistFor(board).SavePost(p); err != nil {
 					s.writeErr.Add(1)

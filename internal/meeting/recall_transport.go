@@ -105,7 +105,7 @@ func (t recallTransport) Status(ctx context.Context) (TransportStatus, error) {
 	t.s.mu.Unlock()
 	code, sub, err := t.lastCode(ctx, id)
 	if err != nil {
-		return TransportStatus{}, errors.New("Recall status unavailable; capture paused until connectivity recovers.")
+		return TransportStatus{}, errors.New("status unavailable from Recall; capture paused until connectivity recovers")
 	}
 	switch code {
 	case "":

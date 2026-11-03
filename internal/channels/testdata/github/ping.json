@@ -1,0 +1,6 @@
+{
+  "zen": "Keep it logically awesome.",
+  "hook_id": 1,
+  "repository": {"full_name": "acme/widgets", "html_url": "https://github.com/acme/widgets"},
+  "sender": {"login": "alice", "type": "User"}
+}

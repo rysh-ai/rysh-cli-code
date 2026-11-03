@@ -1,0 +1,21 @@
+{
+  "action": "created",
+  "comment": {
+    "id": 9101,
+    "body": "@example_bot is this off by one?",
+    "path": "uploader/retry.go",
+    "line": 31,
+    "html_url": "https://github.com/acme/widgets/pull/7#discussion_r9101",
+    "user": {"login": "alice", "type": "User"},
+    "author_association": "OWNER"
+  },
+  "pull_request": {
+    "number": 7,
+    "title": "Add retry to the uploader",
+    "html_url": "https://github.com/acme/widgets/pull/7",
+    "head": {"ref": "retry-uploader"},
+    "base": {"ref": "main"}
+  },
+  "repository": {"full_name": "acme/widgets", "html_url": "https://github.com/acme/widgets"},
+  "sender": {"login": "alice", "type": "User"}
+}

@@ -143,6 +143,30 @@ func (f *Flat) remove(source, id string) {
 	f.vecs = f.vecs[:last*f.dim]
 }
 
+// Vector returns a copy of the stored unit vector of one chunk, so a caller
+// can re-upsert unchanged chunks without embedding them again.
+func (f *Flat) Vector(source, id string) ([]float32, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	i, ok := f.slots[source][id]
+	if !ok {
+		return nil, false
+	}
+	return append([]float32(nil), f.vecs[i*f.dim:(i+1)*f.dim]...), true
+}
+
+// Sources lists the indexed sources, sorted.
+func (f *Flat) Sources() []string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	out := make([]string, 0, len(f.slots))
+	for s := range f.slots {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Len implements Index.
 func (f *Flat) Len() int {
 	f.mu.RLock()

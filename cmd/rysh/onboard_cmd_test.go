@@ -352,14 +352,24 @@ func TestProviderRegistryAndPickerOrder(t *testing.T) {
 	// Every valid channel type is offered. "phone" was excluded while it was a
 	// placeholder that sent and received nothing (X3); the Twilio transport
 	// landed in B12, so withholding it now would hide a working channel.
-	if len(chs) != len(channels.ValidChannelTypes) {
-		t.Errorf("channel picker has %d entries, want all %d valid types: %v",
-			len(chs), len(channels.ValidChannelTypes), chs)
-	}
+	// The one exception is unofferedChannelTypes: a type whose config is
+	// written by hand (github, gap04 R8) is valid but not offered.
+	offerable := 0
 	for _, want := range channels.ValidChannelTypes {
+		if unofferedChannelTypes[want] {
+			if slices.Contains(chs, want) {
+				t.Errorf("channel picker offers unoffered type %q", want)
+			}
+			continue
+		}
+		offerable++
 		if !slices.Contains(chs, want) {
 			t.Errorf("channel picker omits %q", want)
 		}
+	}
+	if len(chs) != offerable {
+		t.Errorf("channel picker has %d entries, want all %d offerable types: %v",
+			len(chs), offerable, chs)
 	}
 	for _, ch := range chs {
 		if ch != "imessage" && ch != "chatbot" && ch != "signal" && len(channelCredFields(ch)) == 0 {

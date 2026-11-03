@@ -20,6 +20,7 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 	"github.com/rysh-ai/rysh-cli-code/internal/gateway"
+	"github.com/rysh-ai/rysh-cli-code/internal/hooks"
 	"github.com/rysh-ai/rysh-cli-code/internal/limits"
 	"github.com/rysh-ai/rysh-cli-code/internal/meeting"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
@@ -28,6 +29,7 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/proxy"
 	"github.com/rysh-ai/rysh-cli-code/internal/replay"
 	"github.com/rysh-ai/rysh-cli-code/internal/session"
+	"github.com/rysh-ai/rysh-cli-code/internal/trigger"
 	"github.com/rysh-ai/rysh-cli-code/internal/tunnel"
 	"github.com/rysh-ai/rysh-cli-code/internal/usage"
 	"github.com/rysh-ai/rysh-cli-code/internal/web"
@@ -63,24 +65,31 @@ type WorkspaceActor struct {
 	// command that produced it. Safe unguarded because the mailbox serialises
 	// every touch; the goroutine it closes over never reads this field.
 	pendingUserCommand func() (string, error)
-	cfg                config.Config
-	pub                *msg.NATSPublisher
-	agSetup            *agentic.Setup
-	meeting            *meeting.Manager
+
+	// inputTyped is true only while handleSubmitInput routes input a person
+	// typed (not MsgSubmitInput.Programmatic). Like ryshFail it lives here to
+	// reach a ## handler through a fixed signature; set and cleared around one
+	// routeInput call, and safe unguarded for the same reason.
+	inputTyped bool
+
+	cfg     config.Config
+	pub     *msg.NATSPublisher
+	agSetup *agentic.Setup
+	meeting *meeting.Manager
 	// Meeting panes (design 043, workspace_meeting_cmd.go): pane id → its
 	// registry id; meetingSend is a test seam; meetingRestored closes once
 	// restored meeting panes are re-registered.
 	meetingPanes    map[string]meetingPaneInfo
 	meetingSend     func(any)
 	meetingRestored chan struct{}
-	nc                 *nats.Conn
-	wKV                nats.KeyValue // rysh-workspace bucket
-	paneKV             nats.KeyValue // rysh-panes bucket
-	agentKV            nats.KeyValue // rysh-agents bucket
-	secretKV           nats.KeyValue // rysh-secrets bucket
-	secrets            *namedStore   // session→config→env secret resolver (.rysh/secrets)
-	variableKV         nats.KeyValue // rysh-variables bucket
-	variables          *namedStore   // session→config→env variable resolver (.rysh/variables)
+	nc              *nats.Conn
+	wKV             nats.KeyValue // rysh-workspace bucket
+	paneKV          nats.KeyValue // rysh-panes bucket
+	agentKV         nats.KeyValue // rysh-agents bucket
+	secretKV        nats.KeyValue // rysh-secrets bucket
+	secrets         *namedStore   // session→config→env secret resolver (.rysh/secrets)
+	variableKV      nats.KeyValue // rysh-variables bucket
+	variables       *namedStore   // session→config→env variable resolver (.rysh/variables)
 	// sessionLLMRef is the ##llm-activated registry reference
 	// ("provider/name"), "" when the session runs on the config default. The
 	// actual model override lives in agSetup.SessionLLM; this is display state.
@@ -310,6 +319,10 @@ type WorkspaceActor struct {
 	// session start (fail-closed). Never nil after Started.
 	policy *policy.Policy
 
+	// Lifecycle hooks (gap G8) — .rysh/hooks.yaml, loaded at session start
+	// next to the policy (fail-closed for pre-tool). Never nil after Started.
+	hooks *hooks.Config
+
 	// Session replay capture (design 006) — records merged pane output for
 	// asciicast export. nil unless [replay] enabled.
 	replay *replay.Capture
@@ -337,6 +350,15 @@ type WorkspaceActor struct {
 	// meta intact, and this map is re-learned from them rather than trusted
 	// from a stale field.
 	boardPanes map[string]string
+
+	// scheduledFire is the label ("cron", "trigger") of the scheduled fire
+	// whose input is being routed right now, else "". Set only by
+	// withScheduledFire around fireScheduledInput's synchronous routing;
+	// `##board attach` refuses while it is set (design 030 W5).
+	scheduledFire string
+	// boardAttachAsk asks a pane to convert itself into a board pane; nil uses
+	// defaultBoardAttachAsk. A seam for tests (workspace_board_attach.go).
+	boardAttachAsk func(paneID, boardID string, deadline time.Time) (string, error)
 
 	// Local share tracking: paneID/entityID → shareID.
 	// Maintained by the workspace so subscribe can resolve without querying the registry.
@@ -366,6 +388,10 @@ type WorkspaceActor struct {
 	// len(tabs) select a mirror tab.
 	mirrorTabs []*mirrorTab
 
+	// remoteHosts are the ##remote add entries (feature #14, design 070), by
+	// ssh alias. Each owns a RemoteHostActor whose tabs live in mirrorTabs.
+	remoteHosts map[string]*remoteHostEntry
+
 	// Actor system reference (set during Started).
 	actorSystem *actor.ActorSystem
 	selfPID     *actor.PID // this workspace actor's own PID
@@ -393,6 +419,13 @@ type WorkspaceActor struct {
 	// in the mailbox goroutine — the ticker merely delivers a cronTickMsg.
 	cron         *cronScheduler
 	cronTickStop chan struct{}
+	// cronNow, when set, replaces time.Now for scheduling decisions (tests).
+	cronNow func() time.Time
+
+	// Inbound webhook triggers (gap06), primary workspace only like cron.
+	// triggerDispatch, when set, replaces the mailbox hand-off (tests).
+	triggers        *triggerService
+	triggerDispatch func(trigger.FireRequest) trigger.FireResult
 }
 
 // NewWorkspaceActor creates a new WorkspaceActor. It is spawned as a child of
@@ -424,7 +457,7 @@ func NewWorkspaceActor(
 	if workspaceName == "" {
 		workspaceName = sessionName
 	}
-	return &WorkspaceActor{
+	w := &WorkspaceActor{
 		cfg:             cfg,
 		pub:             pub,
 		agSetup:         agSetup,
@@ -446,6 +479,8 @@ func NewWorkspaceActor(
 		active:          active,
 		spawnRegistries: spawnRegistries,
 	}
+	w.wireMemoryScrubber()
+	return w
 }
 
 // wireWebPresence connects a web server's client-count events to this
@@ -482,6 +517,10 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 	switch m := ctx.Message().(type) {
 	case *peerHostRequest:
 		ctx.Respond(w.peerHost(m.Request))
+	case *peerFeedKeyRequest:
+		ctx.Respond(w.peerKey(m.name))
+	case *peerFeedAlert:
+		w.handlePeerFeedAlert(m.conn, m.message)
 	case *autoRunDoneMsg:
 		// Supervised ##auto run ended — advance the --each queue or fire the
 		// on_success chain (workspace_auto_chain.go). In-process only.
@@ -604,6 +643,12 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 			w.autoOpenCompanyPane()
 		}
 
+		// Remote hosts from config (design 070): connect them like `##remote
+		// add`. Primary workspace only, so one window does not dial twice.
+		if w.spawnRegistries {
+			w.addConfiguredRemoteHosts()
+		}
+
 		// Native agent panes (design 029): a stop/start kills every pane's
 		// shell and its children, so the claude/codex sessions `##claude` and
 		// `##codex` started have to be resumed once the layout is back.
@@ -661,6 +706,9 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 			// run ##policy reload.
 			w.policy = w.loadPolicy()
 			w.syncPolicyGate()
+			// Hooks after the policy: loadHooks re-installs the approval
+			// policy with the pre-tool hooks composed in.
+			w.loadHooks()
 
 			// Spawn the usage ledger (design 003). Session-wide singleton; owns
 			// the pane.*.usage subscription and the usage.check / usage.inbox
@@ -742,6 +790,9 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 			// times (no backfill), and start the minute-aligned ticker. Jobs
 			// fire while the daemon is alive — including when detached.
 			w.startCron()
+			// Webhook triggers (gap06): restore them and re-bind the loopback
+			// listener if it was on.
+			w.startTriggers()
 		}
 
 		// Build this workspace's own subscription limit checker from its resolved
@@ -776,8 +827,12 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 	case *msgApplyForgeConfig:
 		w.applyForgeConfig(ctx)
 
+	case *triggerFireMsg:
+		w.handleTriggerFireMsg(ctx, m)
+
 	case *cronTickMsg:
 		w.handleCronTick(ctx)
+		w.triggerTick()
 		// Shares live on the primary workspace, as the cron ticker does, so
 		// its minute tick doubles as the share reconciler.
 		w.reapOrphanedShares()
@@ -795,6 +850,7 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 		}
 		w.persistToKVNow()
 		w.stopCron()
+		w.stopTriggers()
 		w.stopProxy()
 		// Flush the last usage batch before the process goes away (023 §4.4):
 		// spend that never reached the server is spend the org-wide ceiling
@@ -825,6 +881,7 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 			w.actorSystem.Root.Stop(w.remoteListenerPID)
 			w.remoteListenerPID = nil
 		}
+		w.stopRemoteHosts()
 		for _, mt := range w.mirrorTabs {
 			if mt.listenerPID != nil {
 				w.actorSystem.Root.Stop(mt.listenerPID)
@@ -991,6 +1048,12 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 	case *MsgMirrorTabRemove:
 		w.removeMirrorTab(m.ShareID)
 		w.persistToKV()
+
+	case *MsgRemoteHostLayout:
+		w.applyRemoteHostLayout(m)
+
+	case *MsgRemoteHostStatus:
+		w.applyRemoteHostStatus(m)
 
 	case *msg.MsgFocusNextTab:
 		if n := w.tabCount(); n > 0 {
@@ -1431,12 +1494,31 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 		case *msg.MsgCLIBoardResolve:
 			_ = m.Reply(w.handleCLIBoardResolve(inner))
 
+		// `rysh mcp serve` asks here before every write (design 067): the
+		// verdict comes from the policy this workspace loaded, and the
+		// attempt is audited either way.
+		case *msg.MsgCLIMCPGate:
+			_ = m.Reply(w.handleCLIMCPGate(inner))
+		// `rysh family apply` (design 093 H2): a pane's agent profile with the
+		// prompt as text, never a path. Its own message for the reason the
+		// board's are: no focus, no echo, no token-parsing of the prompt.
+		case *msg.MsgCLIPaneProfile:
+			_ = m.Reply(w.handleCLIPaneProfile(inner))
+
 		// Likewise its own CLI message rather than a ##ansa through
 		// MsgCLIRyshCommand: a control channel used by dozens of agents must
 		// not focus a pane or echo into one as a side effect of routing.
 		case *msg.MsgCLIAnsaSend:
 			resp := w.handleCLIAnsaSend(inner)
 			_ = m.Reply(resp)
+
+		// `rysh ansa keys`: named keys to one pane, same silent door.
+		case *msg.MsgCLIAnsaKeys:
+			_ = m.Reply(w.handleCLIAnsaKeys(inner))
+
+		// `rysh ansa hung`: read-only "is this claude hung?" (D-67 (a)).
+		case *msg.MsgCLIAnsaHung:
+			_ = m.Reply(w.handleCLIAnsaHung(inner))
 
 		// The board's input field. It carries no target: resolving WHICH pane
 		// is the board claude is this actor's job, not the view's, so the

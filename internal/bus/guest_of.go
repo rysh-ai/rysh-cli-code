@@ -144,7 +144,7 @@ func (b *Bus) askHost(ourSession, ourWorkspace string, timeout time.Duration) {
 	} else {
 		g.HostSession, g.HostWorkspace, g.HostPID = id.Session, id.Workspace, id.PID
 		sessionDiffers := id.Session != ourSession
-		workspaceDiffers := ourWorkspace != "" && id.Workspace != "" && cleanPath(id.Workspace) != cleanPath(ourWorkspace)
+		workspaceDiffers := ourWorkspace != "" && id.Workspace != "" && !sameWorkspace(id.Workspace, ourWorkspace)
 		g.SessionMismatch, g.WorkspaceMismatch = sessionDiffers, workspaceDiffers
 		switch {
 		case workspaceDiffers:
@@ -187,3 +187,55 @@ func (b *Bus) answerHostIdentity(cfg Config) {
 }
 
 func cleanPath(p string) string { return filepath.Clean(p) }
+
+// sameWorkspace reports whether two workspace paths name the same project:
+// equal once cleaned, or, when both are absolute and both resolve, equal once
+// their symlinks are resolved (the same project opened through a symlinked
+// path, N3). A relative path is never resolved against this process's working
+// directory (N4), and a path that does not resolve compares only as cleaned
+// text.
+func sameWorkspace(a, b string) bool {
+	if cleanPath(a) == cleanPath(b) {
+		return true
+	}
+	if !filepath.IsAbs(a) || !filepath.IsAbs(b) {
+		return false
+	}
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	return errA == nil && errB == nil && ra == rb
+}
+
+// refuseForeignHostTimeout bounds the synchronous host check of a daemon that
+// refuses foreign hosts. It is longer than the background query's, because
+// here a slow answer means a refused start.
+const refuseForeignHostTimeout = 2 * time.Second
+
+// refuseForeignHost is D-55 B: a daemon whose project names a NATS port of its
+// own joins the server already on that port only when the server's owning
+// daemon answers as this same workspace (another session of it, such as the
+// desktop app's, is fine). Another project, or a server whose owner does not
+// identify itself, is refused: joining it is exactly what the project's own
+// port is for avoiding. The error names the port and the host session, never
+// a token.
+func refuseForeignHost(nc *nats.Conn, cfg Config, port int) error {
+	timeout := cfg.HostQueryTimeout
+	if timeout < refuseForeignHostTimeout {
+		timeout = refuseForeignHostTimeout
+	}
+	who := ""
+	reply, err := nc.Request(HostIdentitySubject, nil, timeout)
+	var id HostIdentity
+	switch {
+	case err != nil:
+		who = "a server whose owner did not say who it is (" + err.Error() + ")"
+	case json.Unmarshal(reply.Data, &id) != nil || id.Session == "":
+		who = "a server whose owner is not a rysh daemon"
+	case cfg.Workspace != "" && id.Workspace != "" && sameWorkspace(id.Workspace, cfg.Workspace):
+		return nil
+	default:
+		who = fmt.Sprintf("session %q of another project", id.Session)
+	}
+	return fmt.Errorf("nats port %d is already served by %s; this project's rysh.config.yaml sets nats.port to give it a bus of its own, "+
+		"so it will not join that bus as a guest — stop the other daemon, or give this project another nats.port", port, who)
+}

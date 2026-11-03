@@ -1,0 +1,21 @@
+# tmuxinator project, as it would sit in $HOME/.config/tmuxinator/blog.yml
+name: blog
+root: ~/code/blog
+pre_window: nvm use 20
+windows:
+  - editor:
+      layout: main-vertical
+      panes:
+        - vim
+        - guard
+        - logs:
+            - cd log
+            - tail -f development.log
+  - server: bundle exec rails s
+  - deploy:
+      root: ~/code/blog-infra
+      layout: even-horizontal
+      panes:
+        - terraform plan
+        -
+  - shell:

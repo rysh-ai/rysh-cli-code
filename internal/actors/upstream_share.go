@@ -77,6 +77,9 @@ type UpstreamShareActor struct {
 	viewers     int
 	stopRetry   chan struct{}
 	paneIDs     []string // tracked pane IDs for multi-entity shares
+	// readOnlyKey is set (actor thread only) once the upstream refused this
+	// share's key as read-only: the share is stopped and never reconnects.
+	readOnlyKey bool
 
 	// subscribedPanes tracks which panes already have raw/mode subscriptions, so
 	// the layout loop can reconcile membership idempotently as panes are added to
@@ -447,7 +450,13 @@ func (u *UpstreamShareActor) Receive(ctx actor.Context) {
 		slog.Info("upstream-share: stopped",
 			"shareID", u.shareID, "entityID", u.entityID)
 
+	case *msgUpstreamReadOnlyKey:
+		u.stopForReadOnlyKey()
+
 	case *msg.MsgUpstreamReconnected:
+		if u.readOnlyKey {
+			return
+		}
 		// Reconnection happened -- re-register share and restore subscriptions.
 		u.connected = true
 		slog.Info("upstream-share: handling reconnection",
@@ -471,6 +480,9 @@ func (u *UpstreamShareActor) Receive(ctx actor.Context) {
 		}
 
 	case *msg.MsgUpstreamConnectionClosed:
+		if u.readOnlyKey {
+			return // closed by stopForReadOnlyKey: no reconnect
+		}
 		// Permanent close -- attempt a full reconnect cycle.
 		u.connected = false
 		slog.Warn("upstream-share: connection permanently closed, will attempt fresh reconnect",
@@ -500,6 +512,9 @@ func (u *UpstreamShareActor) Receive(ctx actor.Context) {
 		go u.delayedReconnect()
 
 	case *msg.MsgRemoteUpstreamConnect:
+		if u.readOnlyKey {
+			return
+		}
 		// Triggered by delayedReconnect() after a permanent connection close.
 		// Attempt a fresh connection to the remote upstream server.
 		slog.Info("upstream-share: attempting fresh reconnect",
@@ -690,6 +705,11 @@ func (u *UpstreamShareActor) connectRemote() {
 		// heavily, cutting the bytes a shared interactive pane puts on a slow link.
 		// Negotiated with the server; a no-op if the server does not enable it.
 		nats.Compression(true),
+		readOnlyKeyErrorHandler("upstream-share", func() {
+			if u.selfPID != nil && u.actorSystem != nil {
+				u.actorSystem.Root.Send(u.selfPID, &msgUpstreamReadOnlyKey{})
+			}
+		}),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
 			u.connected = false
 			slog.Warn("upstream-share: disconnected",
@@ -758,6 +778,43 @@ func (u *UpstreamShareActor) connectRemote() {
 	u.subscribeFileBrowse()
 
 	u.publishRemoteStatus("connected")
+}
+
+// stopForReadOnlyKey ends the share's upstream half after the upstream refused
+// its key as read-only (read_only_key.go): sharing needs a key with write
+// access, so every further publish would be refused too. The connection is
+// closed without the usual "disconnected" status publish (that would be
+// refused as well) and is not redialled; the pane is told once. ##unshare
+// still tears the actor down as usual.
+func (u *UpstreamShareActor) stopForReadOnlyKey() {
+	if u.readOnlyKey {
+		return
+	}
+	u.readOnlyKey = true
+	slog.Warn("upstream-share: upstream key is read-only; share stopped", "shareID", u.shareID)
+	u.stopFlusher()
+	if u.remoteSub != nil {
+		_ = u.remoteSub.Unsubscribe()
+		u.remoteSub = nil
+	}
+	if u.bufferSub != nil {
+		_ = u.bufferSub.Unsubscribe()
+		u.bufferSub = nil
+	}
+	u.unsubscribeFileBrowse()
+	u.connected = false
+	if u.remoteNC != nil {
+		u.remoteNC.Close()
+		u.remoteNC = nil
+	}
+	for _, paneID := range u.paneIDs {
+		_ = u.pub.Send(msg.T("pane", paneID, "inbox"), &msg.MsgPaneSetSharingState{
+			Sharing: false,
+			ShareID: u.shareID,
+		})
+		_ = u.pub.SendPaneRyshOutput(paneID,
+			fmt.Sprintf("[rysh] share %s: stopped: the upstream key is read-only (sharing needs a key with write access); run ##unshare to clear it\n", u.shareID[:8]))
+	}
 }
 
 // disconnectRemote closes the remote NATS connection.

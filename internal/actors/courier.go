@@ -75,6 +75,9 @@ func (a *BoardCourierActor) Start() error {
 		Session:  msg.SessionPrefix(),
 		Snapshot: a.snapshot,
 		Deliver:  a.deliver,
+		WaitIdle: func(ctx context.Context, paneID string) error {
+			return courier.WaitNativeIdle(ctx, a.pub, paneID)
+		},
 		Notify: func(boardID string, p *msg.MsgBoardPost) {
 			if err := msg.SendBoardPost(a.pub, boardID, p); err != nil {
 				slog.Warn("courier: could not post undelivered notice", "err", err)

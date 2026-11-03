@@ -57,9 +57,10 @@ func (w *WorkspaceActor) forgedOpsForEntity(entityType, entityID, capturePaneID 
 // autoShareFirstTab shares the workspace's first tab to the upstream workspace.
 // It backs the global --shared flag and mirrors the behaviour of
 // "##share tab [view|control]". The share mode follows [upstream]
-// default_share_mode, defaulting to "control" so subscribers can drive the
-// shared tab (set default_share_mode: view to override). When upstream is not
-// enabled it leaves a note in the active pane instead of failing.
+// default_share_mode, defaulting to "view": subscribers watch, and only an
+// explicit default_share_mode: control lets them type into the tab's panes
+// (autoShareMode). When upstream is not enabled it leaves a note in the active
+// pane instead of failing.
 func (w *WorkspaceActor) autoShareFirstTab() {
 	// Make sure activePaneID reflects the freshly bootstrapped first pane, so we
 	// have somewhere to print status/errors.
@@ -81,18 +82,43 @@ func (w *WorkspaceActor) autoShareFirstTab() {
 	if _, already := w.localShares[tab.id]; already {
 		return
 	}
-	// Default to control unless the user explicitly configured view.
-	mode := strings.ToLower(strings.TrimSpace(w.cfg.Upstream.DefaultShareMode))
-	if mode != "view" {
-		mode = "control"
+	mode, unknown := autoShareMode(w.cfg.Upstream.DefaultShareMode)
+	if unknown {
+		// Names the setting, not its value.
+		slog.Warn("upstream default_share_mode is neither view nor control; --shared shares in view mode",
+			"setting", "upstream.default_share_mode")
 	}
 	shareID := w.beginShare("tab", tab.id, mode, tab.title, "", false, true)
 	if w.activePaneID != "" {
-		_ = w.pub.SendPaneRyshOutput(w.activePaneID, fmt.Sprintf(
-			"\n[rysh] --shared: sharing first tab %q in %s mode (share: %s)\n"+
-				"  to mirror from another session run:\n"+
-				"  ##upstream subscribe %s %s\n\n", tab.title, mode, shareID, shareID, mode))
+		_ = w.pub.SendPaneRyshOutput(w.activePaneID, autoShareNotice(tab.title, mode, shareID))
 	}
+}
+
+// autoShareMode is the mode --shared shares the first tab in: control only
+// when default_share_mode says control, because control lets every
+// collaborator type into the owner's panes. Unset is view; any other value is
+// view too, and unknown reports it so the caller can warn.
+func autoShareMode(configured string) (mode string, unknown bool) {
+	switch strings.ToLower(strings.TrimSpace(configured)) {
+	case "control":
+		return "control", false
+	case "", "view":
+		return "view", false
+	default:
+		return "view", true
+	}
+}
+
+// autoShareNotice is the line --shared prints in the active pane.
+func autoShareNotice(title, mode, shareID string) string {
+	warn := ""
+	if mode == "control" {
+		warn = "  collaborators can type into these panes\n"
+	}
+	return fmt.Sprintf(
+		"\n[rysh] --shared: sharing first tab %q in %s mode (share: %s)\n"+warn+
+			"  to mirror from another session run:\n"+
+			"  ##upstream subscribe %s %s\n\n", title, mode, shareID, shareID, mode)
 }
 
 // ---------------------------------------------------------------------------
@@ -1150,13 +1176,25 @@ func (w *WorkspaceActor) subscribeMirrorTab(out *strings.Builder, shareID, entit
 	}
 }
 
+// shareMirrorTabs returns the mirror tabs that come from upstream shares —
+// every mirror tab except the remote-host ones (##remote).
+func (w *WorkspaceActor) shareMirrorTabs() []*mirrorTab {
+	var out []*mirrorTab
+	for _, mt := range w.mirrorTabs {
+		if mt.host == "" {
+			out = append(out, mt)
+		}
+	}
+	return out
+}
+
 // handleUpstreamUnsubscribe stops the active RemoteShareListenerActor, or — when
 // arg names/identifies a mirror tab (or one is the active selection) — removes
 // that mirror tab instead.
 func (w *WorkspaceActor) handleUpstreamUnsubscribe(out *strings.Builder, arg string) {
 	// Targeted mirror-tab removal by share ID / prefix.
 	if arg != "" {
-		for _, mt := range w.mirrorTabs {
+		for _, mt := range w.shareMirrorTabs() {
 			if mt.shareID == arg || strings.HasPrefix(mt.shareID, arg) || mt.alias == arg {
 				w.removeMirrorTab(mt.shareID)
 				w.persistToKV()
@@ -1166,7 +1204,7 @@ func (w *WorkspaceActor) handleUpstreamUnsubscribe(out *strings.Builder, arg str
 		}
 	}
 	// If a mirror tab is the active selection, remove it.
-	if mt := w.activeMirrorTab(); mt != nil {
+	if mt := w.activeMirrorTab(); mt != nil && mt.host == "" {
 		w.removeMirrorTab(mt.shareID)
 		w.persistToKV()
 		fmt.Fprintf(out, "\n[rysh] stopped mirroring share %.8s\n", mt.shareID)
@@ -1175,18 +1213,19 @@ func (w *WorkspaceActor) handleUpstreamUnsubscribe(out *strings.Builder, arg str
 	// No pane subscription and no targeted/active mirror: if exactly one mirror
 	// tab exists, remove it; otherwise report which mirrors are open.
 	if w.remoteListenerPID == nil {
-		switch len(w.mirrorTabs) {
+		shares := w.shareMirrorTabs()
+		switch len(shares) {
 		case 0:
 			fmt.Fprintf(out, "\n[rysh] no active remote subscription\n")
 			w.failRysh("no active remote subscription")
 		case 1:
-			sid := w.mirrorTabs[0].shareID
+			sid := shares[0].shareID
 			w.removeMirrorTab(sid)
 			w.persistToKV()
 			fmt.Fprintf(out, "\n[rysh] stopped mirroring share %.8s\n", sid)
 		default:
 			fmt.Fprintf(out, "\n[rysh] multiple mirror tabs open; specify one:\n")
-			for _, mt := range w.mirrorTabs {
+			for _, mt := range shares {
 				fmt.Fprintf(out, "  ##upstream unsubscribe %.8s   (%s)\n", mt.shareID, mt.alias)
 			}
 		}

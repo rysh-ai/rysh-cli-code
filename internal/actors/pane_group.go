@@ -202,6 +202,16 @@ func (g *PaneGroupActor) Receive(ctx actor.Context) {
 	case *msg.MsgPaneGroupSetPaneHidden:
 		g.setPaneHidden(m.PaneID, m.Hidden)
 
+	case *msg.MsgPaneGroupSetPaneType:
+		// A pane converted itself (`##board attach`, design 030 W5). Keep this
+		// group's restore record in step with the pane's own snapshot.
+		for _, ref := range g.paneRefs {
+			if ref.id == m.PaneID {
+				ref.paneType = m.PaneType
+				break
+			}
+		}
+
 	case *msg.MsgPaneGroupFocusPaneByID:
 		// Workspace focus landed on a member pane (mouse click on a stacked
 		// title bar, focus restore): expand it — the active stack index must
@@ -310,6 +320,7 @@ func applyBirthMeta(pa *PaneActor, meta map[string]string) {
 	for k, v := range meta {
 		pa.meta[k] = v
 	}
+	pa.noteMetaChanged()
 	pa.persistDurableMeta()
 }
 

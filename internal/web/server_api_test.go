@@ -301,7 +301,7 @@ func dialWS(t *testing.T, port int, token string) *websocket.Conn {
 	if token != "" {
 		url += "&token=" + token
 	}
-	conn, resp, err := websocket.DefaultDialer.Dial(url, nil)
+	conn, resp, err := websocket.DefaultDialer.Dial(url, controlSecretHeaders())
 	if err != nil {
 		code := 0
 		if resp != nil {
@@ -366,6 +366,7 @@ func TestCompletionOverWS(t *testing.T) {
 	// protocol, and the gate has its own tests.
 	s := NewServer(port, "ws-session", pub, nc, pub.Codecs())
 	s.SetHost("127.0.0.1")
+	s.SetControl(true) // the open posture: the desktop app's own loopback daemon
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -434,6 +435,7 @@ func TestWebPaneUnavailableIsVisible(t *testing.T) {
 	port := freePort(t)
 	s := NewServer(port, "wp-session", pub, nc, pub.Codecs())
 	s.SetHost("127.0.0.1")
+	s.SetControl(true) // the open posture: the desktop app's own loopback daemon
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

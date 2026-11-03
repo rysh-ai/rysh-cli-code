@@ -9,7 +9,8 @@ package actors
 //	ESC ] 7 ; file://host/path BEL      (or ST = ESC \)
 //
 // rysh injects a PROMPT_COMMAND for bash panes that emits OSC 7 before every
-// prompt (see startShell), and rawReadLoop feeds every PTY chunk through an
+// prompt (see paneShellCommand) — and on Windows a PowerShell prompt wrapper or
+// a cmd.exe PROMPT (conpty.ShellHook) — and rawReadLoop feeds every PTY chunk through an
 // osc7Scanner. The parsed path replaces lsof/proc polling as the primary cwd
 // source for tab-completion and the shell prompt — it is push-based, exact,
 // and works immediately after `cd` instead of after a 3s cache expiry.
@@ -19,6 +20,7 @@ package actors
 import (
 	"bytes"
 	"net/url"
+	"runtime"
 	"strings"
 )
 
@@ -95,6 +97,26 @@ func parseOSC7Payload(payload string) string {
 	p := rest[i:]
 	if unescaped, err := url.PathUnescape(p); err == nil {
 		p = unescaped
+	}
+	return normalizeOSC7Path(p, runtime.GOOS == "windows")
+}
+
+// normalizeOSC7Path turns the path of a file URL into a native one. Off Windows
+// it is already native. On Windows the pane's prompt hooks send the drive after
+// the host — PowerShell as /C:/Users/me, cmd.exe's $P as /C:\Users\me — so the
+// slash before the drive letter goes and separators become backslashes; a bare
+// drive gets its root. A UNC path (//server/share) keeps its double separator.
+func normalizeOSC7Path(p string, windows bool) string {
+	if !windows {
+		return p
+	}
+	if len(p) >= 3 && p[0] == '/' && p[2] == ':' &&
+		(p[1] >= 'A' && p[1] <= 'Z' || p[1] >= 'a' && p[1] <= 'z') {
+		p = p[1:]
+	}
+	p = strings.ReplaceAll(p, "/", `\`)
+	if len(p) == 2 && p[1] == ':' {
+		p += `\`
 	}
 	return p
 }

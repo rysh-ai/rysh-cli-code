@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	sharedmsg "github.com/rysh-ai/rysh-cli-shared/msg"
 	"github.com/rysh-ai/rysh-cli-shared/secretnat"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
@@ -19,6 +20,7 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/proxy"
 	"github.com/rysh-ai/rysh-cli-code/internal/proxy/wirecheck"
 	"github.com/rysh-ai/rysh-cli-code/internal/session"
+	"github.com/rysh-ai/rysh-cli-code/internal/usage"
 )
 
 // startProxy launches the governance proxy (design 001) if not already running.
@@ -281,11 +283,32 @@ func (w *WorkspaceActor) renderProxyStatus(out *strings.Builder) {
 	fmt.Fprintf(out, "  rate limit  %s\n", proxyRateSummary(w.cfg.Proxy.RateLimit))
 	if w.proxyStrict() {
 		fmt.Fprintf(out, "  strict      ON — an ungoverned agent CLI is stopped, not just warned\n")
+		fmt.Fprintf(out, "              covers the allowed CLIs at their known install locations, by real executable;\n")
+		fmt.Fprintf(out, "              not an anti-evasion boundary: a copy elsewhere is unknown and not watched\n")
+	}
+	if w.ledger != nil {
+		c, ok := w.ledger.SpendCap("")
+		out.WriteString(spendCapStatusLine(c, ok))
 	}
 	fmt.Fprintf(out, "  failover    %s\n", proxy.FailoverSummary(w.cfg.Proxy.Failover))
 	fmt.Fprintf(out, "  dialects    anthropic (full), openai/gemini (redact+forward)\n")
 	fmt.Fprintf(out, "  panes route via ANTHROPIC_BASE_URL=%s/anthropic/{paneID}\n", w.proxyServer.BaseURL())
 	w.renderProxyPaneStates(out)
+}
+
+// spendCapStatusLine renders the workspace spend cap (root-order-044 #8) as
+// last reported by the server, or "" when there is none. The figure is an
+// estimate from rysh's price table, and the line says so.
+func spendCapStatusLine(c sharedmsg.GatewaySpendCap, ok bool) string {
+	if !ok {
+		return ""
+	}
+	period := "this month (UTC)"
+	if c.Period == sharedmsg.SpendCapPeriodDay {
+		period = "today (UTC)"
+	}
+	return fmt.Sprintf("  spend cap   %s of %s %s, estimated from rysh's price table\n",
+		usage.FormatUSD(c.SpentMicroUSD), usage.FormatUSD(c.CapMicroUSD), period)
 }
 
 // renderProxyPaneStates lists what each pane looks like from the proxy's side

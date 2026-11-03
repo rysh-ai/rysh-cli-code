@@ -93,18 +93,18 @@ func liveSignalAdapter(t *testing.T, cfg msg.ChannelConfig) *SignalAdapter {
 //
 // What a human must do first:
 //
-//	 1. Install signal-cli (>= 0.11, the JSON-RPC daemon builds) on the machine
-//	    that will run this test.
-//	 2. Register or link RYSH_LIVE_SIGNAL_NUMBER under signal-cli's data dir —
-//	    the adapter never does this for the message path (signal.go's header
-//	    comment: "this adapter assumes the number is already registered/linked").
-//	    Linking is what TestLiveSignalDeviceLinkQR below covers.
-//	 3. Run the daemon so it both serves RPC and pushes inbound envelopes:
-//	    `signal-cli -a <NUMBER> daemon --socket <PATH>`  (or `--tcp host:port`).
-//	    The daemon must be in a receiving mode — the adapter has no polling
-//	    fallback, it only consumes unsolicited "receive" notifications.
-//	 4. Own a second Signal-registered phone number and have sent at least one
-//	    message between the two, so neither side is a fresh unknown contact.
+//  1. Install signal-cli (>= 0.11, the JSON-RPC daemon builds) on the machine
+//     that will run this test.
+//  2. Register or link RYSH_LIVE_SIGNAL_NUMBER under signal-cli's data dir —
+//     the adapter never does this for the message path (signal.go's header
+//     comment: "this adapter assumes the number is already registered/linked").
+//     Linking is what TestLiveSignalDeviceLinkQR below covers.
+//  3. Run the daemon so it both serves RPC and pushes inbound envelopes:
+//     `signal-cli -a <NUMBER> daemon --socket <PATH>`  (or `--tcp host:port`).
+//     The daemon must be in a receiving mode — the adapter has no polling
+//     fallback, it only consumes unsolicited "receive" notifications.
+//  4. Own a second Signal-registered phone number and have sent at least one
+//     message between the two, so neither side is a fresh unknown contact.
 func TestLiveSignalSend(t *testing.T) {
 	env := requireEnv(t,
 		"RYSH_LIVE_SIGNAL_SIDECAR_ADDR",

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/asynkron/protoactor-go/actor"
 	"github.com/nats-io/nats.go"
@@ -37,7 +38,20 @@ type HeadlessBrowserActor struct {
 
 	br      *bridge.NATSBridge
 	browser *cdp.Browser
+
+	// binPath and launchWaits override the Chromium binary and the DevTools
+	// wait of each launch attempt; tests only ("" / nil → cdp.FindChromium /
+	// headlessLaunchWaits).
+	binPath     string
+	launchWaits []time.Duration
 }
+
+// A cold Chromium start is usually under a second, but on a loaded machine
+// (a whole test suite, several browsers launching at once) one launch in a
+// few dozen takes 10s+, and now and then one never prints its DevTools line
+// at all. A longer wait covers the slow start; one fresh relaunch covers the
+// wedged one, which no wait would.
+var headlessLaunchWaits = []time.Duration{30 * time.Second, 30 * time.Second}
 
 // NewHeadlessBrowserActor creates the actor. profileDir is the Chromium
 // user-data-dir (…/browser-instances/<profile>/headless).
@@ -56,11 +70,7 @@ func NewHeadlessBrowserActor(paneID, profile, url, profileDir string, pub *msg.N
 func (h *HeadlessBrowserActor) Receive(ctx actor.Context) {
 	switch m := ctx.Message().(type) {
 	case *actor.Started:
-		b, err := cdp.Launch(context.Background(), cdp.LaunchOptions{
-			UserDataDir: h.profileDir,
-			Headless:    true,
-			URL:         h.url,
-		})
+		b, err := h.launch()
 		if err != nil {
 			slog.Error("headless: launch failed", "pane", h.paneID, "profile", h.profile, "err", err)
 			_ = h.pub.SendPaneRyshOutput(h.paneID,
@@ -102,6 +112,33 @@ func (h *HeadlessBrowserActor) Receive(ctx actor.Context) {
 			h.reply(reqID, result, screenshot, err)
 		}()
 	}
+}
+
+// launch starts the headless Chromium, relaunching once if the first attempt
+// does not come up.
+func (h *HeadlessBrowserActor) launch() (*cdp.Browser, error) {
+	waits := h.launchWaits
+	if len(waits) == 0 {
+		waits = headlessLaunchWaits
+	}
+	var err error
+	for i, wait := range waits {
+		var b *cdp.Browser
+		b, err = cdp.Launch(context.Background(), cdp.LaunchOptions{
+			BinPath:     h.binPath,
+			UserDataDir: h.profileDir,
+			Headless:    true,
+			URL:         h.url,
+			WaitTimeout: wait,
+		})
+		if err == nil {
+			return b, nil
+		}
+		if i < len(waits)-1 {
+			slog.Warn("headless: launch failed, relaunching", "pane", h.paneID, "profile", h.profile, "attempt", i+1, "err", err)
+		}
+	}
+	return nil, err
 }
 
 // reply publishes the MsgBrowserActionResponse the browser_action tool is

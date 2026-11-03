@@ -118,6 +118,12 @@ const (
 	TagLaunchClaudeInPane = "MsgLaunchClaudeInPane"
 	TagPaneProcess        = "MsgPaneProcess"
 
+	// `##board attach` (design 030 W5): Workspace → Pane request + reply, and
+	// the pane's note to its group that its type changed.
+	TagPaneAttachBoard      = "MsgPaneAttachBoard"
+	TagPaneAttachBoardReply = "MsgPaneAttachBoardReply"
+	TagPaneGroupSetPaneType = "MsgPaneGroupSetPaneType"
+
 	// Native agent panes — `##claude` / `##codex` (design 029).
 	TagDiscoverCodexSession = "MsgDiscoverCodexSession"
 	TagResumeNativeAgents   = "MsgResumeNativeAgents"
@@ -232,6 +238,11 @@ const (
 	TagCLIResponse                  = "MsgCLIResponse"
 	TagCLIRyshCommand               = "MsgCLIRyshCommand"
 	TagCLICronApply                 = "MsgCLICronApply"
+	TagCLIMCPGate                   = "MsgCLIMCPGate"
+	TagHumanoidMCPSend              = "MsgHumanoidMCPSend"
+	TagHumanoidMCPSendReply         = "MsgHumanoidMCPSendReply"
+	TagHumanoidNotifyOwner          = "MsgHumanoidNotifyOwner"
+	TagHumanoidNotifyOwnerReply     = "MsgHumanoidNotifyOwnerReply"
 	TagTabDeleteLane                = "MsgTabDeleteLane"
 	TagTabCreatePaneGroupInLane     = "MsgTabCreatePaneGroupInLane"
 	TagTabCreateGrid                = "MsgTabCreateGrid"
@@ -376,6 +387,9 @@ const (
 	TagAttentionEnable  = "MsgAttentionEnable"
 	TagAttentionDisable = "MsgAttentionDisable"
 
+	// Peer feed (design 044 N1/N2)
+	TagPeerFeed = "MsgPeerFeed"
+
 	// Raw/interactive terminal mode
 	TagPaneResize      = "MsgPaneResize"
 	TagPaneReleaseSize = "MsgPaneReleaseSize"
@@ -400,6 +414,10 @@ const (
 	TagAnsaRoute                   = "MsgAnsaRoute"
 	TagAnsaRouteResult             = "MsgAnsaRouteResult"
 	TagCLIAnsaSend                 = "MsgCLIAnsaSend"
+	TagCLIPaneProfile              = "MsgCLIPaneProfile"
+	TagCLIPaneProfileReply         = "MsgCLIPaneProfileReply"
+	TagCLIAnsaKeys                 = "MsgCLIAnsaKeys"
+	TagCLIAnsaHung                 = "MsgCLIAnsaHung"
 	TagPaneReplayShareState        = "MsgPaneReplayShareState"
 	TagRemoteInteractiveModeChange = "MsgRemoteInteractiveModeChange"
 	TagPaneSetRemoteSubscriber     = "MsgPaneSetRemoteSubscriber"
@@ -504,6 +522,9 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagPaneSetGivenName, "*msg.MsgPaneSetGivenName", jsonDecoder[MsgPaneSetGivenName]())
 	r.Register(TagPaneSetHidden, "*msg.MsgPaneSetHidden", jsonDecoder[MsgPaneSetHidden]())
 	r.Register(TagPaneSetMeta, "*msg.MsgPaneSetMeta", jsonDecoder[MsgPaneSetMeta]())
+	r.Register(TagPaneAttachBoard, "*msg.MsgPaneAttachBoard", jsonDecoder[MsgPaneAttachBoard]())
+	r.Register(TagPaneAttachBoardReply, "*msg.MsgPaneAttachBoardReply", jsonDecoder[MsgPaneAttachBoardReply]())
+	r.Register(TagPaneGroupSetPaneType, "*msg.MsgPaneGroupSetPaneType", jsonDecoder[MsgPaneGroupSetPaneType]())
 	r.Register(TagLaunchClaudeInPane, "*msg.MsgLaunchClaudeInPane", jsonDecoder[MsgLaunchClaudeInPane]())
 	r.Register(TagDiscoverCodexSession, "*msg.MsgDiscoverCodexSession", jsonDecoder[MsgDiscoverCodexSession]())
 	r.Register(TagResumeNativeAgents, "*msg.MsgResumeNativeAgents", jsonDecoder[MsgResumeNativeAgents]())
@@ -544,6 +565,10 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagAnsaRoute, "*msg.MsgAnsaRoute", jsonDecoder[MsgAnsaRoute]())
 	r.Register(TagAnsaRouteResult, "*msg.MsgAnsaRouteResult", jsonDecoder[MsgAnsaRouteResult]())
 	r.Register(TagCLIAnsaSend, "*msg.MsgCLIAnsaSend", jsonDecoder[MsgCLIAnsaSend]())
+	r.Register(TagCLIPaneProfile, "*msg.MsgCLIPaneProfile", jsonDecoder[MsgCLIPaneProfile]())
+	r.Register(TagCLIPaneProfileReply, "*msg.MsgCLIPaneProfileReply", jsonDecoder[MsgCLIPaneProfileReply]())
+	r.Register(TagCLIAnsaKeys, "*msg.MsgCLIAnsaKeys", jsonDecoder[MsgCLIAnsaKeys]())
+	r.Register(TagCLIAnsaHung, "*msg.MsgCLIAnsaHung", jsonDecoder[MsgCLIAnsaHung]())
 	r.Register(TagPaneReplayShareState, "*msg.MsgPaneReplayShareState", jsonDecoder[MsgPaneReplayShareState]())
 	r.Register(TagRemoteInteractiveModeChange, "*msg.MsgRemoteInteractiveModeChange", jsonDecoder[MsgRemoteInteractiveModeChange]())
 	r.Register(TagPaneSetRemoteSubscriber, "*msg.MsgPaneSetRemoteSubscriber", jsonDecoder[MsgPaneSetRemoteSubscriber]())
@@ -614,6 +639,11 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagCLIResponse, "*msg.MsgCLIResponse", jsonDecoder[MsgCLIResponse]())
 	r.Register(TagCLIRyshCommand, "*msg.MsgCLIRyshCommand", jsonDecoder[MsgCLIRyshCommand]())
 	r.Register(TagCLICronApply, "*msg.MsgCLICronApply", jsonDecoder[MsgCLICronApply]())
+	r.Register(TagCLIMCPGate, "*msg.MsgCLIMCPGate", jsonDecoder[MsgCLIMCPGate]())
+	r.Register(TagHumanoidMCPSend, "*msg.MsgHumanoidMCPSend", jsonDecoder[MsgHumanoidMCPSend]())
+	r.Register(TagHumanoidMCPSendReply, "*msg.MsgHumanoidMCPSendReply", jsonDecoder[MsgHumanoidMCPSendReply]())
+	r.Register(TagHumanoidNotifyOwner, "*msg.MsgHumanoidNotifyOwner", jsonDecoder[MsgHumanoidNotifyOwner]())
+	r.Register(TagHumanoidNotifyOwnerReply, "*msg.MsgHumanoidNotifyOwnerReply", jsonDecoder[MsgHumanoidNotifyOwnerReply]())
 	r.Register(TagTabDeleteLane, "*msg.MsgTabDeleteLane", jsonDecoder[MsgTabDeleteLane]())
 	r.Register(TagTabCreatePaneGroupInLane, "*msg.MsgTabCreatePaneGroupInLane", jsonDecoder[MsgTabCreatePaneGroupInLane]())
 	r.Register(TagTabCreateGrid, "*msg.MsgTabCreateGrid", jsonDecoder[MsgTabCreateGrid]())
@@ -757,6 +787,9 @@ func DefaultCodecRegistry() *CodecRegistry {
 	r.Register(TagAttentionAck, "*msg.MsgAttentionAck", jsonDecoder[MsgAttentionAck]())
 	r.Register(TagAttentionEnable, "*msg.MsgAttentionEnable", jsonDecoder[MsgAttentionEnable]())
 	r.Register(TagAttentionDisable, "*msg.MsgAttentionDisable", jsonDecoder[MsgAttentionDisable]())
+
+	// Peer feed (design 044 N1/N2)
+	r.Register(TagPeerFeed, "*msg.MsgPeerFeed", jsonDecoder[MsgPeerFeed]())
 
 	return r
 }

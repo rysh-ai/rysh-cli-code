@@ -85,6 +85,9 @@ type runAudit struct {
 	// Limits documents what this artifact structurally cannot contain and
 	// why — honesty over completeness theater.
 	Limits []string `json:"limits"`
+
+	// recordRepo is the base commit for --share; not part of the audit file.
+	recordRepo runRecordRepo
 }
 
 // auditToolCall is one observed tool invocation, paired from
@@ -104,7 +107,7 @@ type auditToolCall struct {
 	// ended mid-call, or the end never reached the run client): the call is
 	// recorded, but its outcome is unknown.
 	Incomplete bool `json:"incomplete,omitempty"`
-	Iteration     int    `json:"iteration,omitempty"`
+	Iteration  int  `json:"iteration,omitempty"`
 	// Depth is the sub-agent depth (0 = top-level orchestrator).
 	Depth int `json:"depth,omitempty"`
 }

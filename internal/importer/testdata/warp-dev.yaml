@@ -1,0 +1,31 @@
+# Warp launch configuration, as it would sit in $HOME/.warp/launch_configurations/dev.yaml
+---
+name: Dev
+windows:
+  - active_tab_index: 0
+    tabs:
+      - title: docs
+        layout:
+          cwd: /fixture-home/Documents
+          commands:
+            - exec: ls -la
+        color: blue
+      - title: app
+        layout:
+          split_direction: horizontal
+          panes:
+            - cwd: /fixture-home/src/app
+              is_focused: true
+              commands:
+                - exec: npm install
+                - exec: npm start
+            - split_direction: vertical
+              panes:
+                - cwd: /fixture-home/src/app
+                  commands:
+                    - exec: npm test -- --watch
+                - cwd: /srv/logs
+  - tabs:
+      - title: second window
+        layout:
+          cwd: /tmp

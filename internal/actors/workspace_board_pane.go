@@ -169,6 +169,11 @@ func (w *WorkspaceActor) boardPaneFor(boardID string) string {
 // rendered in several places.
 func (w *WorkspaceActor) announceExistingPanesToBoard(boardID string) {
 	boardID = msg.NormalizeBoardID(boardID)
+	// The fleet board's members are fleets, not panes (design 030 §4.3): no
+	// pane roster is seeded into it.
+	if boardID == msg.FleetBoardID {
+		return
+	}
 	now := time.Now().UnixMilli()
 	for _, t := range w.tabs {
 		if t == nil {

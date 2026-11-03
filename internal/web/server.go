@@ -98,6 +98,23 @@ type Server struct {
 	credsRef  CredentialsRef
 	credsStat credsFileStamp
 
+	// privateLoopback records, at Start, whether the private listener is bound
+	// to a loopback address. Control mode's exemption from the login applies
+	// only then (see privateDoorOpen). Guarded by mu.
+	privateLoopback bool
+	// privatePort is the private listener's bound port, for the Host check.
+	// Guarded by mu.
+	privatePort int
+
+	// controlSecret is the control door's per-launch secret (control_secret.go);
+	// "" keeps the door shut. ownSecretFile is the file this server wrote for a
+	// secret it made itself, removed at Stop. Guarded by mu; never logged.
+	controlSecret string
+	ownSecretFile string
+
+	// loginLimit caps failed POST /api/auth/login attempts (see login_limit.go).
+	loginLimit loginLimiter
+
 	// fsBrowse serves the web UI's file browser (GET /fs/list, /fs/read).
 	// Injected by the WorkspaceActor via SetFSBrowser — the implementation
 	// lives in the actors package (sandbox rooted at the pane's cwd), which
@@ -249,9 +266,15 @@ func (s *Server) Start() error {
 		return fmt.Errorf("bind %s: %w", addr, err)
 	}
 
+	tcp, _ := ln.Addr().(*net.TCPAddr)
 	s.mu.Lock()
 	s.running = true
+	s.privateLoopback = tcp != nil && tcp.IP.IsLoopback()
+	if tcp != nil {
+		s.privatePort = tcp.Port
+	}
 	s.mu.Unlock()
+	s.prepareControlSecret()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
@@ -312,6 +335,9 @@ func (s *Server) Start() error {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
+	// Host check on the loopback private listener (control_secret.go): before
+	// the login gate, so a rebinding page is refused whatever it presents.
+	r.Use(s.hostGuard())
 	// Login gate (no-op when no credentials are configured). Must precede routes
 	// so session data, and the /ws upgrade, are all protected.
 	r.Use(s.authMiddleware())
@@ -387,8 +413,11 @@ func (s *Server) Start() error {
 	// session — one server, a second way in (see StartShared).
 	s.engine = r
 
+	// The goroutine serves through its own copy: Stop clears s.httpSrv under
+	// mu and may run before this goroutine has started.
+	httpSrv := s.httpSrv
 	go func() {
-		if err := s.httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			s.logger.Error("web server error", "err", err)
 			s.mu.Lock()
 			s.running = false
@@ -413,6 +442,8 @@ func (s *Server) Stop() error {
 	}
 
 	s.running = false
+	s.privateLoopback = false
+	s.privatePort = 0
 	// The shared door goes with the server it is a door onto — leaving a
 	// listener up after Stop would serve a session nothing is driving.
 	if s.sharedSrv != nil {
@@ -495,6 +526,7 @@ func (s *Server) Stop() error {
 	srv := s.httpSrv
 	s.httpSrv = nil
 	s.mu.Unlock()
+	s.dropControlSecret()
 
 	// Tear down any server-side embedded browsers (W12) so headless Chromium
 	// processes never outlive the web session.
@@ -535,7 +567,8 @@ func (s *Server) Port() int {
 // other half of that fix. Clients that do not offer the extension are served
 // uncompressed exactly as before.
 var upgrader = websocket.Upgrader{
-	CheckOrigin:       func(r *http.Request) bool { return true },
+	// CheckOrigin is set per request in handleWebSocket (wsOriginAllowed);
+	// left nil here, gorilla's same-origin check is the fallback.
 	ReadBufferSize:    4096,
 	WriteBufferSize:   4096,
 	EnableCompression: true,
@@ -547,7 +580,20 @@ var upgrader = websocket.Upgrader{
 const compressMinBytes = 256
 
 func (s *Server) handleWebSocket(c *gin.Context) {
-	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	// Per request: the origin rule depends on the door the request came
+	// through, and a client presenting the control secret or the login JWT as a
+	// subprotocol is answered with the plain ControlSubprotocol or
+	// TokenSubprotocol, never with the secret or the token.
+	u := upgrader
+	u.CheckOrigin = func(r *http.Request) bool {
+		if s.wsOriginAllowed(r) {
+			return true
+		}
+		s.logRefused(r, "websocket origin")
+		return false
+	}
+	u.Subprotocols = []string{ControlSubprotocol, TokenSubprotocol}
+	conn, err := u.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		return
 	}

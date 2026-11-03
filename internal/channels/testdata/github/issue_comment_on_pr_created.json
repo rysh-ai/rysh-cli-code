@@ -1,0 +1,20 @@
+{
+  "action": "created",
+  "issue": {
+    "number": 7,
+    "title": "Add retry to the uploader",
+    "html_url": "https://github.com/acme/widgets/pull/7",
+    "pull_request": {"url": "https://api.github.com/repos/acme/widgets/pulls/7", "html_url": "https://github.com/acme/widgets/pull/7"},
+    "user": {"login": "alice", "type": "User"},
+    "author_association": "OWNER"
+  },
+  "comment": {
+    "id": 9002,
+    "body": "@example_bot review this PR",
+    "html_url": "https://github.com/acme/widgets/pull/7#issuecomment-9002",
+    "user": {"login": "alice", "type": "User"},
+    "author_association": "MEMBER"
+  },
+  "repository": {"full_name": "acme/widgets", "html_url": "https://github.com/acme/widgets"},
+  "sender": {"login": "alice", "type": "User"}
+}

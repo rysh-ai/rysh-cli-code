@@ -15,7 +15,27 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/replay"
 )
 
+// viewCache holds the last rendered frame and the terminal size it was drawn
+// for (see Model.viewSkip).
+type viewCache struct {
+	frame         string
+	width, height int
+	ok            bool
+}
+
 func (m Model) View() string {
+	c := m.vcache
+	if m.viewSkip && c != nil && c.ok && c.width == m.width && c.height == m.height {
+		return c.frame
+	}
+	frame := m.renderView()
+	if c != nil {
+		*c = viewCache{frame: frame, width: m.width, height: m.height, ok: true}
+	}
+	return frame
+}
+
+func (m Model) renderView() string {
 	header := m.renderHeader()
 	body := m.renderBody()
 	footer := m.renderFooter()
@@ -810,6 +830,10 @@ func (m Model) paneBorderTitle(pane domain.PaneSnapshot) string {
 	} else {
 		base = autoName + " | " + modeLabel
 	}
+	// Design 066: a sandboxed agent pane carries its profile in the title.
+	if p := strings.TrimSpace(pane.Meta["agent.sandbox"]); p != "" {
+		base += " | [sbx:" + p + "]"
+	}
 	if pane.StackTotal > 1 {
 		index := pane.StackPosition + 1
 		gap := 1 + numDigits(pane.StackTotal) - numDigits(index)
@@ -900,9 +924,7 @@ func paneMetaFit(pane domain.PaneSnapshot, width int) string {
 	for _, v := range variants[1:min(2, len(variants))] {
 		tries = append(tries, v+suffix)
 	}
-	for _, v := range variants[min(1, len(variants)-1):] {
-		tries = append(tries, v)
-	}
+	tries = append(tries, variants[min(1, len(variants)-1):]...)
 	for _, t := range tries {
 		if ansi.StringWidth(t) <= width {
 			return t

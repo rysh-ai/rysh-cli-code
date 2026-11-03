@@ -54,7 +54,13 @@ func stripClaudeFlag(args []string) (rest []string, withClaude bool) {
 }
 
 // handlePaneNewClaude creates the pane and schedules the launch.
-func (w *WorkspaceActor) handlePaneNewClaude(ctx actor.Context, out *strings.Builder, paneID string, args []string) {
+func (w *WorkspaceActor) handlePaneNewClaude(ctx actor.Context, out *strings.Builder, paneID string, args []string, asJSON bool) {
+	// Before a pane is opened or a prompt written: nothing changes.
+	if why := claudeHooksRefusal(nativeAgentClaude); why != "" {
+		fmt.Fprintf(out, "\n[rysh] ##pane new --claude: %s\n  nothing was started and nothing was changed\n", why)
+		w.failRysh("##pane new --claude: %s", why)
+		return
+	}
 	prompt := strings.TrimSpace(strings.Join(args, " "))
 	sessionID := uuid.NewString()
 
@@ -93,6 +99,11 @@ func (w *WorkspaceActor) handlePaneNewClaude(ctx actor.Context, out *strings.Bui
 	w.persistToKV()
 
 	w.scheduleClaudeLaunch(alias, sessionID, promptFile, claudeLaunchRetries)
+
+	if asJSON {
+		writeJSONLine(out, NewPaneResult{Alias: alias, TabID: tab.id, SessionID: sessionID})
+		return
+	}
 
 	fmt.Fprintf(out, "\n[rysh] new pane %q stacked beside the caller — starting claude\n", alias)
 	fmt.Fprintf(out, "  session id : %s\n", sessionID)
@@ -211,6 +222,9 @@ func (w *WorkspaceActor) handleLaunchClaudeInPane(m *msg.MsgLaunchClaudeInPane) 
 // have exported into the pane shell — is agentenv's one definition, applied by
 // `rysh exec-clean` (agentenv.TypedLine).
 func claudeLaunchCommand(sessionID, promptFile, extraArgs string) string {
+	if why := claudeHooksRefusal(nativeAgentClaude); why != "" {
+		return claudeRefusalLine(why)
+	}
 	var b strings.Builder
 	b.WriteString("claude --session-id ")
 	b.WriteString(sessionID)
@@ -218,6 +232,9 @@ func claudeLaunchCommand(sessionID, promptFile, extraArgs string) string {
 		b.WriteString(" ")
 		b.WriteString(extraArgs)
 	}
+	// With claude_bridge on, the lifecycle leaves claude's hooks to the bridge,
+	// so a claude started without it would get no hooks at all.
+	b.WriteString(claudeBridgeArgs(nativeAgentSpec{Kind: nativeAgentClaude, Args: extraArgs}))
 	if promptFile != "" {
 		// $(cat …) rather than the text inline: the command has already been
 		// through the ## tokeniser by the time it gets here, and the file is

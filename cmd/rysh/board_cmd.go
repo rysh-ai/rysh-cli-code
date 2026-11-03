@@ -571,8 +571,9 @@ func renderBoardTail(r *board.QueryReply) string {
 	for _, t := range r.Threads {
 		b.WriteString("\n")
 		if t.Root != nil {
-			fmt.Fprintf(&b, "● %s%s  [%s]  %s%s\n",
-				t.Root.Persona, boardTailAddress(t.Root), t.Root.Kind, boardTailClock(t.Root.TS), boardTailKey(t.Key))
+			fmt.Fprintf(&b, "● %s%s%s  [%s]  %s%s\n",
+				t.Root.Persona, boardTailUnverified(t.Root), boardTailAddress(t.Root), t.Root.Kind,
+				boardTailClock(t.Root.TS), boardTailKey(t.Key))
 			fmt.Fprintf(&b, "  %s\n", t.Root.Text)
 		} else {
 			// A provisional thread: replies arrived before their root, which is
@@ -581,11 +582,21 @@ func renderBoardTail(r *board.QueryReply) string {
 			fmt.Fprintf(&b, "◌ (root has not arrived) %s\n", boardTailKey(t.Key))
 		}
 		for _, rep := range t.Replies {
-			fmt.Fprintf(&b, "  ↳ %s%s  [%s]  %s\n", rep.Persona, boardTailAddress(rep), rep.Kind, boardTailClock(rep.TS))
+			fmt.Fprintf(&b, "  ↳ %s%s%s  [%s]  %s\n", rep.Persona, boardTailUnverified(rep), boardTailAddress(rep),
+				rep.Kind, boardTailClock(rep.TS))
 			fmt.Fprintf(&b, "    %s\n", rep.Text)
 		}
 	}
 	return b.String() + boardTailNotices(r)
+}
+
+// boardTailUnverified marks a fleet-board post the recorder could not verify
+// (design 030 §9.3, W3): no door stamp, or not a fleet head.
+func boardTailUnverified(p *msg.MsgBoardPost) string {
+	if p != nil && p.Unverified {
+		return " (unverified)"
+	}
+	return ""
 }
 
 // boardTailAddress shows where a design-050 command went, and which command an

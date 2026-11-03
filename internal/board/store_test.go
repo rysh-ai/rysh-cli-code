@@ -346,7 +346,7 @@ func TestOwnsThread(t *testing.T) {
 		{paneA, msg.MintThreadID(paneA, 1), true},
 		{paneA, msg.MintThreadID(paneA, 42), true},
 		{paneA, msg.MintThreadID(paneB, 1), false},
-		{paneA, paneA, false},      // no separator, no ordinal
+		{paneA, paneA, false},       // no separator, no ordinal
 		{paneA, paneA + "/", false}, // separator but no ordinal
 		{"", "anything/1", false},
 		{paneA, "", false},

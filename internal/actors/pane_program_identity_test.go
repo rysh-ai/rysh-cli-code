@@ -7,9 +7,7 @@ package actors
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"syscall"
 	"testing"
 	"time"
 
@@ -24,8 +22,9 @@ import (
 // MsgPaneProcess said "running 2.1.296" for a claude.
 
 // startProgramAs runs a stand-in binary at path, exec'd through link with
-// argv[0] = arg0, in its own process group, and waits until the kernel names it
-// wantComm. It returns the pid, which is also the pgid.
+// argv[0] = arg0, preferably in its own process group, and waits until the
+// kernel names it wantComm. It returns the pid. The child is started and
+// stopped by startOwnChild (pane_identity_realexe_test.go).
 func startProgramAs(t *testing.T, path, link, arg0, wantComm string) int {
 	t.Helper()
 	buildSleeper(t, path)
@@ -36,16 +35,7 @@ func startProgramAs(t *testing.T, path, link, arg0, wantComm string) int {
 		}
 		exe = link
 	}
-	cmd := &exec.Cmd{Path: exe, Args: []string{arg0, "60"}}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		t.Skipf("cannot start %s: %v", exe, err)
-	}
-	pid := cmd.Process.Pid
-	t.Cleanup(func() {
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
-		_ = cmd.Wait()
-	})
+	pid := startOwnChild(t, exe, []string{arg0, "60"})
 	var comm string
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -95,11 +85,15 @@ func nextProcessEvent(t *testing.T, sub *nats.Subscription, codecs *msg.CodecReg
 func TestPaneProgramNamesAVersionNamedClaudeByItsRealName(t *testing.T) {
 	const version = "9.9.998"
 	root := t.TempDir()
-	versions := filepath.Join(root, "share", "claude", "versions")
+	versions := filepath.Join(root, ".local", "share", "claude", "versions")
 	if err := os.MkdirAll(versions, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	pid := startProgramAs(t, filepath.Join(versions, version), filepath.Join(root, "claude"), "claude", version)
+	// HOME is the fake home, so the layout sits at the native installer's known
+	// install location, ~/.local/share/claude/versions (WO-7). It is set after
+	// the stand-in is built, so the build keeps the real Go cache.
+	t.Setenv("HOME", root)
 
 	nc := startInProcessNATS(t)
 	codecs := msg.DefaultCodecRegistry()

@@ -3,6 +3,9 @@
 package tui
 
 import (
+	"io"
+	"os"
+
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
@@ -20,6 +23,18 @@ func (m Model) tabAttentionCount(tab domain.TabSnapshot) int {
 	return total
 }
 
+// anyAttention reports whether any pane has an attention count: the only state
+// in which attentionBlink is drawn anywhere (pane borders, tab badges, the
+// collapsed-lane strip).
+func (m Model) anyAttention() bool {
+	for _, info := range m.attentionState {
+		if info != nil && info.Count > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // attentionIcon returns a category-specific icon for attention badges.
 func (m Model) attentionIcon(cat msgpkg.AttentionCategory) string {
 	switch cat {
@@ -35,6 +50,10 @@ func (m Model) attentionIcon(cat msgpkg.AttentionCategory) string {
 		return "\U0001f4f1"
 	case msgpkg.AttentionPhone:
 		return "\U0001f4de"
+	case msgpkg.AttentionPrompt:
+		return "\u270b"
+	case msgpkg.AttentionPeer:
+		return "\U0001f4e8"
 	default:
 		return "\u25cf"
 	}
@@ -52,4 +71,13 @@ func (m Model) attentionBorderColor(priority msgpkg.AttentionPriority) lipgloss.
 	default:
 		return lipgloss.Color("44")
 	}
+}
+
+// writeAttention writes a notification escape to the host terminal.
+func (m Model) writeAttention(s string) {
+	var w io.Writer = os.Stdout
+	if m.attentionOut != nil {
+		w = m.attentionOut
+	}
+	_, _ = io.WriteString(w, s)
 }

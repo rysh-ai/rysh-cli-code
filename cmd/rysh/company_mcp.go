@@ -218,8 +218,34 @@ type companyRPCResponse struct {
 
 // serveCompanyMCP reads requests from in until EOF and answers on out. It
 // returns when stdin closes — the manager stopping the child — or on a read
-// error. Notifications (no id) are consumed silently, as the protocol asks.
+// error.
 func serveCompanyMCP(in io.Reader, out io.Writer, tools *companyTools) error {
+	return serveStdioMCP(in, out, stdioMCPServer{
+		name:        "rysh-company",
+		tools:       func() any { return companyToolSpecs },
+		call:        tools.call,
+		callTimeout: 30 * time.Second,
+	})
+}
+
+// stdioMCPServer is what one MCP server contributes to the shared stdio loop:
+// its name, the tools it lists, and how a call runs. The company server and
+// `rysh mcp serve` (design 067) both run on serveStdioMCP, so there is one
+// JSON-RPC loop to get right.
+type stdioMCPServer struct {
+	name  string
+	tools func() any
+	call  func(ctx context.Context, name string, args json.RawMessage) (text string, isErr bool)
+	// callTimeout bounds one tools/call. A tool that waits (wait_for_pane_state)
+	// applies its own, shorter deadline inside this one.
+	callTimeout time.Duration
+}
+
+// serveStdioMCP reads requests from in until EOF and answers on out.
+// Notifications (no id) are consumed silently, as the protocol asks. Each
+// tools/call runs on its own goroutine, so a long wait does not hold up the
+// calls behind it; the loop waits for calls in flight before it returns.
+func serveStdioMCP(in io.Reader, out io.Writer, srv stdioMCPServer) error {
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 0, 64*1024), 8<<20)
 	var wmu sync.Mutex
@@ -239,6 +265,12 @@ func serveCompanyMCP(in io.Reader, out io.Writer, tools *companyTools) error {
 		}
 		write(companyRPCResponse{ID: id, Error: &companyRPCError{Code: code, Message: message}})
 	}
+	timeout := srv.callTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	var inflight sync.WaitGroup
+	defer inflight.Wait()
 
 	for sc.Scan() {
 		line := bytes.TrimSpace(sc.Bytes())
@@ -258,12 +290,12 @@ func serveCompanyMCP(in io.Reader, out io.Writer, tools *companyTools) error {
 			write(companyRPCResponse{ID: req.ID, Result: map[string]any{
 				"protocolVersion": companyMCPProtocolVersion,
 				"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
-				"serverInfo":      map[string]any{"name": "rysh-company", "version": companyMCPServerVersion},
+				"serverInfo":      map[string]any{"name": srv.name, "version": companyMCPServerVersion},
 			}})
 		case "ping":
 			write(companyRPCResponse{ID: req.ID, Result: map[string]any{}})
 		case "tools/list":
-			write(companyRPCResponse{ID: req.ID, Result: map[string]any{"tools": companyToolSpecs}})
+			write(companyRPCResponse{ID: req.ID, Result: map[string]any{"tools": srv.tools()}})
 		case "tools/call":
 			var p struct {
 				Name      string          `json:"name"`
@@ -273,13 +305,18 @@ func serveCompanyMCP(in io.Reader, out io.Writer, tools *companyTools) error {
 				fail(req.ID, -32602, "tools/call needs a tool name")
 				continue
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			text, isErr := tools.call(ctx, p.Name, p.Arguments)
-			cancel()
-			write(companyRPCResponse{ID: req.ID, Result: map[string]any{
-				"content": []map[string]any{{"type": "text", "text": text}},
-				"isError": isErr,
-			}})
+			id := append(json.RawMessage(nil), req.ID...)
+			inflight.Add(1)
+			go func() {
+				defer inflight.Done()
+				ctx, cancel := context.WithTimeout(context.Background(), timeout)
+				text, isErr := srv.call(ctx, p.Name, p.Arguments)
+				cancel()
+				write(companyRPCResponse{ID: id, Result: map[string]any{
+					"content": []map[string]any{{"type": "text", "text": text}},
+					"isError": isErr,
+				}})
+			}()
 		default:
 			fail(req.ID, -32601, "method not found: "+req.Method)
 		}

@@ -52,7 +52,7 @@ func (p *PaneActor) buildSnapshot(includeContent, includeConversations, includeH
 		Hidden:                p.hidden,
 		Program:               p.Program(),
 		ProgramPGID:           int(p.programPGID.Load()),
-		Meta:                  p.metaCopy(),
+		Meta:                  p.snapshotMeta(includeConversations),
 		ListeningToID:         p.listeningToID,
 		RegisteredHumanoid:    p.registeredHumanoid,
 		Sharing:               p.sharing,
@@ -109,8 +109,8 @@ func (p *PaneActor) buildSnapshot(includeContent, includeConversations, includeH
 	// Expose the shell pid so the TUI can resolve the pane's live working
 	// directory for shell tab-completion (paths complete relative to wherever
 	// the user has cd'd, not the session start dir).
-	if p.cmd != nil && p.cmd.Process != nil {
-		snap.ShellPID = p.cmd.Process.Pid
+	if p.shellProc != nil {
+		snap.ShellPID = p.shellProc.Pid()
 	}
 
 	// Live shell cwd as reported via OSC 7 (push-based; "" until the shell's
@@ -289,6 +289,26 @@ func (p *PaneActor) buildVTFrame() *msg.MsgPaneVTReply {
 		Screen:      p.vtermEmu.RenderANSIWithCursor(),
 		CursorRow:   row,
 		CursorCol:   col,
+	}
+}
+
+// vtFrameForRequest turns a full VT frame into the row-delta form when the
+// requester sent the row hashes of the screen it holds (MsgGetPaneVT.RowHashes):
+// only the rows that differ go on the wire. A non-interactive frame, or a
+// request without hashes, is returned unchanged.
+func vtFrameForRequest(f *msg.MsgPaneVTReply, rowHashes []uint64) *msg.MsgPaneVTReply {
+	if len(rowHashes) == 0 || !f.Interactive {
+		return f
+	}
+	return &msg.MsgPaneVTReply{
+		PaneID:      f.PaneID,
+		Interactive: true,
+		CursorRow:   f.CursorRow,
+		CursorCol:   f.CursorCol,
+		Delta:       true,
+		Rows:        len(f.Screen),
+		Changed:     msg.VTRowDelta(f.Screen, rowHashes),
+		BaseHash:    msg.VTRowsHash(rowHashes),
 	}
 }
 
@@ -490,7 +510,8 @@ func (p *PaneActor) RestoreState(snap domain.PaneSnapshot) {
 	// default, so losing this field would put an agent's pane on everyone's
 	// screen after every restart.
 	p.hidden = snap.Hidden
-	p.meta = snap.Meta
+	p.meta = withoutAttentionMeta(snap.Meta)
+	p.noteMetaChanged()
 	// `##pane provider` override: only the name/model pair is recorded here.
 	// The live provider is rebuilt in *actor.Started (installProviderOverride),
 	// after the holder exists but before the executor spawns.
@@ -642,4 +663,5 @@ func (p *PaneActor) restoreDurableMeta() {
 	// key was deleted, which must not resurrect from a stale snapshot.
 	p.givenName = mk.GivenName
 	p.meta = mk.Meta
+	p.noteMetaChanged()
 }

@@ -21,6 +21,8 @@ func TestRequirePTY_AllowsPtylessCommands(t *testing.T) {
 		// missing from the allow-list until the first Windows runtime smoke run
 		// refused `rysh board`. Registry ops likewise.
 		"board", "search", "update",
+		// `import` writes files under .rysh/ and opens no pane.
+		"import",
 	} {
 		if err := requirePTY([]string{cmd}); err != nil {
 			t.Errorf("requirePTY(%q) = %v, want nil — this command needs no pane", cmd, err)

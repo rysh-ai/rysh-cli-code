@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(npm run test:*)",
+      "Bash(go test ./...)",
+      "Read(~/.config/app/**)",
+      "WebFetch(domain:docs.example.test)"
+    ],
+    "ask": [
+      "Bash(git push:*)"
+    ],
+    "deny": [
+      "Bash(curl:*)",
+      "Bash(rm -rf:*)",
+      "Read(./.env)",
+      "mcp__tracker__delete_issue"
+    ]
+  },
+  "env": {
+    "FIXTURE_SETTINGS_TOKEN": "placeholder-value-7"
+  }
+}

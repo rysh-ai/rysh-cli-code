@@ -7,9 +7,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/rysh-ai/rysh-cli-code/internal/shellscan"
 )
 
 const (
@@ -74,6 +78,9 @@ func (t *BashTool) Execute(ctx context.Context, params json.RawMessage) (*ToolOu
 	workDir := t.workDir
 	if p.WorkDir != "" {
 		workDir = p.WorkDir
+	}
+	if out := bashFSRefusal(p.Command, workDir, t.workDir); out != nil {
+		return out, nil
 	}
 
 	// Determine timeout: param override > tool default, capped at 10 minutes.
@@ -162,6 +169,50 @@ var safeBashPrefixes = []string{
 	// build / test / lint (idempotent for a coding agent)
 	"go build", "go test", "go vet", "go list", "go doc", "go env",
 	"gofmt", "golangci-lint",
+	// waiting
+	"sleep",
+}
+
+// ryshCoordination is the agent's own coordination surface: board messages
+// and the fleet status ledger. A fleet agent runs these every turn (the
+// courier's delivered prompt even tells it to `board ack`), so gating them
+// stops every fleet of native agents. They write only to the session's own
+// board and ledger.
+var ryshCoordination = map[string]map[string]bool{
+	"board": {"post": true, "reply": true, "send": true, "ack": true, "tail": true, "inbox": true},
+	"fleet": {"status": true, "show": true, "ls": true},
+}
+
+// ryshBinaries are the names the rysh CLI ships under; the daemon's own
+// executable name is added at start (a desktop sidecar may differ).
+var ryshBinaries = func() map[string]bool {
+	m := map[string]bool{"rysh": true, "rysh_local": true, "ry": true}
+	if exe, err := os.Executable(); err == nil {
+		if b := filepath.Base(exe); strings.HasPrefix(b, "rysh") || strings.HasPrefix(b, "ry") {
+			m[b] = true // e.g. a desktop sidecar's name; never an unrelated binary
+		}
+	}
+	return m
+}()
+
+// isRyshCoordination reports whether one command segment is `rysh board
+// <post|reply|send|ack|tail|inbox>` or `rysh fleet <status|show|ls>`. The
+// binary must be a bare name (found on PATH) or an absolute path: a relative
+// path like ./rysh could be any script.
+func isRyshCoordination(seg string) bool {
+	f := shellscan.Fields(seg)
+	if len(f) < 3 {
+		return false
+	}
+	bin := f[0]
+	if strings.Contains(bin, "/") && !filepath.IsAbs(bin) {
+		return false
+	}
+	if !ryshBinaries[filepath.Base(bin)] {
+		return false
+	}
+	subs, ok := ryshCoordination[f[1]]
+	return ok && subs[f[2]]
 }
 
 // dangerousBashPatterns always require approval regardless of allowlisting.
@@ -172,8 +223,10 @@ var dangerousBashPatterns = []string{
 
 // RequiresApproval gates bash with an allowlist. Order of checks:
 //  1. user-configured + known-dangerous patterns → always approve;
-//  2. redirections / command substitution → approve (can hide mutations);
-//  3. each chained segment must be a known-safe prefix, else approve;
+//  2. redirections / command substitution outside quotes → approve (can hide
+//     mutations), as does a line whose quoting cannot be read;
+//  3. each segment (split on && || ; | & and newlines outside quotes) must be
+//     a known-safe prefix or rysh's own board/fleet coordination, else approve;
 //  4. otherwise (all segments read-only/idempotent) → no approval.
 //
 // This is intentionally safe-by-default: an unrecognised mutating command
@@ -204,30 +257,22 @@ func (t *BashTool) RequiresApproval(params json.RawMessage) bool {
 	}
 
 	// 2. Redirections and command substitution can hide writes/mutations.
-	if strings.Contains(cmd, ">") || strings.Contains(cmd, "$(") || strings.Contains(cmd, "`") {
+	// Quote-aware: a ">" inside a quoted message is text, "$(" inside double
+	// quotes still runs.
+	scan := shellscan.Scan(cmd)
+	if scan.Unsafe() {
 		return true
 	}
 
-	// 3. Every segment of a chained command (&& || ; |) must be a safe prefix.
-	for _, seg := range splitShellSegments(cmd) {
-		seg = strings.TrimSpace(seg)
-		if seg == "" {
-			continue
-		}
-		if !hasSafeBashPrefix(seg) {
+	// 3. Every segment (&& || ; | & newline, outside quotes) must be safe.
+	for _, seg := range scan.Segments {
+		if !hasSafeBashPrefix(seg) && !isRyshCoordination(seg) {
 			return true
 		}
 	}
 
 	// 4. All segments are read-only/idempotent → no approval.
 	return false
-}
-
-// splitShellSegments splits a command on shell control operators. strings'
-// Replacer matches in argument order, so "&&"/"||" are consumed before "|".
-func splitShellSegments(cmd string) []string {
-	r := strings.NewReplacer("&&", "\x00", "||", "\x00", ";", "\x00", "|", "\x00", "\n", "\x00")
-	return strings.Split(r.Replace(cmd), "\x00")
 }
 
 // hasSafeBashPrefix reports whether a single command segment begins with a

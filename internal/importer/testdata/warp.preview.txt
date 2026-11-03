@@ -1,0 +1,26 @@
+rysh import warp — preview (nothing is written without --apply)
+
+Layout: 3 tab(s), 3 lane(s), 5 pane(s)
+  tab 1 "docs"
+    lane 1
+      pane 1  cwd: $HOME/Documents
+              start: ls -la
+  tab 2 "app"
+    lane 1
+      pane 1  cwd: $HOME/src/app
+              start: npm install; npm start
+      pane 2  cwd: $HOME/src/app
+              start: npm test -- --watch
+      pane 3  cwd: /srv/logs
+  tab 3 "second window"
+    lane 1
+      pane 1  cwd: /tmp
+  Start commands are not run now: they run when you run the generated script.
+
+Notes:
+  - 2 Warp windows were merged into one rysh session's tabs, in order
+  - tab "app": a split nested inside a lane was flattened into that lane (rysh lanes stack panes top to bottom)
+
+With --apply this writes (after backing up what it replaces):
+  .rysh/imports/warp-dev.rysh
+Undo with: rysh import --undo

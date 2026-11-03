@@ -31,6 +31,12 @@ type MsgPaneExecShell struct {
 // PaneActor forwards this to rysh.pane.{paneID}.llm.inbox as MsgExecPrompt.
 type MsgPaneExecPrompt struct {
 	Prompt string `json:"prompt"`
+	// Literal delivers Prompt to the LLM actor exactly as given: no prefix of
+	// it is read as a pane directive (today the "##>" pipeline-event prefix).
+	// `rysh family serve` sets it, because a family member's message is chat
+	// text and must never be interpreted (design 093 H3). Older daemons ignore
+	// the field.
+	Literal bool `json:"literal,omitempty"`
 }
 
 // MsgPaneExecRysh records a rysh system command in the pane's rysh history.
@@ -405,6 +411,7 @@ const (
 	AttentionChatbot  AttentionCategory = "chatbot"
 	AttentionWhatsApp AttentionCategory = "whatsapp"
 	AttentionPhone    AttentionCategory = "phone"
+	AttentionPrompt   AttentionCategory = "prompt"
 )
 
 // AttentionPriority defines urgency levels.

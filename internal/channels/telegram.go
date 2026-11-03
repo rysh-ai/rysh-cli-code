@@ -11,7 +11,9 @@ package channels
 //     needs no public endpoint, which is why it is the primary path.
 //   - "webhook": a loopback-bound HTTP server on WebhookPort registered with
 //     Telegram via setWebhook(WebhookURL). The operator supplies the public
-//     tunnel; this mirrors the WhatsApp webhook pattern.
+//     tunnel; this mirrors the WhatsApp webhook pattern. Each Start mints a
+//     random secret_token and registers it with setWebhook; an update without
+//     the matching X-Telegram-Bot-Api-Secret-Token header is refused (401).
 //
 // Outbound goes through sendMessage with line-boundary splitting under the
 // 4096-char cap, a per-chat 1 msg/s pacer (Telegram's per-chat limit), and a
@@ -20,12 +22,17 @@ package channels
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,8 +43,9 @@ import (
 )
 
 const (
-	// telegramAPIBase is the production Bot API endpoint. Tests override the
-	// adapter's unexported apiBase field to point at an httptest server.
+	// telegramAPIBase is the production Bot API endpoint. ChannelConfig.APIBase
+	// overrides it (a self-hosted Bot API server, or a local fake platform);
+	// package tests may also set the unexported apiBase field directly.
 	telegramAPIBase = "https://api.telegram.org"
 	// telegramPollTimeoutSecs is the getUpdates long-poll timeout requested
 	// from Telegram. 50s keeps one outbound connection open near-continuously
@@ -93,6 +101,26 @@ type TelegramAdapter struct {
 	// was last reserved.
 	lastSend map[string]time.Time
 	server   *http.Server
+	// webhookSecret is the secret_token minted on each webhook-mode Start and
+	// registered with setWebhook. Telegram echoes it in the
+	// X-Telegram-Bot-Api-Secret-Token header; handleWebhook refuses any
+	// update without it. Empty means "never registered": refuse everything.
+	// Guarded by mu. Never logged and never shown in Status.
+	webhookSecret string
+}
+
+// telegramSecretHeader carries the setWebhook secret_token on every webhook
+// delivery (Bot API 6.0+).
+const telegramSecretHeader = "X-Telegram-Bot-Api-Secret-Token"
+
+// newTelegramWebhookSecret returns 32 random bytes as unpadded base64url: 43
+// chars, all within Telegram's allowed secret_token alphabet [A-Za-z0-9_-].
+func newTelegramWebhookSecret() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // NewTelegramAdapter creates a Telegram channel adapter from the config.
@@ -117,10 +145,14 @@ func NewTelegramAdapter(config msg.ChannelConfig) *TelegramAdapter {
 			allowed[c] = true
 		}
 	}
+	apiBase := telegramAPIBase
+	if b := strings.TrimSpace(config.APIBase); b != "" {
+		apiBase = b
+	}
 	return &TelegramAdapter{
 		config:    config,
 		inbound:   make(chan InboundMessage, 100),
-		apiBase:   telegramAPIBase,
+		apiBase:   apiBase,
 		apiClient: &http.Client{Timeout: 20 * time.Second},
 		// Slightly above the 50s poll timeout so Telegram, not the client,
 		// terminates a healthy empty poll.
@@ -201,6 +233,9 @@ func (t *TelegramAdapter) Stop() error {
 	}
 	t.mu.Lock()
 	t.connected = false
+	// Forget this start's webhook secret: a late request carrying it is
+	// refused, and a later Start mints a new one.
+	t.webhookSecret = ""
 	t.mu.Unlock()
 	slog.Info("telegram: adapter stopped")
 	return nil
@@ -304,32 +339,64 @@ type telegramEntity struct {
 // (ok=false) are left in the envelope for the caller, because 429 handling
 // needs parameters.retry_after.
 func (t *TelegramAdapter) callAPI(ctx context.Context, client *http.Client, method string, params any) (*telegramAPIResponse, error) {
+	// Every request carries the token, so the API root is checked here, at
+	// the one place requests are built: no Start, Validate or Send path can
+	// send it in clear text to a non-loopback host.
+	if err := ValidateAPIBase(t.apiBase); err != nil {
+		return nil, fmt.Errorf("telegram: %w", err)
+	}
 	buf, err := json.Marshal(params)
 	if err != nil {
 		return nil, fmt.Errorf("marshal %s params: %w", method, err)
 	}
+	// The Bot API carries the token in the URL path, and net/http quotes the
+	// URL in its errors (*url.Error, URL parse errors). Every error built here
+	// goes through redact so the token never reaches a log line, the channel
+	// status or doctor output.
 	url := fmt.Sprintf("%s/bot%s/%s", strings.TrimSuffix(t.apiBase, "/"), t.config.BotToken, method)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
 	if err != nil {
-		return nil, fmt.Errorf("build %s request: %w", method, err)
+		return nil, t.redact(fmt.Errorf("build %s request: %w", method, err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%s request: %w", method, err)
+		var ue *neturl.Error
+		if errors.As(err, &ue) {
+			err = ue.Err // drop the quoted URL; keep the cause
+		}
+		return nil, &telegramTransportError{err: t.redact(fmt.Errorf("%s request: %w", method, err))}
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, fmt.Errorf("read %s response: %w", method, err)
+		return nil, t.redact(fmt.Errorf("read %s response: %w", method, err))
 	}
 	var api telegramAPIResponse
 	if err := json.Unmarshal(body, &api); err != nil {
-		return nil, fmt.Errorf("decode %s response (status %d): %w", method, resp.StatusCode, err)
+		return nil, fmt.Errorf("decode %s response (HTTP %d): %w", method, resp.StatusCode, err)
 	}
 	return &api, nil
+}
+
+// telegramTransportError marks a request that never got an HTTP response
+// (dial failure, timeout), so Validate can say "unreachable" rather than
+// "rejected".
+type telegramTransportError struct{ err error }
+
+func (e *telegramTransportError) Error() string { return e.err.Error() }
+func (e *telegramTransportError) Unwrap() error { return e.err }
+
+// redact replaces any occurrence of the bot token in err's text. The result
+// is a plain error: wrapping the original would let a caller's %+v or Unwrap
+// reach the unredacted text again.
+func (t *TelegramAdapter) redact(err error) error {
+	if err == nil || t.config.BotToken == "" || !strings.Contains(err.Error(), t.config.BotToken) {
+		return err
+	}
+	return errors.New(strings.ReplaceAll(err.Error(), t.config.BotToken, "<bot-token>"))
 }
 
 // getMe fetches the bot's own identity (ID + username).
@@ -483,6 +550,16 @@ func (t *TelegramAdapter) startWebhook(ctx context.Context) error {
 		return fmt.Errorf("telegram: webhook_url is required in webhook mode")
 	}
 
+	// Mint a fresh secret before the listener serves, so there is no window
+	// in which an unverified update is accepted.
+	secret, err := newTelegramWebhookSecret()
+	if err != nil {
+		return fmt.Errorf("telegram: webhook secret: %w", err)
+	}
+	t.mu.Lock()
+	t.webhookSecret = secret
+	t.mu.Unlock()
+
 	addr := fmt.Sprintf("127.0.0.1:%d", t.port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -507,6 +584,7 @@ func (t *TelegramAdapter) startWebhook(ctx context.Context) error {
 	resp, err := t.callAPI(ctx, t.apiClient, "setWebhook", map[string]any{
 		"url":             t.config.WebhookURL,
 		"allowed_updates": []string{"message"},
+		"secret_token":    secret,
 	})
 	if err == nil && !resp.OK {
 		err = fmt.Errorf("api error %d: %s", resp.ErrorCode, resp.Description)
@@ -535,12 +613,25 @@ func (t *TelegramAdapter) startWebhook(ctx context.Context) error {
 	return nil
 }
 
-// handleWebhook processes one Telegram update delivered via webhook. It always
-// answers 200 for POSTs — Telegram retries non-2xx responses aggressively, and
-// a malformed body will not get better on redelivery.
+// handleWebhook processes one Telegram update delivered via webhook. It
+// answers 401 unless X-Telegram-Bot-Api-Secret-Token matches the secret this
+// start registered with setWebhook (constant-time compare; an unregistered,
+// empty secret matches nothing). Otherwise it always answers 200 for POSTs —
+// Telegram retries non-2xx responses aggressively, and a malformed body will
+// not get better on redelivery.
 func (t *TelegramAdapter) handleWebhook(rw http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(rw, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	t.mu.RLock()
+	want := t.webhookSecret
+	t.mu.RUnlock()
+	got := r.Header.Get(telegramSecretHeader)
+	if want == "" || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+		slog.Warn("telegram: refused webhook update without a valid secret token",
+			"remote", r.RemoteAddr)
+		http.Error(rw, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
@@ -644,10 +735,12 @@ func (t *TelegramAdapter) processUpdate(u telegramUpdate) {
 	if mention {
 		im.Metadata["mention"] = "true"
 	}
-	if replyMode == "mentions" && !mention {
+	addressedDM := u.Message.Chat.Type == "private" && tagDirectMessage(im.Metadata)
+	if replyMode == "mentions" && !mention && !addressedDM {
 		// Non-mention in mentions-only mode: forward as observe_only so the
 		// HumanoidActor can echo to the external buffer without triggering
-		// the LLM (same semantics as slack.go).
+		// the LLM (same semantics as slack.go). A private chat is a 1:1 DM
+		// and is addressed by definition (direct_message.go).
 		im.Metadata["observe_only"] = "true"
 	}
 

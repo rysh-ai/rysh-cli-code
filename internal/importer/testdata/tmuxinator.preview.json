@@ -1,0 +1,84 @@
+{
+  "source": "tmux",
+  "name": "blog",
+  "inputs": [
+    "testdata/tmuxinator"
+  ],
+  "tabs": [
+    {
+      "name": "editor",
+      "lanes": [
+        {
+          "panes": [
+            {
+              "cwd": "$HOME/code/blog",
+              "command": "nvm use 20; vim"
+            }
+          ]
+        },
+        {
+          "panes": [
+            {
+              "cwd": "$HOME/code/blog",
+              "command": "nvm use 20; guard"
+            },
+            {
+              "cwd": "$HOME/code/blog",
+              "command": "nvm use 20; cd log; tail -f development.log"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "server",
+      "lanes": [
+        {
+          "panes": [
+            {
+              "cwd": "$HOME/code/blog",
+              "command": "nvm use 20; bundle exec rails s"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "deploy",
+      "lanes": [
+        {
+          "panes": [
+            {
+              "cwd": "$HOME/code/blog-infra",
+              "command": "nvm use 20; terraform plan"
+            }
+          ]
+        },
+        {
+          "panes": [
+            {
+              "cwd": "$HOME/code/blog-infra",
+              "command": "nvm use 20"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "shell",
+      "lanes": [
+        {
+          "panes": [
+            {
+              "cwd": "$HOME/code/blog",
+              "command": "nvm use 20"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "writes": [
+    ".rysh/imports/tmux-blog.rysh"
+  ]
+}

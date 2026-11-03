@@ -117,9 +117,11 @@ func TestWhatsAppVerifyHandshake(t *testing.T) {
 }
 
 func TestWhatsAppInboundHandlerEnqueues(t *testing.T) {
-	w := NewWhatsAppAdapter(msg.ChannelConfig{}) // no app secret -> signature check skipped
+	// Every POST must be signed (E25): sign with a synthetic secret.
+	w := NewWhatsAppAdapter(msg.ChannelConfig{AppSecret: e25WAFakeSecret})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(sampleWAPayload))
+	req.Header.Set("X-Hub-Signature-256", e25WASign(sampleWAPayload, e25WAFakeSecret))
 	w.handleInbound(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("inbound POST code=%d, want 200", rec.Code)

@@ -14,6 +14,7 @@ import (
 
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 	"github.com/rysh-ai/rysh-cli-code/internal/policy"
+	"github.com/rysh-ai/rysh-cli-code/internal/sandbox"
 )
 
 // loadPolicy loads the project policy and merges the org policy over it
@@ -156,6 +157,9 @@ func policyGateBlocked(pub *msg.NATSPublisher, notifyPaneID, where string) bool 
 //
 // Called on initial load and on every ##policy reload.
 func (w *WorkspaceActor) syncPolicyGate() {
+	// Memory rules first: they fail closed on their own (MemoryRules) and must
+	// follow every load, including the early returns below.
+	w.syncMemoryPolicy()
 	if w.policy != nil && w.policy.Err != nil {
 		path := w.policy.Path
 		if path == "" {
@@ -166,11 +170,17 @@ func (w *WorkspaceActor) syncPolicyGate() {
 		// "load", not "parse": a configured-but-missing org file (tamper
 		// signal) blocks through the same path as a parse failure.
 		policy.SetBlocked(fmt.Sprintf("%s failed to load: %v", path, w.policy.Err))
+		// Unknown fs rules refuse every checked access (design 068); agents
+		// are blocked anyway, this also covers file browse.
+		failed := policy.FailClosedFS(fmt.Sprintf("%s failed to load", path))
+		policy.SetActiveFS(failed)
+		w.publishSandboxRules(failed)
 		// A broken policy applies no rules; the fail-closed gate above refuses
 		// execution anyway, so clear any previously-installed approval policy.
 		sharedagentic.SetApprovalPolicy(nil)
 		return
 	}
+	w.publishFSRules()
 	// Required-secret presence (design 013 snat.required): fail-closed if any
 	// required secret is not registered for redaction, so agents don't run while
 	// a credential the operator flagged could leak in the clear. This clears
@@ -219,22 +229,50 @@ func (w *WorkspaceActor) afterSecretMutation() {
 // in rysh-shared and cannot import this package, so the matching runs here and
 // the verdict is injected. Called on initial load and every ##policy reload.
 func (w *WorkspaceActor) installApprovalPolicy() {
-	if w.policy == nil || !w.policy.Loaded {
+	f := w.approvalPolicyFunc()
+	if f == nil {
 		sharedagentic.SetApprovalPolicy(nil)
 		return
 	}
-	pol := w.policy
-	sharedagentic.SetApprovalPolicy(func(toolName string, input json.RawMessage) (sharedagentic.PolicyDecision, string) {
-		act, id := pol.EvaluateToolApproval(toolName, input)
-		switch act {
-		case policy.ApprovalAuto:
-			return sharedagentic.PolicyAutoApprove, id
-		case policy.ApprovalGate:
-			return sharedagentic.PolicyGate, id
-		default:
+	sharedagentic.SetApprovalPolicy(f)
+}
+
+// approvalPolicyFunc composes the approval decision: the workspace's pre-tool
+// hooks (gap G8) first, then policy.yaml. A pre-tool hook that blocks — or a
+// hooks.yaml that does not parse — forces the call to the approval gate, which
+// nothing auto-approves past (decideApproval's forceGate): restrictive wins.
+// nil when neither has anything to say.
+func (w *WorkspaceActor) approvalPolicyFunc() sharedagentic.ApprovalPolicyFunc {
+	var base sharedagentic.ApprovalPolicyFunc
+	if w.policy != nil && w.policy.Loaded {
+		pol := w.policy
+		base = func(toolName string, input json.RawMessage) (sharedagentic.PolicyDecision, string) {
+			act, id := pol.EvaluateToolApproval(toolName, input)
+			switch act {
+			case policy.ApprovalAuto:
+				return sharedagentic.PolicyAutoApprove, id
+			case policy.ApprovalGate:
+				return sharedagentic.PolicyGate, id
+			default:
+				return sharedagentic.PolicyDefault, ""
+			}
+		}
+	}
+	gate := w.preToolHookGate()
+	switch {
+	case gate == nil:
+		return base
+	case base == nil:
+		base = func(string, json.RawMessage) (sharedagentic.PolicyDecision, string) {
 			return sharedagentic.PolicyDefault, ""
 		}
-	})
+	}
+	return func(toolName string, input json.RawMessage) (sharedagentic.PolicyDecision, string) {
+		if gate(toolName, input) {
+			return sharedagentic.PolicyGate, "hooks.pre-tool"
+		}
+		return base(toolName, input)
+	}
 }
 
 // policyBlocked reports whether governed execution must be refused because the
@@ -280,5 +318,37 @@ func (w *WorkspaceActor) applyPolicy(out *strings.Builder) {
 		if w.proxyServer != nil {
 			fmt.Fprintf(out, "policy: proxy required — started at %s\n", w.proxyServer.BaseURL())
 		}
+	}
+}
+
+// publishFSRules resolves the fs: rules (design 068) against the workspace root
+// — the parent of the rysh dir holding policy.yaml — and publishes them for
+// rysh's file tools, file browse, the bash pre-check and the sandbox (#13). No
+// fs section on either file publishes nil: today's behaviour, unchanged.
+// Process-wide like the fail-closed gate, so in farm mode the last workspace to
+// (re)load wins.
+func (w *WorkspaceActor) publishFSRules() {
+	if w.policy == nil {
+		policy.SetActiveFS(nil)
+		return
+	}
+	r := w.policy.ResolveFS(filepath.Dir(w.cfg.RyshDir))
+	policy.SetActiveFS(r)
+	w.publishSandboxRules(r)
+}
+
+// publishSandboxRules writes this workspace's fs rules for the sandbox (design
+// 066): `rysh exec-clean --sandbox` runs in the pane, not in this process, and
+// reads them from <rysh>/sandbox/fs-rules.json. Per rysh dir, so farm mode's
+// last-loaded-wins global does not leak one workspace's rules into another's
+// sandbox. A failed write removes the file, and a sandboxed agent then refuses
+// to start; nothing else depends on it.
+func (w *WorkspaceActor) publishSandboxRules(r *policy.FSRules) {
+	if strings.TrimSpace(w.cfg.RyshDir) == "" {
+		return
+	}
+	if err := sandbox.WriteRules(w.cfg.RyshDir, sandbox.RulesFromFS(r)); err != nil {
+		slog.Warn("sandbox: cannot publish the policy path rules; sandboxed agents will refuse to start",
+			"path", sandbox.RulesPath(w.cfg.RyshDir), "err", err)
 	}
 }

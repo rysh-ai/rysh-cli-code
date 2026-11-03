@@ -611,6 +611,10 @@ func (s *SignalAdapter) dispatchInbound(params json.RawMessage) {
 	s.mu.RLock()
 	replyMode := s.replyMode
 	s.mu.RUnlock()
+	if inMsg.Metadata["group_id"] == "" {
+		// A 1:1 envelope is a DM (E33 G1), like Telegram's private chats.
+		tagDirectMessage(inMsg.Metadata)
+	}
 	if replyMode == "mentions" && inMsg.Metadata["group_id"] != "" {
 		mentioned := false
 		for _, m := range strings.Split(inMsg.Metadata["mentions"], ",") {

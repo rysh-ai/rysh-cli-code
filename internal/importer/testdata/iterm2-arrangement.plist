@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- iTerm2 preferences converted with plutil -convert xml1, trimmed to the
+     arrangement keys; it would come from $HOME/Library/Preferences. -->
+<plist version="1.0">
+<dict>
+	<key>Default Arrangement Name</key>
+	<string>Work</string>
+	<key>Window Arrangements</key>
+	<dict>
+		<key>Other</key>
+		<array>
+			<dict>
+				<key>Tabs</key>
+				<array>
+					<dict>
+						<key>Root</key>
+						<dict>
+							<key>View Type</key><string>SessionView</string>
+							<key>Session</key>
+							<dict><key>Working Directory</key><string>/tmp</string></dict>
+						</dict>
+					</dict>
+				</array>
+			</dict>
+		</array>
+		<key>Work</key>
+		<array>
+			<dict>
+				<key>Tabs</key>
+				<array>
+					<dict>
+						<key>Root</key>
+						<dict>
+							<key>View Type</key><string>Splitter</string>
+							<key>isVertical</key><true/>
+							<key>Subviews</key>
+							<array>
+								<dict>
+									<key>View Type</key><string>SessionView</string>
+									<key>Session</key>
+									<dict>
+										<key>Session Name</key><string>editor</string>
+										<key>Working Directory</key><string>/fixture-home/src/api</string>
+										<key>Bookmark</key>
+										<dict>
+											<key>Name</key><string>Default</string>
+											<key>Custom Command</key><string>Yes</string>
+											<key>Command</key><string>vim .</string>
+										</dict>
+									</dict>
+								</dict>
+								<dict>
+									<key>View Type</key><string>Splitter</string>
+									<key>isVertical</key><false/>
+									<key>Subviews</key>
+									<array>
+										<dict>
+											<key>View Type</key><string>SessionView</string>
+											<key>Session</key>
+											<dict><key>Working Directory</key><string>/fixture-home/src/api</string></dict>
+										</dict>
+										<dict>
+											<key>View Type</key><string>SessionView</string>
+											<key>Session</key>
+											<dict>
+												<key>Working Directory</key><string>/srv/logs &amp; more</string>
+												<key>Bookmark</key>
+												<dict>
+													<key>Custom Command</key><string>No</string>
+													<key>Command</key><string>ignored-when-not-custom</string>
+												</dict>
+											</dict>
+										</dict>
+									</array>
+								</dict>
+							</array>
+						</dict>
+					</dict>
+					<dict>
+						<key>Root</key>
+						<dict>
+							<key>View Type</key><string>SessionView</string>
+							<key>Session</key>
+							<dict>
+								<key>Working Directory</key><string>/fixture-home</string>
+								<key>Bookmark</key>
+								<dict>
+									<key>Custom Command</key><string>Yes</string>
+									<key>Command</key><string>htop</string>
+								</dict>
+							</dict>
+						</dict>
+					</dict>
+				</array>
+			</dict>
+		</array>
+	</dict>
+</dict>
+</plist>

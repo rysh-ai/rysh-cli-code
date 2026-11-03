@@ -1,0 +1,15 @@
+{
+  "name": "@rysh/sdk",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Drive a rysh session from TypeScript: typed wrappers over the local rysh binary (design 069). Local build only; publishing waits for a founder order.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --globals"
+  }
+}

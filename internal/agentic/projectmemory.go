@@ -27,33 +27,15 @@ const (
 // when no memory files exist.
 func LoadProjectMemory(workDir string) string {
 	var sections []string
-
-	// User-global memory (listed first → lowest precedence).
-	if home, err := os.UserHomeDir(); err == nil {
-		globalPath := filepath.Join(home, ".rysh", projectMemoryFileName)
-		if content := readMemoryFile(globalPath); content != "" {
-			sections = append(sections, "## Global memory ("+globalPath+")\n\n"+content)
+	global, project := projectMemoryPaths(workDir)
+	if global != "" {
+		if content := readMemoryFile(global); content != "" {
+			sections = append(sections, "## Global memory ("+global+")\n\n"+content)
 		}
 	}
-
-	// Project memory files from filesystem root down to workDir.
-	if abs, err := filepath.Abs(workDir); err == nil {
-		var dirs []string
-		for {
-			dirs = append(dirs, abs)
-			parent := filepath.Dir(abs)
-			if parent == abs {
-				break
-			}
-			abs = parent
-		}
-		// dirs currently runs cwd→root; iterate in reverse for root→cwd so the
-		// nearest directory's memory is appended last.
-		for i := len(dirs) - 1; i >= 0; i-- {
-			path := filepath.Join(dirs[i], projectMemoryFileName)
-			if content := readMemoryFile(path); content != "" {
-				sections = append(sections, "## Project memory ("+path+")\n\n"+content)
-			}
+	for _, path := range project {
+		if content := readMemoryFile(path); content != "" {
+			sections = append(sections, "## Project memory ("+path+")\n\n"+content)
 		}
 	}
 
@@ -89,4 +71,31 @@ func appendProjectMemory(systemPrompt, workDir string) string {
 		"Treat them as authoritative project conventions and user preferences, " +
 		"and use the memory_edit tool to record durable new facts.\n\n" +
 		memory
+}
+
+// projectMemoryPaths names the files LoadProjectMemory reads: the user-global
+// ~/.rysh/RYSH.md ("" without a home dir) and every RYSH.md path from the
+// filesystem root down to workDir, nearest last. Semantic recall indexes the
+// same files.
+func projectMemoryPaths(workDir string) (global string, project []string) {
+	if home, err := os.UserHomeDir(); err == nil {
+		global = filepath.Join(home, ".rysh", projectMemoryFileName)
+	}
+	abs, err := filepath.Abs(workDir)
+	if err != nil {
+		return global, nil
+	}
+	var dirs []string
+	for {
+		dirs = append(dirs, abs)
+		parent := filepath.Dir(abs)
+		if parent == abs {
+			break
+		}
+		abs = parent
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		project = append(project, filepath.Join(dirs[i], projectMemoryFileName))
+	}
+	return global, project
 }

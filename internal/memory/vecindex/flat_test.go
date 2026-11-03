@@ -369,3 +369,31 @@ func TestConcurrentUseIsSafe(t *testing.T) {
 		t.Fatalf("final Len = %d, want %d", n, 3*writers)
 	}
 }
+
+// TestFlatVectorAndSources: S4's indexer re-uses stored vectors for unchanged
+// chunks (no embedding call) and drops sources that vanished.
+func TestFlatVectorAndSources(t *testing.T) {
+	f := newIndex(t, 4)
+	c := Chunk{ID: ChunkID("a.md", "hello"), Text: "hello"}
+	if _, err := f.Upsert("a.md", []Chunk{c}, [][]float32{{3, 4, 0, 0}}); err != nil {
+		t.Fatal(err)
+	}
+	d := Chunk{ID: ChunkID("b.md", "x"), Text: "x"}
+	if _, err := f.Upsert("b.md", []Chunk{d}, [][]float32{{0, 0, 1, 0}}); err != nil {
+		t.Fatal(err)
+	}
+	v, ok := f.Vector("a.md", c.ID)
+	if !ok || len(v) != 4 || v[0] != 0.6 || v[1] != 0.8 {
+		t.Errorf("Vector = %v, %v; want the stored unit vector", v, ok)
+	}
+	v[0] = 99 // a copy: the index must not change
+	if w, _ := f.Vector("a.md", c.ID); w[0] != 0.6 {
+		t.Errorf("Vector returned the index's own slice")
+	}
+	if _, ok := f.Vector("a.md", "nope"); ok {
+		t.Errorf("Vector found a missing chunk")
+	}
+	if got := f.Sources(); len(got) != 2 || got[0] != "a.md" || got[1] != "b.md" {
+		t.Errorf("Sources = %v, want [a.md b.md]", got)
+	}
+}

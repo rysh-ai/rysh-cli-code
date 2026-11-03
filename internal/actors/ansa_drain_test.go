@@ -319,8 +319,8 @@ func TestAPaneThatWakesItselfIsPutBackDown(t *testing.T) {
 	if !out[0].Drain.Quiet {
 		t.Error("the pane was never put back down")
 	}
-	if l := ansaDrainLabel(out[0].Drain); l != "rewoke+1" {
-		t.Errorf("label = %q, want rewoke+1 — the wake is the headline, because the "+
+	if l := ansaDrainLabel(out[0].Drain); l != "rewoke+1*" {
+		t.Errorf("label = %q, want rewoke+1* — the wake is the headline, because the "+
 			"operator must expect it to wake AGAIN", l)
 	}
 }
@@ -345,7 +345,7 @@ func TestAPaneThatStaysDownIsNotReInterrupted(t *testing.T) {
 	if out[0].Drain.Rewoke != 0 {
 		t.Errorf("Rewoke = %d on a pane that never woke", out[0].Drain.Rewoke)
 	}
-	if l := ansaDrainLabel(out[0].Drain); l != "stopped" {
-		t.Errorf("label = %q, want stopped", l)
+	if l := ansaDrainLabel(out[0].Drain); l != "stopped*" {
+		t.Errorf("label = %q, want stopped*", l)
 	}
 }

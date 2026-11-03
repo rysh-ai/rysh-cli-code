@@ -42,7 +42,15 @@ func (m *Model) fireDoubleEsc() {
 	m.historyReset()
 }
 
+// Update clears viewSkip and dispatches. A handler that leaves the screen as it
+// was sets viewSkip on the model it returns, so the View() Bubble Tea runs after
+// every message serves the cached frame (see Model.viewSkip).
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m.viewSkip = false
+	return m.update(msg)
+}
+
+func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case faceTimeClosed:
 		if msg.err != nil {
@@ -589,6 +597,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.layoutRefreshPending = true
 			cmds = append(cmds, coalesceLayoutRefreshCmd())
 		}
+		m.viewSkip = true
 		return m, tea.Batch(cmds...)
 
 	case layoutRefreshMsg:
@@ -599,6 +608,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// hash-dedup treats it as "no change", and the update only lands on the
 		// slow reconcile tick (notably: up-arrow recall right after Enter).
 		m.layoutRefreshPending = false
+		m.viewSkip = true
 		return m, m.refreshFreshCmd()
 
 	case contentBatchMsg:
@@ -606,6 +616,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// snapshot, and re-arm the listener.
 		m.applyContentBatch(msg.items)
 		m.rehydrateSnapshot()
+		// Output for panes in other tabs is kept current but is not on screen.
+		m.viewSkip = !m.batchTouchesVisiblePane(msg.items)
 		return m, m.listenContentCmd()
 
 	case mcpStatusMsg:
@@ -658,12 +670,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Record the answer and ask again later. Re-arming here rather than on
 		// a shared tick keeps the question off the render path entirely: the
 		// view always draws from the last answer and never waits for one.
+		if msg.state == m.boardRecorder {
+			m.viewSkip = true // the same answer draws the same frame (F-100)
+		}
 		m.boardRecorder = msg.state
 		return m, tea.Tick(recorderAskInterval, func(time.Time) tea.Msg {
 			return recorderAskTick{}
 		})
 
 	case recorderAskTick:
+		// Only schedules the question; nothing on screen changes (F-100).
+		m.viewSkip = true
 		return m, m.askRecorderCmd()
 
 	case meetingReplyMsg:
@@ -685,6 +702,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// byte-identical to the last one applied for this pane (hash-gated), so a
 		// polled-but-unchanged pane costs nothing on the render loop.
 		if !m.applyPaneContentLoaded(msg) {
+			m.viewSkip = true
+			return m, nil
+		}
+		m.rehydrateSnapshot()
+		return m, nil
+
+	case paneFramesLoadedMsg:
+		// One batched fetch round (raw VT pulls and/or full content pulls):
+		// apply every reply, then rehydrate and render once for the round.
+		changed := false
+		for _, c := range msg.content {
+			if m.applyPaneContentLoaded(c) {
+				changed = true
+			}
+		}
+		for _, v := range msg.vt {
+			if m.applyPaneVTLoaded(v) {
+				changed = true
+			}
+		}
+		if !changed {
+			m.viewSkip = true
 			return m, nil
 		}
 		m.rehydrateSnapshot()
@@ -696,6 +735,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// heavy output buffers stay as the pane's backfill left them. Hash-gated so
 		// an unchanged frame skips the rehydrate + View() re-render.
 		if !m.applyPaneVTLoaded(msg) {
+			m.viewSkip = true
 			return m, nil
 		}
 		m.rehydrateSnapshot()
@@ -769,6 +809,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if changed {
 			m.rehydrateSnapshot()
+		} else {
+			m.viewSkip = true
 		}
 		// Re-arm the push-stream listener ONLY for listener-sourced batches, so a
 		// one-shot backfill/resync reply (also a mirrorVTFrameMsg) never spawns an
@@ -783,8 +825,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// dropped stream message self-corrects, and refresh the (content-free)
 		// layout tree as a fallback in case a layoutDirty signal was ever dropped.
 		// Cheap (layout-only fetch + 1-hop per visible pane); re-arm.
+		//
+		// A pane showing a live interactive app (claude, vim) renders only its
+		// VT screen, so it is not re-pulled in full every 1.5s: it is marked
+		// raw-dirty instead and re-checked by the row-delta VT pull. Every other
+		// pane asks with its content hash and an unchanged one answers
+		// NotModified.
 		visible, _ := m.syncPaneContentSet()
-		return m, tea.Batch(m.refreshCmd(), m.fetchPanesContentCmd(visible), reconcileTickCmd())
+		m.updateVisiblePanes(visible)
+		full := make([]string, 0, len(visible))
+		for _, id := range visible {
+			if p := m.findPaneInSnapshot(id); p != nil && m.isLocalRawPane(id) && m.paneShowsLiveApp(p) {
+				m.markRawDirty(id)
+				continue
+			}
+			full = append(full, id)
+		}
+		m.viewSkip = true
+		return m, tea.Batch(m.refreshCmd(), m.fetchPanesContentCmd(full), reconcileTickCmd())
 
 	case rawFetchTickMsg:
 		// Safety reconciler for raw VT panes. The push path (rawDirtyBatchMsg)
@@ -796,6 +854,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// so it is a no-op when the set is empty (idle raw pane, no dropped
 		// signals). Self-stops when no raw pane is visible to avoid idle
 		// wakeups.
+		m.viewSkip = true
 		raw := m.visibleRawPaneIDs()
 		if len(raw) == 0 {
 			m.rawFetchActive = false
@@ -839,6 +898,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if c := m.scheduleRawFetch(); c != nil {
 			cmds = append(cmds, c)
 		}
+		m.viewSkip = true
 		return m, tea.Batch(cmds...)
 
 	case rawCoalesceFlushMsg:
@@ -847,6 +907,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// panes now. A no-op when an intervening leading-edge fetch already drained
 		// the dirty set (consumeDirtyRawPanes returns empty → no fetch, no render).
 		m.rawFetchPending = false
+		m.viewSkip = true
 		var cmds []tea.Cmd
 		if visible := m.visibleRawPaneIDs(); len(visible) > 0 {
 			if fetch := m.consumeDirtyRawPanes(visible); len(fetch) > 0 {
@@ -875,7 +936,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmd, m.listenClipboardFlashCmd())
 
+	case fleetBoardMsg:
+		m.fleetBoard = msg.reply
+		return m, m.listenFleetBoardCmd()
+
+	case peerFeedMsg:
+		if !peerFeedChanged(m.peerFeed, msg.feed, m.anyPeerView()) {
+			m.viewSkip = true // F-100: an unchanged feed draws the same frame
+		}
+		m.applyPeerFeed(msg.feed)
+		return m, m.listenPeerFeedCmd()
+
 	case attentionEventMsg:
+		// The pane stopped needing you (root-order-044 #3): answered here,
+		// in another client, or the prompt went away.
+		if msg.Ack != nil {
+			delete(m.attentionState, msg.Ack.PaneID)
+		}
 		if msg.Event != nil {
 			paneID := msg.Event.PaneID
 			info, ok := m.attentionState[paneID]
@@ -889,12 +966,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			info.Title = msg.Event.Title
 			info.LastTime = time.Now()
 
-			// Terminal bell with cooldown (10 seconds per pane).
+			// Terminal bell with cooldown (10 seconds per pane). For a "needs
+			// you" prompt it follows `[ui] notify_terminal` (default off); other
+			// categories keep the bell + iTerm2 dock bounce they always had.
 			if lastBell, ok := m.attentionLastBell[paneID]; !ok || time.Since(lastBell) > 10*time.Second {
-				fmt.Print("\a")
-				m.attentionLastBell[paneID] = time.Now()
-				// iTerm2-specific: request attention (dock bounce).
-				fmt.Print("\033]1337;RequestAttention=yes\a")
+				if out := attentionNotifyBytes(m.cfg.NotifyTerminal, msg.Event.Category, m.attentionPaneLabel(paneID)); out != "" {
+					m.writeAttention(out)
+					m.attentionLastBell[paneID] = time.Now()
+				}
 			}
 		}
 		return m, m.listenAttentionEvents()
@@ -951,6 +1030,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if cmd := m.syncRawMode(); cmd != nil {
 					return m, cmd
 				}
+				// Nothing changed: serve the cached frame. This is the idle
+				// 1.5 s reconcile, ~40 full re-renders a minute otherwise (F-100).
+				m.viewSkip = true
 				return m, nil
 			}
 			slog.Debug("tui: workspace snapshot applied",
@@ -977,7 +1059,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// content-free layout snapshot from the local buffers, backfill any
 			// newly-visible pane that has no content yet, and keep the raw-VT pull
 			// running while an interactive pane is visible.
-			_, needBackfill := m.syncPaneContentSet()
+			visible, needBackfill := m.syncPaneContentSet()
+			m.updateVisiblePanes(visible)
 			m.rehydrateSnapshot()
 			var contentCmds []tea.Cmd
 			if c := m.fetchPanesContentCmd(needBackfill); c != nil {
@@ -1025,6 +1108,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// event-driven (layoutDirty) and per-pane content is streamed, so there is
 		// no blind snapshot poll here anymore.
 		m.attentionBlink = !m.attentionBlink
+		// The blink is the only thing this tick changes, and it shows only on a
+		// pane or tab with attention. With none, the frame is unchanged: serve
+		// the cached one. Re-rendering four times a second re-measured every
+		// visible line and kept an idle attach at 30-40% of a core once its
+		// panes held text (F-100).
+		if !m.anyAttention() {
+			m.viewSkip = true
+		}
 		return m, tickCmd()
 
 	case voiceTranscribedMsg:

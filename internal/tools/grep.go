@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/rysh-ai/rysh-cli-code/internal/policy"
 )
 
 const grepOutputLimit = 100 * 1024 // ~100KB
@@ -92,6 +94,10 @@ func (t *GrepTool) Execute(ctx context.Context, params json.RawMessage) (*ToolOu
 		outputMode = "files_with_matches"
 	}
 
+	if out := fsPolicyRefusal(searchPath, policy.FSRead); out != nil {
+		return out, nil
+	}
+
 	// Check if searchPath is a file or directory.
 	info, err := os.Stat(searchPath)
 	if err != nil {
@@ -112,6 +118,12 @@ func (t *GrepTool) Execute(ctx context.Context, params json.RawMessage) (*ToolOu
 			}
 			if walkErr != nil {
 				return nil // skip inaccessible
+			}
+			if path != searchPath && fsPolicyHidden(path) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
 			}
 			if d.IsDir() {
 				// Skip hidden directories.

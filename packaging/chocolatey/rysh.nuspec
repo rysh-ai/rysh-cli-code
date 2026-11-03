@@ -2,6 +2,11 @@
 <!-- Chocolatey NuSpec manifest for Rysh (CLI-only Windows build) -->
 <!-- https://community.chocolatey.org -->
 <!--
+  STALE (gap11, design 085): the Windows zip now opens panes natively through
+  ConPTY, untested on real Windows, and is published as ry_windows_amd64.zip
+  (no longer _cli-only). This manifest and tools/chocolateyInstall.ps1 still
+  describe the CLI-only build and must be rewritten before any publish.
+
   NOT PUBLISHED. The publish-chocolatey job in .github/workflows/release.yml is
   commented out, and this manifest must not be pushed until someone decides
   whether a CLI-only build belongs in a Windows package manager at all.

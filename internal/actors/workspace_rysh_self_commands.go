@@ -109,6 +109,16 @@ func (w *WorkspaceActor) handleRyshSelfCommand(ctx actor.Context, out *strings.B
 				// SetControl also switches the bind to 127.0.0.1 —
 				// the control plane is never exposed off-host.
 				w.webServer.SetControl(true)
+				// The desktop app hands a live daemon its secret this way. A
+				// refused file leaves the control door shut (the error names
+				// the rule, never the content).
+				if opts.ControlSecretFile != "" {
+					if err := w.webServer.SetControlSecretFile(opts.ControlSecretFile); err != nil {
+						fmt.Fprintf(out, "\n[rysh] %v — the control door stays closed\n", err)
+					}
+				}
+			} else if opts.ControlSecretFile != "" {
+				fmt.Fprintf(out, "\n[rysh] --control-secret-file only applies with --control; ignored\n")
 			}
 			// The login travels with the workspace, so it applies to every
 			// server start without being re-entered.
@@ -131,7 +141,7 @@ func (w *WorkspaceActor) handleRyshSelfCommand(ctx actor.Context, out *strings.B
 				fmt.Fprintf(out, "[rysh] bind address: %s   port: %d\n", webBindLabel(opts.Host), opts.Port)
 				fmt.Fprintf(out, "[rysh] the browser keeps the login for 30 days, then asks again\n")
 			} else {
-				fmt.Fprintf(out, "\n[rysh] web server started at %s (control mode — no login, loopback only)\n", base)
+				fmt.Fprintf(out, "\n[rysh] web server started at %s (control mode — loopback only; no login, the desktop app presents a per-launch secret)\n", base)
 				fmt.Fprintf(out, "[rysh] bind address: %s   port: %d\n", webBindLabel(opts.Host), opts.Port)
 			}
 			// The default bind is loopback, so a user expecting to open the UI

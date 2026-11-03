@@ -40,8 +40,7 @@ func TestReporterAbortStopsAnInFlightCheckpointWrite(t *testing.T) {
 		t.Fatal("aborted taker did not stop")
 	}
 	// The in-flight summary returns after abort; give it the time it needs.
-	r.sumMu.Lock()
-	r.sumMu.Unlock()
+	func() { r.sumMu.Lock(); defer r.sumMu.Unlock() }()
 	if _, err := os.Stat(filepath.Join(dir, "notes.json")); !os.IsNotExist(err) {
 		t.Fatalf("an aborted taker wrote the notes checkpoint (stat err %v)", err)
 	}

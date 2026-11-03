@@ -26,6 +26,8 @@ var ptylessCommands = map[string]bool{
 	"send":           true,
 	"exec":           true,
 	"script":         true,
+	"schedule":       true, // alias of exec -- ##cron (gap06)
+	"trigger":        true, // alias of exec -- ##trigger (gap06)
 	"prompt":         true,
 	"install":        true,
 	"list-packages":  true,
@@ -39,11 +41,14 @@ var ptylessCommands = map[string]bool{
 	// `rysh board` with the session-start guidance, even for a session running
 	// in WSL. Caught the first time anything ever executed the Windows binary.
 	"board":     true,
+	"heymates":  true, // an HTTP/WebSocket client of rysh-server; no pane, no PTY
+	"family":    true, // heymates' old name, an alias for one release
 	"eval":      true,
 	"forge":     true,
 	"onboard":   true,
 	"connect":   true,
 	"doctor":    true,
+	"import":    true,
 	"channel":   true,
 	"version":   true,
 	"--version": true,

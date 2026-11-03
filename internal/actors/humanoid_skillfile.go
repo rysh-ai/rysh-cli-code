@@ -93,20 +93,26 @@ func contactHasExplicitKey(fmRaw, channelType, key string) bool {
 // picking either side silently would honor a config the author never wrote.
 // relayExplicit reports whether the block spelled out a `relay:` key.
 func normalizeWhatsAppRelayMode(cc msg.ChannelConfig, relayExplicit bool) (msg.ChannelConfig, error) {
+	return normalizeChannelRelayMode("whatsapp", cc, relayExplicit)
+}
+
+// normalizeChannelRelayMode is normalizeWhatsAppRelayMode for any channel with
+// a relay mode (whatsapp; github, E-108). channelType prefixes the errors.
+func normalizeChannelRelayMode(channelType string, cc msg.ChannelConfig, relayExplicit bool) (msg.ChannelConfig, error) {
 	switch mode := strings.ToLower(strings.TrimSpace(cc.Mode)); mode {
 	case "":
 		// No mode key: `relay:` alone decides (absent = direct, the default).
 	case "relay":
 		if relayExplicit && !cc.Relay {
-			return cc, fmt.Errorf("whatsapp: conflicting relay settings: `mode: relay` with `relay: false` — remove one (canonical spelling is `relay: true`)")
+			return cc, fmt.Errorf("%s: conflicting relay settings: `mode: relay` with `relay: false` — remove one (canonical spelling is `relay: true`)", channelType)
 		}
 		cc.Relay = true
 	case "direct":
 		if cc.Relay {
-			return cc, fmt.Errorf("whatsapp: conflicting relay settings: `mode: direct` with `relay: true` — remove one")
+			return cc, fmt.Errorf("%s: conflicting relay settings: `mode: direct` with `relay: true` — remove one", channelType)
 		}
 	default:
-		return cc, fmt.Errorf("whatsapp: unknown mode %q (use \"relay\" or \"direct\"; canonical relay spelling is `relay: true`)", cc.Mode)
+		return cc, fmt.Errorf("%s: unknown mode %q (use \"relay\" or \"direct\"; canonical relay spelling is `relay: true`)", channelType, cc.Mode)
 	}
 	return cc, nil
 }
@@ -125,6 +131,33 @@ func envOnlyExpand(s string) string {
 		}
 		return match // leave unresolved if env var not set
 	})
+}
+
+// unresolvedCredentialRef reports a credential field that still holds a ${NAME}
+// reference after expansion. An adapter would send the reference text as the
+// credential — Telegram answers that with getMe 404, which reads like a bad
+// token — so the channel must not start. The error names the field, the
+// reference and where the daemon looks; never a value.
+func unresolvedCredentialRef(cc msg.ChannelConfig) error {
+	fields := []struct{ key, val string }{
+		{"bot_token", cc.BotToken},
+		{"app_token", cc.AppToken},
+		{"api_key", cc.APIKey},
+		{"app_secret", cc.AppSecret},
+		{"auth_token", cc.AuthToken},
+		{"verify_token", cc.VerifyToken},
+	}
+	if cc.EmailConfig != nil {
+		fields = append(fields, struct{ key, val string }{"password", cc.EmailConfig.Password})
+	}
+	for _, f := range fields {
+		if m := envVarPattern.FindStringSubmatch(f.val); m != nil {
+			name := m[1]
+			return fmt.Errorf("%s is ${%s}, which this session's daemon cannot resolve — store it in %s (rysh setup does), or ##secret new %s <value>, or start the daemon with %s in its environment",
+				f.key, name, filepath.Join(".rysh", "secrets", projectSecretScope, name), name, name)
+		}
+	}
+	return nil
 }
 
 // resolveChannelEnvVars resolves ${VAR} references in all string fields of a
@@ -161,6 +194,9 @@ func resolveChannelEnvVars(cc msg.ChannelConfig, expand func(string) string) msg
 	// half inline.
 	cc.AppID = expand(cc.AppID)
 	cc.TenantID = expand(cc.TenantID)
+	// GitHub: the trigger handle and the API base expand like every other field.
+	cc.BotLogin = expand(cc.BotLogin)
+	cc.APIBase = expand(cc.APIBase)
 
 	resolved := make([]string, len(cc.Channels))
 	for i, ch := range cc.Channels {
@@ -265,9 +301,10 @@ func parseHumanoidFile(path string, expand func(string) string) (*humanoidDefini
 		// WhatsApp: fold the `mode:` alias into the canonical `relay:` switch
 		// (or fail loudly on a typo/conflict) — the adapter and the upstream
 		// credential fetch key exclusively off cc.Relay.
-		if channelType == "whatsapp" {
+		// GitHub (E-108) takes the same spelling.
+		if channelType == "whatsapp" || channelType == "github" {
 			var err error
-			cc, err = normalizeWhatsAppRelayMode(cc, contactHasExplicitKey(fmRaw, channelType, "relay"))
+			cc, err = normalizeChannelRelayMode(channelType, cc, contactHasExplicitKey(fmRaw, channelType, "relay"))
 			if err != nil {
 				return nil, fmt.Errorf("humanoid %s: %w", path, err)
 			}

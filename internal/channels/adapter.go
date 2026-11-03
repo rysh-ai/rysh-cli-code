@@ -78,9 +78,26 @@ type OutboundMessage struct {
 	Kind string `json:"kind,omitempty"`
 }
 
+// MessageIDSender is implemented by adapters that can report the platform's
+// id for a message they just sent (Slack: the ts chat.postMessage returns).
+// A caller that needs the id type-asserts for it; every adapter still
+// implements Send. The humanoid uses it to anchor a Slack DM-level approval
+// answer to the notice's own ts (e20 N1).
+type MessageIDSender interface {
+	SendWithID(ctx context.Context, outbound OutboundMessage) (SentMessage, error)
+}
+
+// SentMessage is what the platform reported for a message it accepted: its
+// id (Slack: the ts) and the channel it was delivered to (Slack: a post to a
+// user id lands in the DM channel "D…").
+type SentMessage struct {
+	ID      string
+	Channel string
+}
+
 // ValidChannelTypes lists the BUILT-IN channel type strings (installed
 // plugin channels are additionally accepted via the PluginTypeKnown hook).
-var ValidChannelTypes = []string{"whatsapp", "slack", "email", "phone", "chatbot", "discord", "telegram", "signal", "imessage", "teams", "wechat", "wecom", "googlechat"}
+var ValidChannelTypes = []string{"whatsapp", "slack", "email", "phone", "chatbot", "discord", "telegram", "signal", "imessage", "teams", "wechat", "wecom", "googlechat", "mattermost", "matrix", "line", "github"}
 
 // PluginLookup, when non-nil, resolves a non-built-in channel type to an
 // out-of-process plugin adapter (internal/channels/plugin, design 002). It is

@@ -83,13 +83,26 @@ func TestIntegration_WebRecorderThroughAppBridge(t *testing.T) {
 	// --- the real daemon web server (the bridge under test) ---
 	port := freePort(t)
 	srv := web.NewServer(port, "rec-app-test", pub, nc, pub.Codecs())
+	srv.SetControl(true) // as the desktop app spawns its daemon: no login on its loopback door
+	// ...and, as the app does, hand the daemon its per-launch secret.
+	secret, err := web.NewControlSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handover := filepath.Join(t.TempDir(), "handover")
+	if err := os.WriteFile(handover, []byte(secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.SetControlSecretFile(handover); err != nil {
+		t.Fatalf("SetControlSecretFile: %v", err)
+	}
 	go func() { _ = srv.Start() }()
 	defer func() { _ = srv.Stop() }()
 	waitHealthy(t, port)
 
 	// --- stand-in for the Electron renderer ---
 	paneID := "apppane"
-	fake := newFakeRenderer(t, port, paneID)
+	fake := newFakeRenderer(t, port, paneID, secret)
 	defer fake.close()
 
 	// --- the recorder, unchanged from the headless path ---
@@ -102,11 +115,22 @@ func TestIntegration_WebRecorderThroughAppBridge(t *testing.T) {
 	rec := NewWebRecorderActor(paneID, "app-recipe", spec, outPath, true, pub, nc)
 	recPID := system.Root.Spawn(actor.PropsFromProducer(func() actor.Actor { return rec }))
 
-	time.Sleep(recordFor)
+	// Stop on frames actually served, not on a fixed sleep: on a loaded
+	// machine 3s of wall clock produced no frames at all and so no video.
+	const wantServed = 6
+	startedAt := time.Now()
+	ceiling := startedAt.Add(90 * time.Second)
+	for fake.count() < wantServed || time.Since(startedAt) < recordFor {
+		if time.Now().After(ceiling) {
+			t.Fatalf("renderer served only %d screenshots in 90s — the bridge is not forwarding requests", fake.count())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	span := time.Since(startedAt)
 	system.Root.Send(recPID, &recStop{reason: "test done"})
 
 	var size int64
-	deadline := time.Now().Add(60 * time.Second)
+	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
 		if fi, err := os.Stat(outPath); err == nil && fi.Size() > 0 {
 			size = fi.Size()
@@ -146,8 +170,8 @@ func TestIntegration_WebRecorderThroughAppBridge(t *testing.T) {
 		t.Errorf("renderer served %d screenshots but the video has %d frames — frames lost in the bridge",
 			served, nbFrames)
 	}
-	if duration < recordFor.Seconds()*0.5 {
-		t.Errorf("video is %.2fs, want roughly %.2fs", duration, recordFor.Seconds())
+	if duration < span.Seconds()*0.5 {
+		t.Errorf("video is %.2fs, want roughly %.2fs (the recording span)", duration, span.Seconds())
 	}
 	assertFramesDiffer(t, outPath)
 }
@@ -167,10 +191,15 @@ type fakeRenderer struct {
 	done         chan struct{}
 }
 
-func newFakeRenderer(t *testing.T, port int, paneID string) *fakeRenderer {
+// newFakeRenderer connects the way the app's renderer does: a file:// page,
+// presenting the control secret as a WebSocket subprotocol.
+func newFakeRenderer(t *testing.T, port int, paneID, secret string) *fakeRenderer {
 	t.Helper()
 	url := fmt.Sprintf("ws://127.0.0.1:%d/ws", port)
-	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	d := websocket.Dialer{Subprotocols: []string{web.ControlSubprotocol, web.ControlSecretSubprotocolPrefix + secret}}
+	h := http.Header{}
+	h.Set("Origin", "file://")
+	conn, _, err := d.Dial(url, h)
 	if err != nil {
 		t.Fatalf("dial %s: %v", url, err)
 	}

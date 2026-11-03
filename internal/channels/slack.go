@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -220,10 +221,20 @@ func (s *SlackAdapter) Start(ctx context.Context) error {
 			"connections:write scope", len(s.config.AppToken))
 	}
 
-	// Create Slack API client with the app-level token for Socket Mode.
+	// api_base (gap05 pattern): both tokens travel to it, so it is checked
+	// before any request: https, or plain http on a loopback host only.
+	apiOpts, err := slackAPIOptions(s.config.APIBase)
+	if err != nil {
+		return err
+	}
+
+	// Create Slack API client with the app-level token for Socket Mode. Its
+	// HTTP client checks the Socket Mode URL before slack-go dials it (wss://,
+	// or ws:// to loopback only); the reconnect loop reuses this client.
 	slog.Debug("slack: creating API client with app-level token")
 	api := slack.New(s.config.BotToken,
-		slack.OptionAppLevelToken(s.config.AppToken))
+		append(apiOpts, slack.OptionAppLevelToken(s.config.AppToken),
+			slack.OptionHTTPClient(slackSocketURLGuard{next: &http.Client{}}))...)
 
 	// Verify credentials and get bot user ID.
 	slog.Debug("slack: calling auth.test to verify credentials")
@@ -306,6 +317,20 @@ func (s *SlackAdapter) Start(ctx context.Context) error {
 }
 
 // Stop gracefully disconnects from Slack.
+// slackAPIOptions turns a ChannelConfig.APIBase into slack-go options. Empty
+// means production (slack.com). A non-empty value must pass ValidateAPIBase;
+// slack-go wants the root with its "/api/" suffix.
+func slackAPIOptions(apiBase string) ([]slack.Option, error) {
+	base := strings.TrimSpace(apiBase)
+	if base == "" {
+		return nil, nil
+	}
+	if err := ValidateAPIBase(base); err != nil {
+		return nil, fmt.Errorf("slack: %w", err)
+	}
+	return []slack.Option{slack.OptionAPIURL(strings.TrimSuffix(base, "/") + "/api/")}, nil
+}
+
 func (s *SlackAdapter) Stop() error {
 	slog.Debug("slack: stopping adapter")
 	if s.cancel != nil {
@@ -386,10 +411,9 @@ func (s *SlackAdapter) connectionLoop(ctx context.Context, api *slack.Client) {
 		// A failure before we ever connected is Start's answer: report it
 		// rather than retrying silently behind a caller that believes the
 		// channel is live. Harmless once Start has moved on — signal fires once.
+		// RunContext returns only on an error (it reconnects otherwise), so err
+		// is never nil here and always says why.
 		if !wasConnected {
-			if err == nil {
-				err = fmt.Errorf("socket mode disconnected before connecting")
-			}
 			s.signalFirstConnect(err)
 		}
 		if wasConnected {
@@ -397,10 +421,7 @@ func (s *SlackAdapter) connectionLoop(ctx context.Context, api *slack.Client) {
 		}
 
 		// Log the disconnection.
-		errMsg := ""
-		if err != nil {
-			errMsg = err.Error()
-		}
+		errMsg := err.Error()
 		slog.Warn("slack: socket mode disconnected, will reconnect",
 			"err", errMsg, "backoff", backoff)
 
@@ -482,7 +503,14 @@ func (s *SlackAdapter) livenessWatchdog(ctx context.Context, cancel context.Canc
 }
 
 // Send delivers a message back to Slack, replying in-thread if a ThreadID is set.
-func (s *SlackAdapter) Send(_ context.Context, outbound OutboundMessage) error {
+func (s *SlackAdapter) Send(ctx context.Context, outbound OutboundMessage) error {
+	_, err := s.SendWithID(ctx, outbound)
+	return err
+}
+
+// SendWithID is Send, reporting the ts Slack gave the posted message
+// (MessageIDSender; e20 N1: the humanoid anchors D3 to the notice's own ts).
+func (s *SlackAdapter) SendWithID(_ context.Context, outbound OutboundMessage) (SentMessage, error) {
 	slog.Debug("slack: Send called",
 		"recipient", outbound.RecipientID,
 		"thread", outbound.ThreadID,
@@ -495,11 +523,11 @@ func (s *SlackAdapter) Send(_ context.Context, outbound OutboundMessage) error {
 
 	if !connected {
 		slog.Debug("slack: Send failed — not connected")
-		return fmt.Errorf("slack: not connected")
+		return SentMessage{}, fmt.Errorf("slack: not connected")
 	}
 	if client == nil {
 		slog.Debug("slack: Send failed — client not initialized")
-		return fmt.Errorf("slack: client not initialized")
+		return SentMessage{}, fmt.Errorf("slack: client not initialized")
 	}
 
 	var opts []slack.MsgOption
@@ -527,17 +555,17 @@ func (s *SlackAdapter) Send(_ context.Context, outbound OutboundMessage) error {
 		"thread", outbound.ThreadID,
 		"content_preview", truncateForLog(outbound.Content, 200))
 
-	_, _, err := client.PostMessage(outbound.RecipientID, opts...)
+	channel, ts, err := client.PostMessage(outbound.RecipientID, opts...)
 	if err != nil {
 		slog.Debug("slack: PostMessage API call failed", "err", err)
-		return fmt.Errorf("slack: post message failed: %w", err)
+		return SentMessage{}, fmt.Errorf("slack: post message failed: %w", err)
 	}
 
 	slog.Info("slack: message sent",
 		"channel", outbound.RecipientID,
 		"thread", outbound.ThreadID,
 		"len", len(outbound.Content))
-	return nil
+	return SentMessage{ID: ts, Channel: channel}, nil
 }
 
 // SetReplyMode changes the reply mode at runtime.
@@ -709,7 +737,14 @@ func (s *SlackAdapter) handleEventsAPI(event slackevents.EventsAPIEvent) {
 		s.mu.RUnlock()
 		observeOnly := false
 		isMention := hasMention
-		if currentReplyMode == "mentions" {
+		// channel_type "im" is a 1:1 DM and is addressed by definition
+		// (direct_message.go); "mpim" (a group DM) is not.
+		isDM := ev.ChannelType == "im"
+		addressedDM := isDM && directMessagesAddressed
+		if currentReplyMode == "mentions" && addressedDM && !hasMention {
+			slog.Debug("slack: direct message — addressed in mentions-only mode",
+				"channel", ev.Channel, "user", ev.User)
+		} else if currentReplyMode == "mentions" {
 			if hasMention {
 				slog.Debug("slack: MessageEvent contains bot mention — processing as mention",
 					"channel", ev.Channel, "user", ev.User,
@@ -747,6 +782,9 @@ func (s *SlackAdapter) handleEventsAPI(event slackevents.EventsAPIEvent) {
 		}
 		if isMention {
 			metadata["mention"] = "true"
+		}
+		if isDM {
+			tagDirectMessage(metadata)
 		}
 
 		inMsg := InboundMessage{

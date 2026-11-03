@@ -1,0 +1,25 @@
+rysh import claude — preview (nothing is written without --apply)
+  from: .claude/settings.json
+  from: .claude/settings.local.json
+
+Policy (.rysh/policy.yaml; an import only makes it stricter):
+  add to approval.always_gate (rysh asks before running):
+    "curl*"
+    "rm -rf*"
+    "git push*"
+    "*"
+  suggested auto_approve rules, written as REVIEW comments only (not active):
+    "go test ./..."
+    "make lint"
+    "npm run test*"
+
+Notes:
+  - deny rule "Read(./.env)" (.claude/settings.json) has no rysh approval-glob equivalent; not imported (file-path rules belong to policy fs: rules)
+  - deny rule "mcp__tracker__delete_issue" (.claude/settings.json) has no rysh approval-glob equivalent; not imported
+  - allow rule "Read(~/.config/app/**)" (.claude/settings.json) has no rysh approval-glob equivalent; not suggested
+  - allow rule "WebFetch(domain:docs.example.test)" (.claude/settings.json) has no rysh approval-glob equivalent; not suggested
+  - Claude Code deny rules become always_gate: rysh asks before running them instead of refusing outright
+
+With --apply this writes (after backing up what it replaces):
+  .rysh/policy.yaml
+Undo with: rysh import --undo

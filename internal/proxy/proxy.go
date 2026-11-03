@@ -17,10 +17,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	sharedmsg "github.com/rysh-ai/rysh-cli-shared/msg"
 	"github.com/rysh-ai/rysh-cli-shared/secretnat"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
+	"github.com/rysh-ai/rysh-cli-code/internal/usage"
 )
 
 // DefaultUpstreams maps a dialect to its real provider base URL, as declared
@@ -466,6 +468,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Under a workspace spend cap (root-order-044 #8), a model with no price
+	// would be metered at $0 and slip past the cap, so it is refused here,
+	// before the provider is called. Only a model the body names is checked.
+	if reqModel := parseModel(string(body)); reqModel != "" && s.spendCapActive(tenant) {
+		if _, priced := usage.CostMicroUSD(reqModel, 0, 0, 0, 0); !priced {
+			s.writeUnpricedUnderCap(w, d, paneID, tenant, reqModel)
+			return
+		}
+	}
+
 	// Provider-specific adaptation the METER depends on (design 001 §4.2): a
 	// streaming OpenAI request has to ask for its usage block or the response
 	// carries none. Applied after redaction so the adapted bytes are the ones
@@ -557,6 +569,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// spendCap reads the workspace spend cap from the lease gate, when the gate
+// knows one (root-order-044 #8).
+func (s *Server) spendCap(tenant string) (sharedmsg.GatewaySpendCap, bool) {
+	if r, ok := s.lease.(SpendCapReporter); ok && s.lease != nil {
+		return r.SpendCap(tenant)
+	}
+	return sharedmsg.GatewaySpendCap{}, false
+}
+
+func (s *Server) spendCapActive(tenant string) bool {
+	_, ok := s.spendCap(tenant)
+	return ok
+}
+
 // SetLeaseGate installs the org-wide ceiling (design 023 §4.2). Call before
 // Start. nil ⇒ per-machine ceilings only, exactly as today.
 func (s *Server) SetLeaseGate(g LeaseGate) { s.lease = g }
@@ -569,6 +595,10 @@ func (s *Server) writeLeaseExceeded(
 	w http.ResponseWriter, d Dialect, paneID, tenant, why string,
 ) {
 	message := leaseMessage(tenant)
+	if why == sharedmsg.GatewayRefusalSpendCap {
+		c, ok := s.spendCap(tenant)
+		message = spendCapMessage(tenant, c, ok)
+	}
 	d.WriteRateLimited(w, message, budgetRetryAfter)
 
 	audit := AuditLine{
@@ -576,7 +606,7 @@ func (s *Server) writeLeaseExceeded(
 		Endpoint: "(lease)", Status: http.StatusTooManyRequests, Tenant: tenant,
 	}
 	s.recordAudit(audit)
-	slog.Warn("proxy: request refused — workspace-wide token ceiling",
+	slog.Warn("proxy: request refused — workspace-wide lease (token ceiling or spend cap)",
 		"pane", paneID, "tenant", tenant, "reason", why)
 	if s.pub != nil {
 		s.publishRefusalAudit(audit, msg.ProxyBudgetExceeded)

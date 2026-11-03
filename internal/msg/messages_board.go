@@ -120,6 +120,18 @@ type MsgBoardPost struct {
 	// too long to carry inline (fleetctl's --file). Optional; cmd only.
 	File string `json:"file,omitempty"`
 
+	// Stamp and Unverified exist only for the reserved fleet board (design 030
+	// §9.3, founder ruling D-24, wave W3). A door that accepts a post to the
+	// fleet board from a fleet head sets Stamp: an HMAC under a per-daemon key
+	// that never leaves the process (internal/boardstamp). The recorder
+	// verifies it, sets Unverified on a post that has no valid stamp (a raw
+	// post that bypassed a door, a forged or replayed stamp, a post relayed
+	// from another session) or whose pane is not a head, and clears Stamp
+	// before recording. The recorder owns both fields: whatever a poster puts
+	// in them is overwritten. Not authentication across sessions; see 030 §9.3.
+	Stamp      string `json:"stamp,omitempty"`
+	Unverified bool   `json:"unverified,omitempty"`
+
 	// STILL DELIBERATELY ABSENT: Envelope, Fleet, Role, Unit. (CmdID and File
 	// are not fleet fields: a non-fleet claude sends a command exactly as a
 	// fleet one does.)

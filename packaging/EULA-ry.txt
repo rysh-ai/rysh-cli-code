@@ -1,1 +1,46 @@
-DRAFT — pending founder approval (Round 4 / msg-0078); E11 supplies text
+ry — End User Licence Agreement
+
+Copyright © 2026 PeraLabs Ltd (trading as Rysh AI) ("we"). All rights reserved.
+
+By installing or using ry (the "Software"), you agree to these terms. If you do not agree, do not install or use it.
+
+1. Licence. We grant you a non-exclusive, non-transferable, revocable licence to install and use the Software
+   for your own personal use or your organisation's internal business purposes, under these terms.
+
+2. Restrictions. You may not:
+   (a) sell, rent, lease, sublicense, or redistribute the Software;
+   (b) modify the Software, or decompile, disassemble or reverse-engineer it, except to the extent applicable law
+       expressly permits this despite this restriction;
+   (c) remove or alter any copyright, licence or proprietary notice;
+   (d) use the Software to build a competing product, or to get around usage limits, licence checks or access controls.
+
+3. Open-source components. The Software contains open-source components, including code from the rysh
+   project (Apache License 2.0) and third-party code under its own licence (for example MIT). Those components are
+   licensed to you under their own licences, and nothing in this EULA limits your rights under them. Their notices are in
+   the NOTICE file shipped with the Software: /usr/share/doc/ry/NOTICE for the .deb and .rpm packages;
+   /usr/local/share/doc/ry/NOTICE or ~/.local/share/doc/ry/NOTICE for the install script; $(brew --prefix)/opt/ry/NOTICE
+   for Homebrew; and the top level of the .tar.gz or .zip archive. If you installed the Software another way, see the
+   NOTICE file shipped with your package. The open-source edition is available separately as rysh under Apache-2.0.
+
+4. Ownership. We, and our licensors, own the Software. Only the rights expressly granted here are given to you.
+
+5. Your data. The Software keeps its configuration and state in a .rysh directory in your project on your own device,
+   and it sends data over the network when you use a feature that needs it, such as connecting to a rysh server you
+   name, calling an AI provider with an API key you supply, or installing or searching for packages in a registry.
+
+6. Updates. We may provide updates. These terms apply to them unless an update comes with different terms.
+
+7. No warranty. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT, TO THE EXTENT PERMITTED BY LAW.
+
+8. Limitation of liability. TO THE EXTENT PERMITTED BY LAW, WE ARE NOT LIABLE FOR ANY INDIRECT, INCIDENTAL,
+   SPECIAL, CONSEQUENTIAL OR PUNITIVE DAMAGES, OR FOR LOST PROFITS OR DATA. OUR TOTAL LIABILITY IS LIMITED TO THE GREATER
+   OF THE AMOUNT YOU PAID FOR THE SOFTWARE IN THE 12 MONTHS BEFORE THE CLAIM AND £100.
+
+9. Termination. This licence ends automatically if you breach these terms. When it ends, stop using the Software
+   and delete it. Sections 3, 4, 7, 8 and 10 survive.
+
+10. Governing law. These terms are governed by the laws of England and Wales, and the courts of England and Wales have
+    exclusive jurisdiction, except where consumer law in your country says otherwise.
+
+Contact: info@rysh.ai.

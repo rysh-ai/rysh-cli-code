@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src '{{CSP_SCRIPT_HASH}}'; img-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<meta name="referrer" content="no-referrer">
+<title>rysh run record</title>
+<style>
+:root { --bg:#fbfbfa; --fg:#1d1d1b; --muted:#6b6b66; --line:#deded8; --card:#ffffff; --warn:#8a5a00; --bad:#a1281e; --ok:#1d6b35; --code:#f2f2ee; }
+@media (prefers-color-scheme: dark) { :root { --bg:#161615; --fg:#ececea; --muted:#9d9d97; --line:#33332f; --card:#1e1e1c; --warn:#e0a640; --bad:#f07a6e; --ok:#6cc488; --code:#262624; } }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width:960px; margin:0 auto; padding:24px 16px 64px; }
+h1 { font-size:22px; margin:0 0 4px; }
+h2 { font-size:16px; margin:28px 0 8px; border-bottom:1px solid var(--line); padding-bottom:4px; }
+.muted { color:var(--muted); }
+.banner { border:1px solid var(--warn); color:var(--warn); border-radius:6px; padding:8px 12px; margin:16px 0; }
+.grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(160px, 1fr)); gap:8px; }
+.kv { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:8px 10px; }
+.kv b { display:block; font-size:12px; color:var(--muted); font-weight:500; }
+table { width:100%; border-collapse:collapse; font-size:14px; }
+th, td { text-align:left; vertical-align:top; padding:6px 8px; border-bottom:1px solid var(--line); overflow-wrap:anywhere; }
+th { color:var(--muted); font-weight:500; }
+pre { background:var(--code); border-radius:6px; padding:10px; overflow:auto; font:12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space:pre; max-height:480px; }
+.bad { color:var(--bad); } .ok { color:var(--ok); }
+ul { padding-left:20px; }
+</style>
+</head>
+<body>
+<main id="app"><p class="muted">Loading the run record…</p></main>
+<script type="application/json" id="run-record">{{RECORD_JSON}}</script>
+<script>{{VIEWER_JS}}</script>
+</body>
+</html>

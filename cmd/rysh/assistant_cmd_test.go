@@ -119,13 +119,18 @@ func TestAssistantScaffoldFormat(t *testing.T) {
 	// commands as shell commands — and must keep the fail-closed confirmation
 	// posture that PM3 enforces at runtime.
 	for _, want := range []string{
-		"rysh_command", "pane_inspect", "pane_send", // tool awareness
+		"rysh_command", "pane_send", // tool awareness
 		"operate my rysh terminal session", // operator framing
 		"waiting for my confirmation",      // fail-closed posture preserved
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("system prompt missing %q:\n%s", want, body)
 		}
+	}
+	// Humanoids have no pane_inspect (security-lead ledger 113), so the prompt
+	// must not name it.
+	if strings.Contains(body, "pane_inspect") {
+		t.Errorf("system prompt names pane_inspect, which the humanoid registry lacks:\n%s", body)
 	}
 	// It must NOT revert to the pre-008 correspondent framing.
 	if strings.Contains(body, "You are my personal assistant") {

@@ -1,0 +1,7 @@
+api	1	editor	b25d,238x58,0,0{119x58,0,0,1,118x58,120,0[118x29,120,0,2,118x28,120,30,3]}	%1	/fixture-home/src/api	"vim ."
+api	1	editor	b25d,238x58,0,0{119x58,0,0,1,118x58,120,0[118x29,120,0,2,118x28,120,30,3]}	%2	/fixture-home/src/api	
+api	1	editor	b25d,238x58,0,0{119x58,0,0,1,118x58,120,0[118x29,120,0,2,118x28,120,30,3]}	%3	/fixture-home/src/api/test	go test ./...
+api	2	server	a1b2,238x58,0,0,4	%4	/fixture-home/src/api	"make run"
+notes	0	main	c3d4,200x50,0,0[200x25,0,0,5,200x24,0,26{100x24,0,26,6,99x24,101,26,7}]	%5	/srv/notes	
+notes	0	main	c3d4,200x50,0,0[200x25,0,0,5,200x24,0,26{100x24,0,26,6,99x24,101,26,7}]	%6	/srv/notes	tail -f notes.log | grep TODO
+notes	0	main	c3d4,200x50,0,0[200x25,0,0,5,200x24,0,26{100x24,0,26,6,99x24,101,26,7}]	%7	/srv/notes/my drafts	

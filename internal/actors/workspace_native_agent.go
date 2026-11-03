@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
+	"github.com/rysh-ai/rysh-cli-code/internal/sandbox"
 )
 
 // workspace_native_agent.go — design 029. `##claude` and `##codex`: start an
@@ -73,7 +74,31 @@ func (w *WorkspaceActor) handleNativeAgentCommand(out *strings.Builder, paneID, 
 		return fmt.Errorf("##%s: no active pane", kind)
 	}
 
+	// `##claude account …` switches the subscription every claude launch uses
+	// (claude_account.go). It starts nothing in this pane.
+	if kind == nativeAgentClaude && len(args) > 0 && strings.TrimSpace(args[0]) == "account" {
+		return w.handleClaudeAccount(out, paneID, args[1:])
+	}
+	// Before anything else, and before the pane is probed: nothing changes.
+	if why := claudeHooksRefusal(kind); why != "" {
+		fmt.Fprintf(out, "##%s: %s\n  nothing was started and nothing was changed\n", kind, why)
+		return fmt.Errorf("##%s: %s", kind, why)
+	}
+
 	args, freshSession := nativeAgentStripFreshSession(args)
+
+	// --sandbox (design 066). Parsed with the other rysh-owned flags so it never
+	// reaches the CLI and never lands in agent.args.
+	args, sbxFlag, serr := nativeAgentStripSandbox(args)
+	if serr != nil {
+		fmt.Fprintf(out, "##%s: %v\n", kind, serr)
+		return fmt.Errorf("##%s: %v", kind, serr)
+	}
+	args, noSandbox := nativeAgentStripNoSandbox(args)
+	if sbxFlag != "" && noSandbox {
+		fmt.Fprintf(out, "##%s: %s and %s contradict each other\n", kind, nativeAgentSandboxFlag, nativeAgentNoSandboxFlag)
+		return fmt.Errorf("##%s: %s and %s", kind, nativeAgentSandboxFlag, nativeAgentNoSandboxFlag)
+	}
 
 	// One-shot first prompt (native_agent_prompt.go). Parsed here, with the
 	// other rysh-owned flags, so neither spelling ever reaches the CLI — and
@@ -150,6 +175,21 @@ func (w *WorkspaceActor) handleNativeAgentCommand(out *strings.Builder, paneID, 
 		return strings.TrimSpace(snap.Meta[key])
 	}
 
+	// Sticky: a pane already stamped sandboxed stays sandboxed; else the
+	// workspace default; required refuses an unsandboxed launch (gap01 E4).
+	set, setErr := sandbox.LoadSettings(w.cfg.RyshDir)
+	sbxProfile, rerr := resolveNativeAgentSandbox(sbxFlag, noSandbox, meta(metaAgentSandbox), set, setErr)
+	if rerr != nil {
+		fmt.Fprintf(out, "##%s: %v\n  nothing was started and nothing was changed\n", kind, rerr)
+		return fmt.Errorf("##%s: %v", kind, rerr)
+	}
+	if sbxProfile != "" {
+		if err := w.checkNativeAgentSandbox(kind, sbxProfile, cwd, freshSession, promptReq.any()); err != nil {
+			fmt.Fprintf(out, "##%s: %v\n  nothing was started and nothing was changed\n", kind, err)
+			return fmt.Errorf("##%s: %v", kind, err)
+		}
+	}
+
 	// Stage the checked prompt last, just before the archive: every refusal
 	// above has had its chance to leave the pane untouched.
 	staged := ""
@@ -219,16 +259,30 @@ func (w *WorkspaceActor) handleNativeAgentCommand(out *strings.Builder, paneID, 
 	case kind == nativeAgentCodex:
 		// Codex can only be resumed by an id discovery actually found.
 		resume = sid != ""
+	case sbxProfile != "":
+		resume = claudeSandboxSessionExists(w.cfg.RyshDir, sbxProfile, sid)
 	default:
 		resume = claudeSessionExists(sid)
 	}
 
+	// Re-copy the active account's token so this launch gets the current one.
+	account, accountNote := "", ""
+	if kind == nativeAgentClaude {
+		account, accountNote = w.claudeAccountRefresh(paneID)
+	}
+
 	spec := nativeAgentSpec{Kind: kind, SessionID: sid, Args: extraArgs, Resume: resume, PromptFile: staged}
+	if sbxProfile != "" {
+		spec.Sandbox, spec.SandboxRyshDir, spec.Workspace = sbxProfile, w.cfg.RyshDir, cwd
+	}
 	// No cd at launch: the pane's shell is already where the user put it. See
 	// nativeAgentCommand.
 	command := nativeAgentCommand(spec)
 
 	w.stampNativeAgentMeta(paneID, kind, cwd, extraArgs, sid, fresh || freshSession, promptPath)
+	for _, kv := range nativeAgentSandboxMeta(sbxProfile, w.cfg.RyshDir) {
+		_ = w.pub.Send(msg.T("pane", paneID, "inbox"), &msg.MsgPaneSetMeta{Key: kv[0], Value: kv[1]})
+	}
 	if err := w.sendPaneExec(paneID, command); err != nil {
 		dropStaged()
 		fmt.Fprintf(out, "##%s: could not start it in this pane: %v\n", kind, err)
@@ -272,6 +326,15 @@ func (w *WorkspaceActor) handleNativeAgentCommand(out *strings.Builder, paneID, 
 		fmt.Fprintf(out, "                (one-shot: not stored in agent.args, never replayed on restore)\n")
 	}
 	fmt.Fprintf(out, "  approvals  : %s\n", nativeAgentApprovalNote(kind, extraArgs))
+	if account != "" {
+		fmt.Fprintf(out, "  account    : %s (##claude account)\n", account)
+	}
+	if accountNote != "" {
+		fmt.Fprintf(out, "  account    : %s\n", accountNote)
+	}
+	if sbxProfile != "" {
+		fmt.Fprintf(out, "  sandbox    : %s — writes only to %s; see docs/sandbox.md for what it does not cover\n", sbxProfile, cwd)
+	}
 	return nil
 }
 
@@ -498,6 +561,19 @@ func nativeResumePlan(
 	sessionExists func(string) bool,
 	done map[string]bool,
 ) (deliveries []nativeResumeDelivery, settled []string, pending int) {
+	return nativeResumePlanWith(panes, probe, sessionExists, done, nativeSandboxPolicy{})
+}
+
+// nativeResumePlanWith is nativeResumePlan under the workspace's sandbox
+// posture (gap01 E4): where sandbox.yaml says required, a pane that was
+// started unsandboxed comes back in the default profile, or not at all.
+func nativeResumePlanWith(
+	panes []ansaPane,
+	probe func(string) (string, error),
+	sessionExists func(string) bool,
+	done map[string]bool,
+	pol nativeSandboxPolicy,
+) (deliveries []nativeResumeDelivery, settled []string, pending int) {
 	for _, p := range panes {
 		if !resumableAgentPane(p) {
 			// Not ours to resume. A claude the user typed at their own shell
@@ -541,8 +617,30 @@ func nativeResumePlan(
 		// that has been deleted (or a `~/.claude` moved between machines) makes
 		// `--resume` fail at the pane, where re-pinning the id starts a working
 		// agent under the id the pane already believes it has.
+		sbx := strings.TrimSpace(p.meta(metaAgentSandbox))
+		sbxDir := strings.TrimSpace(p.meta(metaAgentSandboxDir))
+		if sbx == "" {
+			refuse := ""
+			switch {
+			case pol.Err != nil:
+				refuse = "cannot read this workspace's sandbox settings: " + pol.Err.Error()
+			case pol.Settings.Required && pol.Settings.Default == "":
+				refuse = "this workspace requires a sandbox and names no default profile; restart the agent with ##" + kind + " --sandbox <profile>"
+			case pol.Settings.Required:
+				sbx, sbxDir = pol.Settings.Default, pol.RyshDir
+			}
+			if refuse != "" {
+				deliveries = append(deliveries, nativeResumeDelivery{PaneID: p.ID, Command: nativeAgentNotStarted(refuse)})
+				continue
+			}
+		}
 		resume := sid != ""
-		if kind != nativeAgentCodex {
+		switch {
+		case kind == nativeAgentCodex:
+		case sbx != "":
+			// A sandboxed claude keeps its conversations in the sandbox home.
+			resume = sid != "" && claudeSandboxSessionExists(sbxDir, sbx, sid)
+		default:
 			resume = sid != "" && sessionExists(sid)
 		}
 
@@ -558,6 +656,11 @@ func nativeResumePlan(
 				// directory finds nothing.
 				Cwd:    nativeAgentResumeCwd(p),
 				Resume: resume,
+				// Design 066: a sandboxed pane comes back sandboxed, or not
+				// at all.
+				Sandbox:        sbx,
+				SandboxRyshDir: sbxDir,
+				Workspace:      nativeAgentResumeCwd(p),
 			}),
 		})
 	}
@@ -585,7 +688,9 @@ func (w *WorkspaceActor) handleResumeNativeAgents(m *msg.MsgResumeNativeAgents) 
 	if w.nativeResumed == nil {
 		w.nativeResumed = map[string]bool{}
 	}
-	deliveries, settled, pending := nativeResumePlan(panes, r.tr.Probe, claudeSessionExists, w.nativeResumed)
+	set, setErr := sandbox.LoadSettings(w.cfg.RyshDir)
+	pol := nativeSandboxPolicy{RyshDir: w.cfg.RyshDir, Settings: set, Err: setErr}
+	deliveries, settled, pending := nativeResumePlanWith(panes, r.tr.Probe, claudeSessionExists, w.nativeResumed, pol)
 
 	for _, id := range settled {
 		w.nativeResumed[id] = true

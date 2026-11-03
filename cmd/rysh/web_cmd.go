@@ -64,6 +64,23 @@ func buildWebStartCommand(port int, host, username, password string, control boo
 	return b.String()
 }
 
+// withControlSecretFile adds --control-secret-file to a `##rysh web start`
+// command: a path to the control door's secret handover file, never the secret.
+// The command is typed into a pane, so a path with whitespace cannot survive
+// the trip, and the file only means something with --control.
+func withControlSecretFile(cmd, path string, control bool) (string, error) {
+	if path == "" {
+		return cmd, nil
+	}
+	if !control {
+		return "", errors.New("--control-secret-file needs --control")
+	}
+	if strings.ContainsAny(path, " \t\r\n") {
+		return "", errors.New("--control-secret-file: the path must not contain whitespace")
+	}
+	return cmd + " --control-secret-file " + path, nil
+}
+
 // webCmdURL renders the URL the daemon will serve, matching the daemon's
 // control-mode loopback downgrade so we never print an address that the
 // server refuses to bind.
@@ -109,6 +126,10 @@ func runWebCmd(cfg config.Config, args []string) error {
 		}
 
 		cmd := buildWebStartCommand(port, host, username, password, control)
+		cmd, err := withControlSecretFile(cmd, flagVal(flags, "--control-secret-file"), control)
+		if err != nil {
+			return err
+		}
 		if err := cli.PaneSendInput(store, sessName, "", cmd, "shell"); err != nil {
 			return err
 		}

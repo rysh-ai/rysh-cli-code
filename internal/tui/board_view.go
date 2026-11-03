@@ -15,6 +15,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/nats-io/nats.go"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/rysh-ai/rysh-cli-code/internal/board"
 	"github.com/rysh-ai/rysh-cli-code/internal/bus"
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
@@ -82,6 +83,14 @@ type boardViewState struct {
 	// their acks), or all. The zero value is the default, status. s / p / a
 	// switch it; f shows the board as a flow diagram instead (design 052).
 	view board.View
+
+	// peer shows the session's peer board instead of this board (key P,
+	// design 044 N1). Any of s p a f t leaves it.
+	peer bool
+
+	// fleetStream is set on the reserved fleet board when the user chose the
+	// raw post stream (s p a f t) over the dashboard; d clears it (030 W4).
+	fleetStream bool
 }
 
 // boardView is st's view with the default applied.
@@ -390,13 +399,44 @@ func (m *Model) updateBoardPaneInput(msg tea.KeyMsg) (bool, tea.Cmd) {
 		return true, cmd
 	}
 
+	// The reserved fleet board is read-only (design 030 §4.3, W4): no
+	// composer, and d brings back its dashboard.
+	if m.isFleetBoardPane(snap.ID) {
+		switch msg.String() {
+		case "i", "enter":
+			st.composing = false
+			st.sendStatus, st.sendOK = fleetBoardReadOnlyNote, true
+			return true, nil
+		case "d":
+			st.fleetStream, st.peer = false, false
+			st.scrollOffset = 0
+			return true, nil
+		case "s", "p", "a", "f", "t":
+			st.fleetStream = true
+		}
+	}
+
 	switch msg.String() {
+	case "P":
+		// The session's peer board (design 044 N1): read-only, from the
+		// daemon's peer feed. Opening it reads everything and clears peer
+		// alerts (N2).
+		if !st.peer {
+			st.peer = true
+			st.scrollOffset = 0
+		}
+		m.markPeerSeen()
+		return true, nil
 	case "s", "p", "a", "f", "t":
 		// Which messages to list (design 051): status / prompt / all — or
 		// the flow diagram of the whole board (design 052), or the team table
 		// with the dependency tree (t). Only here, outside composing, where
 		// these are commands, not letters.
 		v, _ := board.ParseView(msg.String())
+		if st.peer {
+			st.peer = false
+			st.scrollOffset = 0
+		}
 		if st.boardView() != v {
 			st.view = v
 			st.scrollOffset = 0 // a different stream: start at its live tail
@@ -643,11 +683,29 @@ func (m Model) buildBoardPanel(pane domain.PaneSnapshot, paneWidth, height int) 
 		return strings.Join(lines, "\n")
 	}
 
+	// A copy, so the plain layout (what selection and copy read) is never
+	// restyled.
+	rows := append([]string(nil), lay.rows...)
+	for i := range rows {
+		if i < len(lay.refs) && boardRowIsUnverified(lay.refs[i]) {
+			rows[i] = boardUnverifiedStyle.Render(rows[i])
+		}
+	}
 	return fmt.Sprintf("%s\n%s\n%s\n%s",
 		metaStyle.Render(lay.header),
-		strings.Join(lay.rows, "\n"),
+		strings.Join(rows, "\n"),
 		lay.input,
 		metaStyle.Render(lay.status))
+}
+
+// boardUnverifiedStyle dims a fleet-board post the recorder could not verify
+// (design 030 §9.3/W4). Applied only when drawing; the plain layout that
+// selection and copy read stays unstyled.
+var boardUnverifiedStyle = lipgloss.NewStyle().Faint(true)
+
+// boardRowIsUnverified reports whether a drawn row belongs to such a post.
+func boardRowIsUnverified(ref boardRowRef) bool {
+	return ref.post != nil && ref.post.Unverified
 }
 
 // boardLayout is one frame of a board pane as plain rows, top to bottom:
@@ -698,6 +756,12 @@ func (m Model) boardPanelLayout(pane domain.PaneSnapshot, paneWidth, height int)
 	}
 
 	st := m.boardViewFor(pane.ID)
+	if st.peer {
+		return m.boardPeerLayout(pane, st, contentWidth, maxLines)
+	}
+	if boardID == msgpkg.FleetBoardID && !st.fleetStream {
+		return m.boardFleetDashLayout(pane, st, contentWidth, maxLines)
+	}
 	if st.boardView() == board.ViewFlow {
 		return m.boardFlowLayout(pane, boardID, st, contentWidth, maxLines)
 	}
@@ -925,7 +989,7 @@ func (m Model) boardHeaderText(boardID string, st *boardViewState) string {
 		parts = append(parts, boardTeamHeader(m.boardFlow(boardID)))
 	} else {
 		nStatus, nPrompt := board.CountViews(store.Threads())
-		parts = append(parts, fmt.Sprintf("showing %s · %d status · %d prompt · keys s p a f t",
+		parts = append(parts, fmt.Sprintf("showing %s · %d status · %d prompt · keys s p a f t P",
 			st.boardView(), nStatus, nPrompt))
 	}
 	if n := len(store.Roster()); n > 0 {
@@ -944,6 +1008,12 @@ func (m Model) boardHeaderText(boardID string, st *boardViewState) string {
 			parts = append(parts, fmt.Sprintf("%d DROPPED", d))
 		}
 	}
+	if note := m.peerPublishedNote(boardID); note != "" {
+		parts = append(parts, note)
+	}
+	if note := m.peerUnreadNote(); note != "" {
+		parts = append(parts, note)
+	}
 	if st.scrollOffset > 0 {
 		parts = append(parts, fmt.Sprintf("↑%d  G=live", st.scrollOffset))
 	}
@@ -953,7 +1023,12 @@ func (m Model) boardHeaderText(boardID string, st *boardViewState) string {
 // boardKeyHelp is the footer for a focused agents-board pane, in the shape
 // model_view.go:keyHelp uses per mode.
 func (m Model) boardKeyHelp() string {
-	return "pane: agents-board | s status  p prompts  a all  f flow  i write to the board claude (enter sends, esc cancels)  j/k ↑/↓ scroll  pgup/pgdn page  g top  G/end live  " +
+	if snap := m.focusedPaneSnapshot(); snap != nil && m.isFleetBoardPane(snap.ID) {
+		return "pane: fleet board (read-only) | d dashboard  s status  p prompts  a all  f flow  t team  P peer board  " +
+			"j/k ↑/↓ scroll  pgup/pgdn page  g top  G/end live  y copy newest  Y copy visible  o open visible as HTML  " +
+			"[/] tabs  ctrl+space navigate  ctrl+p pane-mgmt  ctrl+o prefix"
+	}
+	return "pane: agents-board | s status  p prompts  a all  f flow  t team  P peer board  i write to the board claude (enter sends, esc cancels)  j/k ↑/↓ scroll  pgup/pgdn page  g top  G/end live  " +
 		"y copy newest  Y copy visible  o open visible as HTML  " +
 		"[/] tabs  ctrl+space navigate  ctrl+p pane-mgmt  ctrl+o prefix"
 }
@@ -1081,7 +1156,8 @@ func (m Model) boardRowsWithRefsView(boardID string, width int, view board.View)
 	return rows, refs
 }
 
-// boardThreadRows renders one root and its replies, the replies UNDER the root.
+// boardThreadRowsWithRefs renders one root and its replies, the replies UNDER
+// the root, plus the post behind each row.
 //
 // A provisional thread — replies that arrived before their root, which design
 // 025 §4.3 makes an expected ordering and not an error, because thread ids are
@@ -1090,12 +1166,6 @@ func (m Model) boardRowsWithRefsView(boardID string, width int, view board.View)
 // re-parents into the SAME thread and re-positions it to the root's arrival, so
 // the next frame renders one thread with a real root. The view holds no state
 // across frames, which is precisely why it cannot duplicate the root.
-func boardThreadRows(t board.Thread, width int) []string {
-	rows, _ := boardThreadRowsWithRefs(t, width)
-	return rows
-}
-
-// boardThreadRowsWithRefs is boardThreadRows plus the post behind each row.
 func boardThreadRowsWithRefs(t board.Thread, width int) ([]string, []boardRowRef) {
 	rows := make([]string, 0, 2+len(t.Replies)*2)
 	refs := make([]boardRowRef, 0, 2+len(t.Replies)*2)
@@ -1167,7 +1237,13 @@ func boardPostHeader(glyph string, p *msgpkg.MsgBoardPost, indent, width int) st
 // given-names are unique per lane, not per session (design 025 §5), so two
 // panes may legitimately display the same name; PaneID is the identity.
 func boardDisplayPersona(p *msgpkg.MsgBoardPost) string {
-	return msgpkg.BoardPersona(p.Persona, "", p.PaneID)
+	name := msgpkg.BoardPersona(p.Persona, "", p.PaneID)
+	// Design 030 §9.3 (W3): a fleet-board post the recorder could not verify
+	// says so wherever it is named.
+	if p.Unverified {
+		name += " (unverified)"
+	}
+	return name
 }
 
 // boardClock renders a post's own clock. TS is the POSTER's clock, so the board
@@ -1349,6 +1425,9 @@ func (m Model) seedRosterFromSnapshot() {
 						continue
 					}
 					id := m.boardIDForPane(p.ID)
+					if id == msgpkg.FleetBoardID {
+						continue // its members are fleets, not panes (030 §4.3)
+					}
 					if live[id] == nil {
 						live[id] = map[string]bool{}
 					}

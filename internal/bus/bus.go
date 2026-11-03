@@ -8,8 +8,10 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -18,7 +20,9 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/board"
+	"github.com/rysh-ai/rysh-cli-code/internal/bustoken"
 	"github.com/rysh-ai/rysh-cli-code/internal/fleet"
+	"github.com/rysh-ai/rysh-cli-code/internal/fleetboard"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 )
 
@@ -49,28 +53,34 @@ type Config struct {
 	HostQueryTimeout time.Duration
 	// Logger receives the guest/host identity lines (nil = slog.Default()).
 	Logger *slog.Logger
+	// RefuseForeignHost: when Port already has a server, join it only if its
+	// owning daemon answers as this same workspace; otherwise New fails and
+	// names the port and the host session (D-55 B, for projects whose config
+	// names a port of their own). Ignored by external and Attach clients.
+	RefuseForeignHost bool
 }
 
 // Bus wraps either an embedded NATS server or an external connection.
 // It exposes a plain *nats.Conn, two JetStream KV buckets, a proto.actor
 // ActorSystem, a CodecRegistry, and a NATSPublisher.
 type Bus struct {
-	ns         *server.Server // nil when using an external server
-	nc         *nats.Conn
-	js         nats.JetStreamContext
-	pKV        nats.KeyValue    // "rysh-panes" (image-offloading wrapper when objStore != nil)
-	wKV        nats.KeyValue    // "rysh-workspace"
-	plKV       nats.KeyValue    // "rysh-pipeline"
-	aKV        nats.KeyValue    // "rysh-agents"
-	secretKV   nats.KeyValue    // "rysh-secrets" — per-session secret store
-	variableKV nats.KeyValue    // "rysh-variables" — per-session env-variable store
-	boardKV    nats.KeyValue    // "rysh-board" — per-session agents-board history
-	fleetKV    nats.KeyValue    // "rysh-fleet" — per-session fleet registry (design 028)
-	objStore   nats.ObjectStore // "rysh-images" — large conversation images (follow-up 1b)
-	system     *actor.ActorSystem
-	codecs     *msg.CodecRegistry
-	pub        *msg.NATSPublisher
-	clientPort int // TCP port for external CLI clients (0 if not listening)
+	ns           *server.Server // nil when using an external server
+	nc           *nats.Conn
+	js           nats.JetStreamContext
+	pKV          nats.KeyValue    // "rysh-panes" (image-offloading wrapper when objStore != nil)
+	wKV          nats.KeyValue    // "rysh-workspace"
+	plKV         nats.KeyValue    // "rysh-pipeline"
+	aKV          nats.KeyValue    // "rysh-agents"
+	secretKV     nats.KeyValue    // "rysh-secrets" — per-session secret store
+	variableKV   nats.KeyValue    // "rysh-variables" — per-session env-variable store
+	boardKV      nats.KeyValue    // "rysh-board" — per-session agents-board history
+	fleetKV      nats.KeyValue    // "rysh-fleet" — per-session fleet registry (design 028)
+	fleetBoardKV nats.KeyValue    // "rysh-fleetboard" — per-session fleet board rows (design 030 W2)
+	objStore     nats.ObjectStore // "rysh-images" — large conversation images (follow-up 1b)
+	system       *actor.ActorSystem
+	codecs       *msg.CodecRegistry
+	pub          *msg.NATSPublisher
+	clientPort   int // TCP port for external CLI clients (0 if not listening)
 
 	// guest is true when this Bus connected to a NATS server started by some
 	// other process (another session's daemon, or the desktop app's sidecar)
@@ -87,6 +97,10 @@ type Bus struct {
 	// guestOf is what a guest knows about the server it joined (guest_of in
 	// /health and ##rysh status). Filled by the background host query, hence
 	// the mutex. See guest_of.go.
+	// token is the per-server token this Bus's embedded server requires
+	// (owner only); never logged.
+	token string
+
 	guestMu sync.Mutex
 	guestOf GuestOf
 	log     *slog.Logger
@@ -98,11 +112,30 @@ func New(cfg Config) (*Bus, error) {
 
 	switch cfg.Mode {
 	case "external":
-		nc, err := nats.Connect(cfg.URL,
-			nats.MaxReconnects(-1),
-			nats.ReconnectWait(500*time.Millisecond),
-		)
+		// `rysh attach` comes here (cmd/rysh runAttachUI). A loopback session
+		// bus started by rysh requires its per-server token (gap01 slice 3),
+		// so present it when this machine has one for that port: OptionForURL
+		// sends it only to a loopback host and re-reads the file on every
+		// reconnect. No token file means a plain NATS (or an older rysh): dial
+		// without one, and if the server refuses, say which token is missing.
+		opts := []nats.Option{nats.MaxReconnects(-1), nats.ReconnectWait(500 * time.Millisecond)}
+		tokOpt, tokErr := bustoken.OptionForURL(cfg.URL)
+		if tokErr == nil {
+			opts = append(opts, tokOpt)
+		}
+		nc, err := nats.Connect(cfg.URL, opts...)
 		if err != nil {
+			if bustoken.IsAuthError(err) {
+				if u, perr := url.Parse(cfg.URL); perr == nil {
+					if port, aerr := strconv.Atoi(u.Port()); aerr == nil {
+						cause := err
+						if tokErr != nil {
+							cause = tokErr
+						}
+						return nil, fmt.Errorf("connect to external NATS at %s: %w", cfg.URL, bustoken.Missing(port, cause))
+					}
+				}
+			}
 			return nil, fmt.Errorf("connect to external NATS at %s: %w", cfg.URL, err)
 		}
 		b.nc = nc
@@ -137,11 +170,29 @@ func New(cfg Config) (*Bus, error) {
 		var nc *nats.Conn
 		err := errors.New("private server requested")
 		if !private {
+			// The owner's token (gap01 slice 3), re-read on every reconnect so
+			// a guest survives the owner restarting with a new one.
+			tokOpt, terr := bustoken.Option(cliPort)
+			if terr != nil {
+				return nil, bustoken.Missing(cliPort, terr)
+			}
 			nc, err = nats.Connect(fmt.Sprintf("nats://127.0.0.1:%d", cliPort),
+				tokOpt,
 				nats.MaxReconnects(-1),
 				nats.ReconnectWait(500*time.Millisecond),
 				nats.Timeout(1*time.Second),
 			)
+			// A server that refuses our token IS listening: fail loudly (T3)
+			// rather than fall through and try to start a second one.
+			if bustoken.IsAuthError(err) {
+				return nil, bustoken.Missing(cliPort, err)
+			}
+		}
+		if err == nil && cfg.RefuseForeignHost && !cfg.Attach {
+			if rerr := refuseForeignHost(nc, cfg, cliPort); rerr != nil {
+				nc.Close()
+				return nil, rerr
+			}
 		}
 		if err == nil {
 			// An existing NATS server is running — reuse it.
@@ -165,13 +216,22 @@ func New(cfg Config) (*Bus, error) {
 				return nil, fmt.Errorf("create NATS data dir: %w", err)
 			}
 
+			// Every connection needs the per-server token (gap01 slice 3):
+			// without it any local process, and a container on network: on,
+			// could drive every session. It is written to ~/.rysh-run once
+			// the real port is known, and nowhere else.
+			tok, err := bustoken.New()
+			if err != nil {
+				return nil, err
+			}
 			opts := &server.Options{
-				Host:      "127.0.0.1",
-				Port:      cliPort,
-				JetStream: true,
-				StoreDir:  dataDir,
-				NoLog:     true,
-				NoSigs:    true,
+				Host:          "127.0.0.1",
+				Port:          cliPort,
+				Authorization: tok,
+				JetStream:     true,
+				StoreDir:      dataDir,
+				NoLog:         true,
+				NoSigs:        true,
 				// Default NATS max payload is 1MB, which a single browser-pane
 				// screenshot (base64 JPEG, esp. on a Retina display) can exceed —
 				// causing the browser_action response to be dropped silently and
@@ -192,8 +252,13 @@ func New(cfg Config) (*Bus, error) {
 			if addr, ok := ns.Addr().(*net.TCPAddr); ok {
 				b.clientPort = addr.Port // the real port when kernel-assigned
 			}
+			if err := bustoken.Write(b.clientPort, tok); err != nil {
+				ns.Shutdown()
+				return nil, fmt.Errorf("embedded NATS: %w", err)
+			}
+			b.token = tok
 
-			nc, err := nats.Connect(nats.DefaultURL, nats.InProcessServer(ns))
+			nc, err := nats.Connect(nats.DefaultURL, nats.InProcessServer(ns), nats.Token(tok))
 			if err != nil {
 				ns.Shutdown()
 				return nil, fmt.Errorf("connect to embedded NATS: %w", err)
@@ -349,6 +414,14 @@ func New(cfg Config) (*Bus, error) {
 		b.fleetKV = fKV
 	}
 
+	// Per-session fleet board rows (design 030 §9.2, W2). Same non-fatal
+	// rule: without it the fleet board forgets on restart.
+	if fbKV, fberr := b.ensureKV(fleetboard.BucketConfig(sessionSuffix)); fberr == nil {
+		b.fleetBoardKV = fbKV
+	} else if fbKV, fberr2 := js.KeyValue(fleetboard.BucketName(sessionSuffix)); fberr2 == nil {
+		b.fleetBoardKV = fbKV
+	}
+
 	// Create proto.actor ActorSystem with a silent logger to prevent
 	// "actor system started" from printing to stderr.
 	b.system = actor.NewActorSystem(actor.WithLoggerFactory(func(_ *actor.ActorSystem) *slog.Logger {
@@ -404,6 +477,9 @@ func (b *Bus) BoardKV() nats.KeyValue { return b.boardKV }
 
 // FleetKV returns the per-session fleet registry bucket (design 028).
 func (b *Bus) FleetKV() nats.KeyValue { return b.fleetKV }
+
+// FleetBoardKV is the fleet board's row store (design 030 W2), or nil.
+func (b *Bus) FleetBoardKV() nats.KeyValue { return b.fleetBoardKV }
 
 // ActorSystem returns the proto.actor ActorSystem.
 func (b *Bus) ActorSystem() *actor.ActorSystem { return b.system }
@@ -512,5 +588,6 @@ func (b *Bus) Close() {
 	if b.ns != nil {
 		b.ns.Shutdown()
 		b.ns.WaitForShutdown()
+		bustoken.Remove(b.clientPort, b.token)
 	}
 }

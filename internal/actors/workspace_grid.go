@@ -66,12 +66,14 @@ func (w *WorkspaceActor) handleNewInstance(ctx actor.Context, out *strings.Build
 		fmt.Fprintf(out, "\n[rysh] new lane created in tab %q\n", tab.title)
 
 	case "pane":
+		// --json (design 069) may sit anywhere: the positional args are ids.
+		paneArgs, asJSON := extractBoolArg(args[1:], "--json")
 		tabArg, laneArg := "", ""
-		if len(args) > 1 {
-			tabArg = args[1]
+		if len(paneArgs) > 0 {
+			tabArg = paneArgs[0]
 		}
-		if len(args) > 2 {
-			laneArg = args[2]
+		if len(paneArgs) > 1 {
+			laneArg = paneArgs[1]
 		}
 		// No explicit tab arg -> act on the tab that issued the command.
 		tab := w.resolveTabArg(tabArg)
@@ -100,6 +102,10 @@ func (w *WorkspaceActor) handleNewInstance(ctx actor.Context, out *strings.Build
 		w.resCounts.panes++
 		w.restoreFocusAfterCreate(focusPaneID)
 		w.persistToKV()
+		if asJSON {
+			writeJSONLine(out, NewPaneResult{Alias: alias, TabID: tab.id, LaneID: laneID})
+			return
+		}
 		fmt.Fprintf(out, "\n[rysh] new pane created at the bottom of lane %.8s in tab %q\n", laneID, tab.title)
 
 	case "grid":

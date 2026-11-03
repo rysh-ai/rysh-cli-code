@@ -228,63 +228,101 @@ func TestNoteGoverned_FlowsFromServeHTTP(t *testing.T) {
 	}
 }
 
-// TestIdentifyCLI_NativeInstallerClaude is F-15 at the decision function: the
-// kernel calls the native-installer claude by its version, and what the OS
-// still reports as "claude" — argv[0], darwin's unresolved exec path, Linux's
-// resolved versions/<v> layout — must be enough to find the profile.
-func TestIdentifyCLI_NativeInstallerClaude(t *testing.T) {
+// identityHome lays out a fake home with the files IdentifyCLI resolves, and
+// points $HOME at it so the profile table's "~/" install locations land there.
+// Each path is created as an empty file; a value starting with "->" makes a
+// symlink to that home-relative target instead.
+func identityHome(t *testing.T, files map[string]string) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for rel, target := range files {
+		path := filepath.Join(home, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if to, ok := strings.CutPrefix(target, "->"); ok {
+			if err := os.Symlink(filepath.Join(home, to), path); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err := os.WriteFile(path, nil, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return home
+}
+
+// TestIdentifyCLI_ByRealExecutable is the decision function under WO-7: the
+// real executable decides, at the CLI's known install locations, whatever the
+// process calls itself. It covers F-15 too: the native-installer claude, whose
+// kernel name is its version, is identified by the version file it runs.
+func TestIdentifyCLI_ByRealExecutable(t *testing.T) {
+	home := identityHome(t, map[string]string{
+		".local/share/claude/versions/2.1.288":       "",
+		".local/bin/claude":                          "->.local/share/claude/versions/2.1.288",
+		"py/bin/python3.12":                          "",
+		".local/share/uv/tools/aider-chat/bin/aider": "",
+	})
+	versioned := filepath.Join(home, ".local/share/claude/versions/2.1.288")
+	python := filepath.Join(home, "py/bin/python3.12")
 	cases := []struct {
-		name, comm, exe string
-		argv            []string
-		want            string
+		name, exe string
+		argv      []string
+		want      string
 	}{
-		// Measured 2026-10-03 on darwin, claude 2.1.288, via kern.procargs2.
-		{"darwin native installer", "2.1.288", "/Users/u/.local/bin/claude",
-			[]string{"claude", "--session-id", "x"}, "claude"},
-		// Linux: /proc/<pid>/exe is resolved; argv[0] still says claude.
-		{"linux native installer", "2.1.288", "/home/u/.local/share/claude/versions/2.1.288",
-			[]string{"claude", "--print", "hi"}, "claude"},
-		// argv rewritten or unreadable: the install layout alone is enough.
-		{"layout only", "2.1.288", "/home/u/.local/share/claude/versions/2.1.288",
-			nil, "claude"},
-		{"plain comm", "claude", "", nil, "claude"},
-		{"absolute argv0", "codex", "", []string{"/opt/homebrew/bin/codex"}, "codex"},
-		{"npm claude under node", "node", "/usr/local/bin/node",
-			[]string{"node", "/usr/local/bin/claude", "--print"}, "claude"},
-		{"aider under python", "python3.12", "/usr/bin/python3.12",
-			[]string{"/usr/bin/python3.12", "/home/u/.local/bin/aider"}, "aider"},
+		{"genuine native claude", versioned, []string{"claude", "--print", "hi"}, "claude"},
+		{"argv unreadable", versioned, nil, "claude"},
+		{"real claude under another name (exec -a)", versioned, []string{"ryshother"}, "claude"},
+		{"real claude through its install symlink", filepath.Join(home, ".local/bin/claude"), nil, "claude"},
+		{"interpreter running the real script", python, []string{python, filepath.Join(home, ".local/share/uv/tools/aider-chat/bin/aider")}, "aider"},
 	}
 	for _, c := range cases {
-		got, ok := IdentifyCLI(c.comm, c.exe, c.argv)
+		got, ok := IdentifyCLI(c.exe, c.argv)
 		if !ok || got != c.want {
-			t.Errorf("%s: IdentifyCLI(%q, %q, %q) = %q, %v; want %q, true",
-				c.name, c.comm, c.exe, c.argv, got, ok, c.want)
+			t.Errorf("%s: identified as %q, %v; want %q, true", c.name, got, ok, c.want)
 		}
 	}
 }
 
-// TestIdentifyCLI_RefusesUnknownPrograms is the F-13 half: a program with no
-// profile is not a CLI, and an interpreter running something else is not one
-// either.
-func TestIdentifyCLI_RefusesUnknownPrograms(t *testing.T) {
+// TestIdentifyCLI_NotIdentified is the other half: nothing a launcher chooses
+// (argv[0], a symlink's name, a script's name) makes a process an allowed CLI,
+// and an unreadable executable is unknown (F-13), so it is not watched.
+func TestIdentifyCLI_NotIdentified(t *testing.T) {
+	home := identityHome(t, map[string]string{
+		"bin/ryshdecoy":                        "",
+		"bin/ryshother":                        "",
+		"bin/claude":                           "->bin/ryshother",
+		"elsewhere/claude/versions/2.1.288":    "",
+		"elsewhere/aider":                      "",
+		"opt/tool/versions/1.2.3":              "",
+		"py/bin/python3.12":                    "",
+		"usr/bin/vim":                          "",
+		".local/share/claude/versions/2.1.288": "",
+	})
+	at := func(rel string) string { return filepath.Join(home, rel) }
+	python := at("py/bin/python3.12")
 	cases := []struct {
-		comm, exe string
+		name, exe string
 		argv      []string
 	}{
-		{"sleep", "/bin/sleep", []string{"sleep", "120"}},
-		{"make", "/usr/bin/make", []string{"make", "test"}},
-		{"node", "/usr/local/bin/node", []string{"node", "server.js"}},
-		// argv[1] is only consulted behind an interpreter: `vim claude` edits
-		// a file, it does not run the CLI.
-		{"vim", "/usr/bin/vim", []string{"vim", "claude"}},
-		// A versions/ directory that is not a known CLI's.
-		{"1.2.3", "/opt/tool/versions/1.2.3", []string{"/opt/tool/versions/1.2.3"}},
-		{"", "", nil},
+		{"exec -a decoy", at("bin/ryshdecoy"), []string{"claude", "--print"}},
+		{"symlink named claude to another binary", at("bin/claude"), []string{"claude"}},
+		{"copy outside the install locations", at("elsewhere/claude/versions/2.1.288"), []string{"claude"}},
+		{"a versions/ directory that is not a known CLI's", at("opt/tool/versions/1.2.3"), nil},
+		{"interpreter running a look-alike script", python, []string{python, at("elsewhere/aider")}},
+		{"interpreter running a relative script", python, []string{python, "aider"}},
+		{"interpreter whose script is missing", python, []string{python, at(".local/share/uv/tools/aider-chat/bin/aider")}},
+		{"not an interpreter: argv[1] is just an argument", at("usr/bin/vim"), []string{"vim", at(".local/share/claude/versions/2.1.288")}},
+		{"interpreter with only argv[0]", python, []string{"claude"}},
+		{"unreadable executable", "", []string{"claude"}},
+		{"relative executable", "claude", []string{"claude"}},
+		{"executable that does not exist", at("bin/missing"), []string{"claude"}},
 	}
 	for _, c := range cases {
-		if got, ok := IdentifyCLI(c.comm, c.exe, c.argv); ok {
-			t.Errorf("IdentifyCLI(%q, %q, %q) = %q, true; want not a known CLI",
-				c.comm, c.exe, c.argv, got)
+		if got, ok := IdentifyCLI(c.exe, c.argv); ok {
+			t.Errorf("%s: identified as %q; want not identified", c.name, got)
 		}
 	}
 }

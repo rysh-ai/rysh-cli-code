@@ -9,9 +9,10 @@ package channels
 // Inbound: Twilio POSTs a form-encoded webhook to the number's "A MESSAGE COMES
 // IN" URL. The adapter runs a loopback-bound HTTP server on WebhookPort; the
 // operator supplies the public tunnel and registers it in the Twilio console.
-// Every POST is authenticated with the X-Twilio-Signature HMAC when webhook_url
-// is configured (Twilio signs the URL *it* requested, which a loopback listener
-// cannot reconstruct — hence the explicit config).
+// Every POST must carry a valid X-Twilio-Signature HMAC; an unsigned or
+// mis-signed POST is refused. Twilio signs the URL *it* requested, which a
+// loopback listener cannot reconstruct, so webhook_url (that public URL) and
+// auth_token are both required: Start and Validate refuse without them.
 //
 // Outbound: POST to /2010-04-01/Accounts/{sid}/Messages.json with HTTP basic
 // auth, split under the 1600-character API limit, with a bounded retry on 429.
@@ -217,12 +218,10 @@ func (p *PhoneAdapter) Start(ctx context.Context) error {
 
 	p.setState(true, "")
 
-	if !p.signatureCheckEnabled() {
-		// Not fatal — a tunnel that rewrites the URL makes validation
-		// impossible — but an unauthenticated inbound endpoint is worth one
-		// loud line, because anyone who can reach it can impersonate a sender.
-		slog.Warn("phone: inbound signature validation DISABLED — set webhook_url to the public URL Twilio posts to; until then any caller reaching this port can inject messages",
-			"listen", addr)
+	if twilioWebhookURLCleartextRemote(p.config.WebhookURL) {
+		// Allowed, but worth one line: inbound bodies and signatures travel
+		// unencrypted to a non-loopback host. The URL itself is not logged.
+		slog.Warn("phone: webhook_url uses plain http on a non-loopback host; prefer https (docs/phone-twilio.md)")
 	}
 	slog.Info("phone: adapter started",
 		"number", p.config.Number,
@@ -241,11 +240,34 @@ func (p *PhoneAdapter) checkConfig() error {
 	if p.config.AccountSID == "" {
 		return fmt.Errorf("phone: account_sid is required (Twilio account SID, ACxxxxxxxx)")
 	}
-	if p.config.AuthToken == "" {
-		return fmt.Errorf("phone: auth_token is required (Twilio auth token)")
+	if tok := strings.TrimSpace(p.config.AuthToken); tok == "" || strings.Contains(tok, "${") {
+		return fmt.Errorf("phone: auth_token is required (Twilio auth token; it signs every inbound webhook, " +
+			"and an unset ${…} reference counts as missing)")
 	}
 	if p.config.Number == "" {
 		return fmt.Errorf("phone: number is required (the Twilio sending number, E.164 e.g. +15550100)")
+	}
+	if err := checkTwilioWebhookURL(p.config.WebhookURL); err != nil {
+		return err
+	}
+	return nil
+}
+
+// checkTwilioWebhookURL requires webhook_url: the absolute http(s) URL Twilio
+// posts to. Without it no inbound signature can be verified, so the adapter
+// would accept anything that reaches its port as a message from any number.
+// An unset ${…} reference counts as missing. The value is never quoted back:
+// a tunnel URL can carry a path secret.
+func checkTwilioWebhookURL(raw string) error {
+	v := strings.TrimSpace(raw)
+	const need = "phone: webhook_url is required — the public URL Twilio posts to " +
+		"(every inbound webhook is verified with X-Twilio-Signature over that URL)"
+	if v == "" || strings.Contains(v, "${") {
+		return fmt.Errorf("%s; an unset ${…} reference counts as missing", need)
+	}
+	u, err := url.Parse(v)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		return fmt.Errorf("%s; it must be an absolute http(s) URL", need)
 	}
 	return nil
 }
@@ -270,8 +292,30 @@ func (p *PhoneAdapter) setState(connected bool, errMsg string) {
 // signatureCheckEnabled reports whether inbound POSTs can be authenticated:
 // Twilio's signature covers the public request URL, so validating it requires
 // the operator to declare that URL.
+//
+// It applies checkConfig's rules, so the handler never keys an HMAC with an
+// unresolved ${…} reference or verifies against a malformed URL.
 func (p *PhoneAdapter) signatureCheckEnabled() bool {
-	return p.config.AuthToken != "" && strings.TrimSpace(p.config.WebhookURL) != ""
+	tok := strings.TrimSpace(p.config.AuthToken)
+	return tok != "" && !strings.Contains(tok, "${") && checkTwilioWebhookURL(p.config.WebhookURL) == nil
+}
+
+// twilioWebhookURLCleartextRemote reports a plain-http webhook_url whose host
+// is not loopback: Twilio supports it, but the body and the signature then
+// cross the network unencrypted. https is preferred (docs/phone-twilio.md).
+func twilioWebhookURLCleartextRemote(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme != "http" {
+		return false
+	}
+	host := u.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return false
+	}
+	return true
 }
 
 // Status returns the current Twilio connection status.
@@ -284,7 +328,7 @@ func (p *PhoneAdapter) Status() msg.ChannelStatus {
 		details += ", number: " + p.config.Number
 	}
 	if !p.signatureCheckEnabled() {
-		details += ", UNVERIFIED inbound (no webhook_url)"
+		details += ", UNVERIFIED inbound (webhook_url or auth_token missing)"
 	}
 	if !p.rateLimitedAt.IsZero() {
 		details += ", rate limited at " + p.rateLimitedAt.Format(time.RFC3339)
@@ -370,13 +414,14 @@ func (p *PhoneAdapter) handleWebhook(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if p.signatureCheckEnabled() {
-		if !verifyTwilioSignature(p.config.WebhookURL, form, r.Header.Get("X-Twilio-Signature"), p.config.AuthToken) {
-			slog.Warn("phone: inbound signature mismatch — rejecting",
-				"from", form.Get("From"), "sid", form.Get("MessageSid"))
-			http.Error(rw, "invalid signature", http.StatusForbidden)
-			return
-		}
+	// Fail closed: Start refuses a config that cannot verify, and this check
+	// keeps the handler closed even on an adapter that was never started.
+	if !p.signatureCheckEnabled() ||
+		!verifyTwilioSignature(p.config.WebhookURL, form, r.Header.Get("X-Twilio-Signature"), p.config.AuthToken) {
+		slog.Warn("phone: inbound webhook without a valid signature — rejecting",
+			"from", form.Get("From"), "sid", form.Get("MessageSid"))
+		http.Error(rw, "invalid signature", http.StatusForbidden)
+		return
 	}
 
 	// A voice webhook carries CallSid and no message body. Answering it would

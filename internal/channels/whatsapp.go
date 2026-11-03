@@ -100,12 +100,15 @@ type WhatsAppMessage struct {
 // Callback URL in the Meta dashboard. The server answers the GET verification
 // handshake and validates the X-Hub-Signature-256 HMAC on inbound POSTs.
 type WhatsAppAdapter struct {
-	config    msg.ChannelConfig
-	inbound   chan InboundMessage
-	client    *http.Client
-	graphVer  string
-	baseURL   string // Graph API base; overridable in tests.
-	port      int
+	config   msg.ChannelConfig
+	inbound  chan InboundMessage
+	client   *http.Client
+	graphVer string
+	baseURL  string // Graph API base; overridable in tests.
+	port     int
+	// addr is the address the webhook listener actually bound (host:port),
+	// set by Start; empty until then and in relay mode.
+	addr      string
 	connected bool
 	err       string
 	mu        sync.RWMutex
@@ -127,6 +130,15 @@ type WhatsAppAdapter struct {
 	// relayConn is the outbound connection to rysh-server when the channel runs
 	// in relay mode; nil in direct mode.
 	relayConn *nats.Conn
+	// relayWork tracks the relay's background replays so Stop can wait for
+	// them; relayStopping (under mu) stops new ones from starting, and keeps
+	// a late message unhandled, once Stop has begun. See goRelay. In webhook
+	// mode the same flag makes a POST that arrives while stopping get a 503.
+	relayWork     sync.WaitGroup
+	relayStopping bool
+	// serverDone closes when the webhook server has shut down (webhook mode;
+	// nil in relay mode and before Start). Stop waits for it.
+	serverDone chan struct{}
 	// relayLastSeen is the newest inbound timestamp handled, used as the replay
 	// watermark after a reconnect. It is persisted so a restart asks only for
 	// what arrived while the session was down.
@@ -305,16 +317,23 @@ func NewWhatsAppAdapter(config msg.ChannelConfig) *WhatsAppAdapter {
 	}
 	port := defaultWhatsAppWebhookPort
 	if s := strings.TrimSpace(config.WebhookPort); s != "" {
-		if p, err := strconv.Atoi(s); err == nil && p > 0 {
+		// 0 asks the OS for a free port (tests, or a tunnel that is told the
+		// port afterwards); Status shows the one bound.
+		if p, err := strconv.Atoi(s); err == nil && p >= 0 {
 			port = p
 		}
+	}
+	baseURL := "https://graph.facebook.com"
+	if b := strings.TrimSpace(config.APIBase); b != "" {
+		// Checked in Start (ValidateAPIBase): https, or http on loopback.
+		baseURL = strings.TrimSuffix(b, "/")
 	}
 	w := &WhatsAppAdapter{
 		config:         config,
 		inbound:        make(chan InboundMessage, 100),
 		client:         &http.Client{Timeout: 20 * time.Second},
 		graphVer:       graphVer,
-		baseURL:        "https://graph.facebook.com",
+		baseURL:        baseURL,
 		port:           port,
 		retryBaseDelay: 500 * time.Millisecond,
 	}
@@ -357,6 +376,10 @@ func (w *WhatsAppAdapter) SetConfig(cfg msg.ChannelConfig) {
 	}
 }
 
+// whatsAppShutdownGrace bounds how long a stopping webhook server waits for a
+// request in flight. A variable so tests can shorten it.
+var whatsAppShutdownGrace = 3 * time.Second
+
 // Start validates credentials and launches the inbound webhook server.
 func (w *WhatsAppAdapter) Start(ctx context.Context) error {
 	// Relay mode needs neither platform credentials nor a listener: the server
@@ -364,19 +387,28 @@ func (w *WhatsAppAdapter) Start(ctx context.Context) error {
 	if w.config.Relay {
 		return w.startRelay(ctx)
 	}
-	if w.config.APIKey == "" {
-		return fmt.Errorf("whatsapp: api_key (Graph access token) is required")
+	if err := whatsAppDirectConfigError(w.config); err != nil {
+		return err
 	}
-	if w.config.Phone == "" {
-		return fmt.Errorf("whatsapp: phone (phone_number_id) is required")
+	if err := ValidateAPIBase(w.config.APIBase); err != nil {
+		return fmt.Errorf("whatsapp: %w", err)
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	w.cancel = cancel
+	w.mu.Lock()
+	w.relayStopping = false
+	w.mu.Unlock()
+
+	host, err := whatsAppBindHost(w.config)
+	if err != nil {
+		cancel()
+		return err
+	}
 
 	// Bind the webhook listener synchronously so a port conflict surfaces as a
 	// Start error rather than a silent goroutine failure.
-	addr := fmt.Sprintf(":%d", w.port)
+	addr := net.JoinHostPort(host, strconv.Itoa(w.port))
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		cancel()
@@ -385,15 +417,21 @@ func (w *WhatsAppAdapter) Start(ctx context.Context) error {
 		w.mu.Unlock()
 		return fmt.Errorf("whatsapp: webhook listen on %s: %w", addr, err)
 	}
+	addr = ln.Addr().String()
+	if !isLoopbackHost(host) {
+		slog.Warn("whatsapp: webhook listening beyond loopback because webhook_bind says so; every POST must still carry a valid X-Hub-Signature-256",
+			"listen", addr)
+	}
 
 	mux := http.NewServeMux()
 	// Mount the handler at the root so the operator can point Meta's Callback URL
 	// at whatever external path their proxy/tunnel maps to this port.
 	mux.HandleFunc("/", w.handleWebhook)
-	w.server = &http.Server{Handler: mux}
+	srv := &http.Server{Handler: mux}
+	w.server = srv
 
 	go func() {
-		if serr := w.server.Serve(ln); serr != nil && serr != http.ErrServerClosed {
+		if serr := srv.Serve(ln); serr != nil && serr != http.ErrServerClosed {
 			slog.Error("whatsapp: webhook server stopped", "err", serr)
 			w.mu.Lock()
 			w.err = serr.Error()
@@ -403,11 +441,20 @@ func (w *WhatsAppAdapter) Start(ctx context.Context) error {
 	}()
 
 	// Shut the server down when the context is cancelled (humanoid stop / channel stop).
+	// A request still in flight after the grace is cut off, so Stop, which
+	// waits for serverDone, is bounded.
+	done := make(chan struct{})
+	w.mu.Lock()
+	w.serverDone = done
+	w.mu.Unlock()
 	go func() {
+		defer close(done)
 		<-ctx.Done()
-		shutCtx, shutCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), whatsAppShutdownGrace)
 		defer shutCancel()
-		_ = w.server.Shutdown(shutCtx)
+		if err := srv.Shutdown(shutCtx); err != nil {
+			_ = srv.Close()
+		}
 		w.mu.Lock()
 		w.connected = false
 		w.mu.Unlock()
@@ -417,15 +464,79 @@ func (w *WhatsAppAdapter) Start(ctx context.Context) error {
 	w.mu.Lock()
 	w.connected = true
 	w.err = ""
+	w.addr = addr
 	w.mu.Unlock()
 
 	slog.Info("whatsapp: adapter started",
 		"phone_number_id", w.config.Phone,
 		"business_id", w.config.BusinessID,
-		"webhook_port", w.port,
-		"graph_version", w.graphVer,
-		"signature_check", w.config.AppSecret != "")
+		"listen", addr,
+		"graph_version", w.graphVer)
 	return nil
+}
+
+// LocalWebhookURL is the webhook on this host, once Start has bound it: the
+// address listenAddr reports (127.0.0.1 unless webhook_bind names another).
+// The operator's tunnel forwards Meta's Callback URL here.
+func (w *WhatsAppAdapter) LocalWebhookURL() string {
+	return "http://" + w.listenAddr() + "/"
+}
+
+// whatsAppDirectConfigError reports the first missing credential of a
+// direct-mode (non-relay) config, naming the skill-file key.
+//
+// app_secret is required, not optional: it is the only thing that tells a
+// webhook POST from Meta apart from one sent by anyone who can reach the port,
+// and an inbound message's sender id is taken from the body. Without it a
+// forged POST could speak as the owner, whose replies release tool approvals.
+// An unresolved ${…} reference counts as missing. Relay mode needs none of
+// this: rysh-server holds the credentials and verifies the webhook itself.
+func whatsAppDirectConfigError(cfg msg.ChannelConfig) error {
+	if cfg.Relay {
+		return nil
+	}
+	if cfg.APIKey == "" {
+		return fmt.Errorf("whatsapp: api_key (Graph access token) is required")
+	}
+	if cfg.Phone == "" {
+		return fmt.Errorf("whatsapp: phone (phone_number_id) is required")
+	}
+	if secret := strings.TrimSpace(cfg.AppSecret); secret == "" || strings.Contains(secret, "${") {
+		return fmt.Errorf("whatsapp: app_secret (the Meta app secret, App Settings → Basic) is required — " +
+			"every inbound webhook POST is verified with X-Hub-Signature-256, and an unset ${…} reference counts as missing; " +
+			"set it with rysh setup, or use relay mode")
+	}
+	return nil
+}
+
+// whatsAppBindHost resolves the host the webhook listener binds. Empty means
+// 127.0.0.1: the operator's tunnel or reverse proxy forwards to it, as for
+// LINE, Teams and Telegram. Any other host, including 0.0.0.0, is bound only
+// because webhook_bind names it. A value that is not an IP address or
+// "localhost" is refused rather than resolved.
+func whatsAppBindHost(cfg msg.ChannelConfig) (string, error) {
+	return webhookBindHost("whatsapp", cfg)
+}
+
+// webhookBindHost is the bind rule shared by the webhook adapters that take
+// webhook_bind (WhatsApp, WeChat, WeCom): empty means 127.0.0.1; an IP address
+// or "localhost" is bound as given; anything else is refused, never resolved.
+func webhookBindHost(channel string, cfg msg.ChannelConfig) (string, error) {
+	host := strings.TrimSpace(cfg.WebhookBind)
+	switch {
+	case host == "":
+		return "127.0.0.1", nil
+	case strings.EqualFold(host, "localhost"), net.ParseIP(host) != nil:
+		return host, nil
+	}
+	return "", fmt.Errorf("%s: webhook_bind must be an IP address or localhost (empty = 127.0.0.1)", channel)
+}
+
+// listenAddr is the address the webhook listener bound, or "" before Start.
+func (w *WhatsAppAdapter) listenAddr() string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.addr
 }
 
 // handleWebhook serves both Meta's GET verification handshake and inbound POSTs.
@@ -472,13 +583,26 @@ func (w *WhatsAppAdapter) handleInbound(rw http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Validate the X-Hub-Signature-256 HMAC when an app secret is configured.
-	if w.config.AppSecret != "" {
-		if !verifyMetaSignature(body, r.Header.Get("X-Hub-Signature-256"), w.config.AppSecret) {
-			slog.Warn("whatsapp: inbound signature mismatch")
-			http.Error(rw, "invalid signature", http.StatusUnauthorized)
-			return
-		}
+	// Every POST must carry a valid X-Hub-Signature-256. Start refuses a
+	// config without app_secret; this second check keeps the handler closed
+	// even if it is reached some other way, so an empty secret never means
+	// "accept anything".
+	if w.config.AppSecret == "" || !verifyMetaSignature(body, r.Header.Get("X-Hub-Signature-256"), w.config.AppSecret) {
+		slog.Warn("whatsapp: inbound webhook POST without a valid signature refused")
+		http.Error(rw, "invalid signature", http.StatusUnauthorized)
+		return
+	}
+
+	// Once Stop has begun, refuse with 503 rather than answer 200 and drop the
+	// message: Meta retries it, and the next start handles it. A Stop that
+	// lands after the 200 below lets this request finish as before (Stop waits
+	// for it), so an acknowledged message is still recorded.
+	w.mu.RLock()
+	stopping := w.relayStopping
+	w.mu.RUnlock()
+	if stopping {
+		http.Error(rw, "stopping", http.StatusServiceUnavailable)
+		return
 	}
 
 	// Acknowledge immediately; parsing/enqueue is cheap but the contract with Meta
@@ -491,14 +615,16 @@ func (w *WhatsAppAdapter) handleInbound(rw http.ResponseWriter, r *http.Request)
 		// customer a second time.
 		if !w.markHandled(im.Metadata["message_id"]) {
 			slog.Debug("whatsapp: ignoring duplicate inbound",
-				"message_id", im.Metadata["message_id"], "from", im.SenderID)
+				"message_id", im.Metadata["message_id"])
 			continue
 		}
+		// The Cloud API has no group chats: every message is a 1:1 DM (E33 G1).
+		tagDirectMessage(im.Metadata)
 		w.storeReceived(im)
 		select {
 		case w.inbound <- im:
 		default:
-			slog.Warn("whatsapp: inbound buffer full, dropping message", "from", im.SenderID)
+			slog.Warn("whatsapp: inbound buffer full, dropping message", "message_id", im.Metadata["message_id"])
 		}
 	}
 
@@ -515,7 +641,6 @@ func (w *WhatsAppAdapter) handleStatuses(statuses []waStatusUpdate) {
 		if st.Status == "failed" || st.ErrCode != 0 {
 			slog.Warn("whatsapp: delivery failed",
 				"message_id", st.MessageID,
-				"recipient", st.RecipientID,
 				"status", st.Status,
 				"error_code", st.ErrCode,
 				"error_title", st.ErrTitle)
@@ -524,7 +649,6 @@ func (w *WhatsAppAdapter) handleStatuses(statuses []waStatusUpdate) {
 		}
 		slog.Info("whatsapp: delivery status",
 			"message_id", st.MessageID,
-			"recipient", st.RecipientID,
 			"status", st.Status)
 	}
 }
@@ -704,14 +828,27 @@ func verifyMetaSignature(body []byte, header, appSecret string) bool {
 	return hmac.Equal([]byte(got), []byte(want))
 }
 
-// Stop gracefully shuts down the webhook listener.
+// Stop gracefully shuts down the webhook listener, or the relay connection.
 func (w *WhatsAppAdapter) Stop() error {
+	w.mu.Lock()
+	w.relayStopping = true
+	w.mu.Unlock()
 	if w.cancel != nil {
 		w.cancel()
 	}
 	w.mu.Lock()
 	w.connected = false
+	serverDone := w.serverDone
 	w.mu.Unlock()
+	// A replay in flight ends when its request does: the cancel above closes
+	// the relay connection (closeRelayOnDone), and the request is bounded by
+	// relayReplyTimeout.
+	w.relayWork.Wait()
+	// In webhook mode the server shuts down within whatsAppShutdownGrace,
+	// then cuts off what is still in flight.
+	if serverDone != nil {
+		<-serverDone
+	}
 	return nil
 }
 
@@ -812,11 +949,11 @@ func (w *WhatsAppAdapter) Send(ctx context.Context, outbound OutboundMessage) er
 			lang = whatsAppTemplateLangDefault
 		}
 		slog.Warn("whatsapp: 24h session window closed, sending re-engagement template instead of free-form reply",
-			"to", outbound.RecipientID, "template", tmpl, "lang", lang)
+			"template", tmpl, "lang", lang)
 		return w.sendTemplate(ctx, outbound.RecipientID, tmpl, lang, nil)
 	}
 
-	return fmt.Errorf("whatsapp: cannot send free-form message to %s: WhatsApp's 24h customer-service window is closed (no inbound message from this recipient within 24h). Outside the window Meta only delivers pre-approved template messages; configure default_template (and template_lang) in the whatsapp contact, or send one explicitly with whatsapp_send_template", outbound.RecipientID)
+	return fmt.Errorf("whatsapp: cannot send a free-form message: WhatsApp's 24h customer-service window is closed (no inbound message from this recipient within 24h). Outside the window Meta only delivers pre-approved template messages; configure default_template (and template_lang) in the whatsapp contact, or send one explicitly with whatsapp_send_template")
 }
 
 // sendOne posts a single free-form text message. msgID is the per-chunk
@@ -839,7 +976,7 @@ func (w *WhatsAppAdapter) sendOne(ctx context.Context, to, text, msgID string) e
 	if err := w.postMessages(ctx, payload); err != nil {
 		return err
 	}
-	slog.Info("whatsapp: sent", "to", to, "len", len(text))
+	slog.Info("whatsapp: sent", "len", len(text))
 	return nil
 }
 
@@ -872,7 +1009,7 @@ func (w *WhatsAppAdapter) sendTemplate(ctx context.Context, to, name, lang strin
 	if err := w.postMessages(ctx, payload); err != nil {
 		return err
 	}
-	slog.Info("whatsapp: template sent", "to", to, "template", name, "lang", lang, "params", len(bodyParams))
+	slog.Info("whatsapp: template sent", "template", name, "lang", lang, "params", len(bodyParams))
 	return nil
 }
 
@@ -905,6 +1042,17 @@ type waGraphError struct {
 	} `json:"error"`
 }
 
+// graphURL builds a Graph API URL under the configured root. Every Graph
+// request carries "Bearer <access token>", so the api_base override is checked
+// here, where each request is built — not only in Start, since Validate (rysh
+// setup, doctor) runs before Start: https, or http on loopback only.
+func (w *WhatsAppAdapter) graphURL(segments ...string) (string, error) {
+	if err := ValidateAPIBase(w.config.APIBase); err != nil {
+		return "", fmt.Errorf("whatsapp: %w", err)
+	}
+	return strings.TrimSuffix(w.baseURL, "/") + "/" + w.graphVer + "/" + strings.Join(segments, "/"), nil
+}
+
 // postMessages POSTs a payload to the Cloud API messages endpoint. Rate
 // limiting (HTTP 429, or Graph error 130472 when the per-number throughput tier
 // is exceeded) triggers a bounded exponential backoff with jitter; every other
@@ -914,7 +1062,10 @@ func (w *WhatsAppAdapter) postMessages(ctx context.Context, payload any) error {
 	if err != nil {
 		return fmt.Errorf("whatsapp: marshal payload: %w", err)
 	}
-	url := fmt.Sprintf("%s/%s/%s/messages", strings.TrimSuffix(w.baseURL, "/"), w.graphVer, w.config.Phone)
+	url, err := w.graphURL(w.config.Phone, "messages")
+	if err != nil {
+		return err
+	}
 
 	var lastErr error
 	for attempt := 1; attempt <= whatsAppSendMaxAttempts; attempt++ {
@@ -1044,7 +1195,11 @@ func (w *WhatsAppAdapter) Status() msg.ChannelStatus {
 			details += ", connection: " + w.config.RelayConnectionID
 		}
 	} else {
-		details = fmt.Sprintf("webhook :%d", w.port)
+		if w.addr != "" {
+			details = "webhook " + w.addr
+		} else {
+			details = fmt.Sprintf("webhook port %d (not listening)", w.port)
+		}
 		if w.config.Phone != "" {
 			details += ", phone_number_id: " + w.config.Phone
 		}

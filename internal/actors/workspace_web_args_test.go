@@ -29,6 +29,16 @@ func TestParseWebStartArgs(t *testing.T) {
 			want: webStartOpts{Host: "127.0.0.1", Port: 9000},
 		},
 
+		// --- control door ---
+		{
+			name: "control with a secret handover file", args: "--control --control-secret-file /tmp/rysh-x/h",
+			want: webStartOpts{Port: 23232, Control: true, ControlSecretFile: "/tmp/rysh-x/h"},
+		},
+		{
+			name: "control secret file equals form", args: "--control --control-secret-file=/tmp/rysh-x/h",
+			want: webStartOpts{Port: 23232, Control: true, ControlSecretFile: "/tmp/rysh-x/h"},
+		},
+
 		// --- bind address ---
 		{
 			name: "bind flag", args: "--bind 127.0.0.1",

@@ -1,16 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !windows
-
 package tui
 
 import (
 	"errors"
 	"io"
 	"os"
-	"os/signal"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -63,6 +59,27 @@ func (r *PTYRelay) SetStdout(out io.Writer) { r.stdout = out }
 // SetStderr is called by Bubble Tea before Run().
 func (r *PTYRelay) SetStderr(io.Writer) {}
 
+// pollTerminalSize forwards terminal size changes until done closes: on every
+// tick it reads the size and calls send when it differs from the last size
+// seen, starting from cols x rows. A read that fails sends nothing. It is the
+// Windows relay's substitute for SIGWINCH (watchRelayResize).
+func pollTerminalSize(done <-chan struct{}, tick <-chan time.Time, cols, rows int,
+	get func() (int, int, error), send func(cols, rows int)) {
+	for {
+		select {
+		case <-done:
+			return
+		case <-tick:
+			c, r, err := get()
+			if err != nil || (c == cols && r == rows) {
+				continue
+			}
+			cols, rows = c, r
+			send(c, r)
+		}
+	}
+}
+
 // Run implements the blocking relay loop. It puts the real terminal in raw mode,
 // enters alt screen, subscribes to NATS relay output, activates relay mode on
 // the daemon, and proxies data until the interactive program exits or the user
@@ -76,6 +93,9 @@ func (r *PTYRelay) Run() error {
 		return err
 	}
 	defer func() { _ = term.Restore(fd, oldState) }()
+	// The Windows console only interprets the escape sequences below (and the
+	// program's own output) with virtual-terminal processing on; a no-op on Unix.
+	defer enableVTOutput()()
 
 	// Enter alt screen on the REAL terminal. The interactive program (vim,
 	// htop, etc.) already entered alt screen on the PTY side, but Bubble
@@ -145,18 +165,12 @@ func (r *PTYRelay) Run() error {
 		_ = r.pub.Send(paneInbox, &msgpkg.MsgRelayDeactivate{PaneID: r.paneID})
 	}()
 
-	// Dup the stdin fd so we can close it to cleanly unblock the stdin
-	// goroutine when the relay exits.
-	dupFd, err := syscall.Dup(fd)
+	// A stdin the relay can close to cleanly unblock the stdin goroutine when
+	// it exits: a dup of the fd on Unix, a cancelable console reader on Windows.
+	stdinDup, err := openRelayStdin(fd)
 	if err != nil {
 		return err
 	}
-	stdinDup := os.NewFile(uintptr(dupFd), "relay-stdin")
-
-	// Set up SIGWINCH handler to forward terminal resizes to the PTY.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGWINCH)
-	defer signal.Stop(sigCh)
 
 	var (
 		doneOnce sync.Once
@@ -288,22 +302,14 @@ func (r *PTYRelay) Run() error {
 		}
 	}()
 
-	// Goroutine 3: SIGWINCH → PTY resize via NATS.
-	go func() {
-		for {
-			select {
-			case <-sigCh:
-				if w, h, sizeErr := term.GetSize(fd); sizeErr == nil {
-					_ = r.pub.Send(paneInbox, &msgpkg.MsgPaneResize{
-						Cols: w,
-						Rows: h,
-					})
-				}
-			case <-doneCh:
-				return
-			}
-		}
-	}()
+	// Goroutine 3: terminal resizes → PTY resize via NATS. SIGWINCH on Unix;
+	// the Windows console has no signal for it, so its size is polled.
+	go watchRelayResize(doneCh, fd, cols, rows, func(w, h int) {
+		_ = r.pub.Send(paneInbox, &msgpkg.MsgPaneResize{
+			Cols: w,
+			Rows: h,
+		})
+	})
 
 	<-doneCh
 

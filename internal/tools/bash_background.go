@@ -73,6 +73,9 @@ func (t *BashBackgroundTool) Execute(ctx context.Context, params json.RawMessage
 
 	sessionID := uuid.New().String()[:8]
 
+	if out := bashFSRefusal(p.Command, workDir, t.workDir); out != nil {
+		return out, nil
+	}
 	if err := t.mgr.Start(sessionID, p.Command, workDir); err != nil {
 		return ErrOutputf(ErrKindInternal, "failed to start background command: %v", err), nil
 	}

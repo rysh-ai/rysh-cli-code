@@ -17,7 +17,8 @@ import (
 // double captures the call instead.
 type ExecFunc func(path string, argv []string, env []string) error
 
-// Main implements `rysh exec-clean [--agent claude|codex] [--explain] -- cmd args…`
+// Main implements `rysh exec-clean [--agent claude|codex] [--explain]
+// [--sandbox <profile> --rysh-dir <dir> --workspace <dir>] -- cmd args…`
 // and `rysh exec-clean --print-static`. It filters environ for the agent and
 // replaces itself with cmd (the same pid: nothing is left running, and no
 // NAME=VALUE ever appears in argv). It returns an exit code only when it does
@@ -28,9 +29,20 @@ type ExecFunc func(path string, argv []string, env []string) error
 func Main(args, environ []string, stdout, stderr io.Writer, execFn ExecFunc) int {
 	kind := Claude
 	explain := false
+	var sbx sandboxRequest
 	for len(args) > 0 {
 		a := args[0]
 		switch {
+		case (a == "--sandbox" || a == "--rysh-dir" || a == "--workspace") && len(args) > 1:
+			switch a {
+			case "--sandbox":
+				sbx.Profile = args[1]
+			case "--rysh-dir":
+				sbx.RyshDir = args[1]
+			default:
+				sbx.Workspace = args[1]
+			}
+			args = args[2:]
 		case a == "--":
 			args = args[1:]
 			goto run
@@ -70,6 +82,20 @@ run:
 		for _, n := range Dropped(environ, kind) {
 			fmt.Fprintln(stderr, n)
 		}
+	}
+	if sbx != (sandboxRequest{}) {
+		// --sandbox needs all three: a half-specified sandbox is a usage error,
+		// never a reason to run the agent without one.
+		if sbx.Profile == "" || sbx.RyshDir == "" || sbx.Workspace == "" {
+			fmt.Fprintln(stderr, "usage: exec-clean [--agent claude] --sandbox <profile> --rysh-dir <dir> --workspace <dir> -- <command> [args…] (the agent was not started)")
+			return 2
+		}
+		return runSandboxed(kind, sbx, args, env, stderr, execFn)
+	}
+	// The account goes only to a direct exec: a sandboxed claude (above) keeps
+	// the sandbox's own auth rules.
+	if kind == Claude {
+		env = withClaudeAccount(env, stderr, explain)
 	}
 	path, err := lookPath(args[0], env)
 	if err != nil {

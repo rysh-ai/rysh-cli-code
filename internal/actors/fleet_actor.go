@@ -3,6 +3,7 @@
 package actors
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -97,6 +98,11 @@ type AgentFleetActor struct {
 	scoutCmd  string
 	scoutBusy map[string]bool
 	scoutSem  chan struct{}
+
+	// ledger diffs the status ledger after every change point and publishes
+	// a fleet.LedgerEvent per changed member on msg.FleetEventSubject
+	// (design 093 H3; emitLedgerChanges).
+	ledger *fleet.LedgerTracker
 }
 
 // NewAgentFleetActor builds the registry actor. A nil conn or nil kv is
@@ -112,6 +118,29 @@ func NewAgentFleetActor(nc *nats.Conn, codecs *msg.CodecRegistry, kv nats.KeyVal
 		done:   make(chan struct{}),
 		watch:  newFleetWatch(),
 		goals:  newGoalSupervisor(),
+		ledger: fleet.NewLedgerTracker(),
+	}
+}
+
+// emitLedgerChanges publishes one fleet.LedgerEvent for every member whose
+// ledger row changed since the last call (design 093 H3). Called after every
+// accepted update, every watch pass and every reconcile, so a declaration
+// (`rysh fleet status`, family_status) is announced at once and an observed
+// change within one watch tick. Best effort: a failed publish is not retried —
+// the registry query stays the authority.
+func (a *AgentFleetActor) emitLedgerChanges() {
+	a.mu.Lock()
+	nc, stopped := a.nc, a.stopped
+	a.mu.Unlock()
+	if nc == nil || stopped || a.ledger == nil {
+		return
+	}
+	for _, ev := range a.ledger.Changes(a.reg.List(), time.Now().UnixMilli()) {
+		data, err := json.Marshal(ev)
+		if err != nil {
+			continue
+		}
+		_ = nc.Publish(msg.FleetEventSubject(), data)
 	}
 }
 
@@ -179,12 +208,15 @@ func (a *AgentFleetActor) Start() {
 				a.kickGoalExecutor(reply.Fleet.Name)
 			}
 		}
+		a.emitLedgerChanges()
 	}); err == nil {
 		a.mu.Lock()
 		a.updateSub = sub
 		a.mu.Unlock()
 	}
 
+	// Baseline the change feed with the restored ledger.
+	a.emitLedgerChanges()
 	go a.reconcileLoop(done)
 	go a.watchLoop(done)
 	// A restored fleet that was up gets its executor back now, not at the
@@ -234,6 +266,7 @@ func (a *AgentFleetActor) reconcileOnce() {
 		copyOf := f
 		_ = persist.Save(&copyOf)
 	}
+	a.emitLedgerChanges()
 }
 
 // livePaneIDs asks the workspace which panes exist right now.

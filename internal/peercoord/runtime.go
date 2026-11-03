@@ -76,7 +76,7 @@ func (r *Runtime) Start() error {
 	}
 	server := &http.Server{Handler: http.HandlerFunc(r.serve), ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 15 * time.Second}
 	r.closeServer = server.Close
-	go server.Serve(ln)
+	go func() { _ = server.Serve(ln) }() // returns ErrServerClosed on Close
 	go func() {
 		defer func() {
 			if r.lock != nil {

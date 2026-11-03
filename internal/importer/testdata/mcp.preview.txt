@@ -1,0 +1,27 @@
+rysh import mcp — preview (nothing is written without --apply)
+  from: .mcp.json
+
+MCP servers: 4 to add to .rysh/mcp.json (each gated: requires_approval)
+  docs  http  https://mcp.example.test/mcp
+  events  http  https://events.example.test/sse
+  files  stdio  npx -y @modelcontextprotocol/server-filesystem $HOME/projects
+  tracker  stdio  tracker-mcp --workspace demo
+
+Secrets and env (names only; no value was read or copied):
+  Authorization  — mcp server "docs" header; not copied; add it under "headers" for this server in .rysh/mcp.json yourself
+  --api-key  — mcp server "leaky" argument; not copied; add the server by hand with ##mcp add, passing the credential from rysh's secret store
+  URL user info  — mcp server "leaky-url" url; not copied; add the server by hand without a credential in its URL
+  token  — mcp server "leaky-url" url; not copied; add the server by hand without a credential in its URL
+  FIXTURE_LOG_LEVEL  — mcp server "tracker" env; not copied (no env value is); export it in the shell that starts rysh — MCP servers inherit rysh's environment
+  FIXTURE_TRACKER_TOKEN  — mcp server "tracker" env; not copied (no env value is); export it in the shell that starts rysh — MCP servers inherit rysh's environment
+
+Notes:
+  - server "broken" is incomplete (stdio transport requires a command); not imported
+  - server "events" uses the older SSE transport; rysh speaks Streamable HTTP — check the server supports it
+  - server "leaky" passes a credential as an argument (--api-key); not imported
+  - server "leaky-url" has a credential in its URL; not imported
+  - imported MCP servers are written with requires_approval: every tool call is gated until you review the server and remove it
+
+With --apply this writes (after backing up what it replaces):
+  .rysh/mcp.json
+Undo with: rysh import --undo

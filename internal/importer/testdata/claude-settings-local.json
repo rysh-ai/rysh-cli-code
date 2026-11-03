@@ -1,0 +1,6 @@
+{
+  "permissions": {
+    "allow": ["Bash(make lint)"],
+    "deny": ["Bash(curl:*)", "Bash"]
+  }
+}

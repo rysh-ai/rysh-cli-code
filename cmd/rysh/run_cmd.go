@@ -56,6 +56,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"github.com/rysh-ai/rysh-cli-code/internal/bustoken"
 	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"strconv"
 	"strings"
@@ -109,6 +110,7 @@ type runOptions struct {
 	JSONAudit string    // --json-audit: write the full audit artifact here
 	RecordDir string    // --record: save the provider transcript to this dir
 	ReplayDir string    // --replay: serve provider turns from this recorded dir
+	ShareDir  string    // --share: write the shareable run record folder here
 }
 
 // runBudget is a spend ceiling: exactly one of Tokens / MicroUSD is set.
@@ -186,6 +188,9 @@ const runUsage = `usage: rysh run [flags] "<prompt>" | <skill.md>
   --record <dir>     save the provider interaction transcript to <dir>
   --replay <dir>     re-run against the transcript recorded in <dir>
                      (deterministic; no API key or token spend)
+  --share <dir>      write a shareable run record to the new folder <dir>:
+                     record.json, the redacted transcript and an offline
+                     index.html viewer (fails the run if it cannot be written)
   --json             print a machine-readable result line to stdout
   --keep             keep the throwaway session (and worktree) after the run`
 
@@ -265,6 +270,12 @@ func parseRunArgs(args []string) (runOptions, error) {
 				return opts, err
 			}
 			opts.ReplayDir = v
+		case "--share":
+			v, err := strFlag(a, &i)
+			if err != nil {
+				return opts, err
+			}
+			opts.ShareDir = v
 		case "--worktree":
 			opts.Worktree = true
 		case "--json":
@@ -283,6 +294,9 @@ func parseRunArgs(args []string) (runOptions, error) {
 	}
 	if opts.RecordDir != "" && opts.ReplayDir != "" {
 		return opts, errors.New("--record and --replay are mutually exclusive (a replay serves recorded turns; there is nothing new to record)")
+	}
+	if opts.ShareDir != "" && opts.ReplayDir != "" {
+		return opts, errors.New("--share and --replay are mutually exclusive (a run record is made from a live run)")
 	}
 	opts.Prompt = strings.Join(positional, " ")
 	return opts, nil
@@ -457,6 +471,23 @@ func runRunCmd(cfg config.Config, configPath string, args []string) (int, error)
 		cfg = config.LoadFrom(configPath)
 	}
 
+	// --share: refuse an existing destination before anything is spent, and
+	// record the raw transcript into a private temp folder (removed on
+	// return) unless the caller asked for their own --record copy.
+	if opts.ShareDir != "" {
+		if err := checkShareDir(opts.ShareDir); err != nil {
+			return runExitError, err
+		}
+		if opts.RecordDir == "" {
+			tmp, err := os.MkdirTemp("", "rysh-share-rec-")
+			if err != nil {
+				return runExitError, fmt.Errorf("run: --share: temp recording folder: %w", err)
+			}
+			defer func() { _ = os.RemoveAll(tmp) }()
+			opts.RecordDir = tmp
+		}
+	}
+
 	start := time.Now()
 	outcome, res, audit, sessionName, err := executeHeadlessRun(cfg, configPath, opts)
 	if err != nil {
@@ -480,6 +511,27 @@ func runRunCmd(cfg config.Config, configPath string, args []string) (int, error)
 		}
 	}
 
+	// --share fails closed (root decision (a)): no bundle means a non-zero
+	// exit, with the reason printed.
+	exitCode := outcome.ExitCode
+	if opts.ShareDir != "" {
+		var serr error
+		if audit == nil {
+			serr = errors.New("no audit was produced for this run")
+		} else {
+			serr = writeShareBundle(opts.ShareDir, shareInput{
+				Audit: audit, RecordDir: opts.RecordDir, Repo: audit.recordRepo,
+				Worktree: opts.Worktree, CreatedAt: time.Now(),
+			})
+		}
+		if serr != nil {
+			fmt.Fprintf(os.Stderr, "[run] ERROR: --share: %v — no run record was written\n", serr)
+		} else {
+			fmt.Fprintf(os.Stderr, "[run] run record written to %s (open index.html)\n", opts.ShareDir)
+		}
+		exitCode = shareExitCode(exitCode, serr)
+	}
+
 	if opts.JSON {
 		fmt.Println(runResultJSON(outcome, duration, sessionName, res))
 	} else {
@@ -490,7 +542,7 @@ func runRunCmd(cfg config.Config, configPath string, args []string) (int, error)
 		fmt.Fprintf(os.Stderr, "[run] %s (exit %d, %s)%s\n",
 			outcome.Status, outcome.ExitCode, duration.Round(time.Millisecond), detail)
 	}
-	return outcome.ExitCode, nil
+	return exitCode, nil
 }
 
 // writeRunResult writes the eval.Result artifact as indented JSON.
@@ -611,6 +663,7 @@ func executeHeadlessRun(cfg config.Config, configPath string, opts runOptions) (
 	// Working-tree snapshot BEFORE the agent runs: FilesChanged is the honest
 	// delta of git state across the run (see gitStatusSnapshot for limits).
 	before, inRepo := gitStatusSnapshot(runDir)
+	baseRepo := captureRunRecordRepo(runDir, before, inRepo)
 	if !inRepo {
 		fmt.Fprintf(os.Stderr, "[run] note: %s is not a git repository — files_changed will be empty in the Result\n", runDir)
 	}
@@ -651,6 +704,7 @@ func executeHeadlessRun(cfg config.Config, configPath string, opts runOptions) (
 	res.TokensUsed = int(collector.TokensUsed())
 	diff := captureAuditDiff(runDir, res.FilesChanged, after, inRepo)
 	audit := assembleRunAudit(collector, opts, providerName, sessionName, outcome, res, diff, start, finished)
+	audit.recordRepo = baseRepo
 
 	if opts.Keep {
 		fmt.Fprintf(os.Stderr, progname.Rewrite("[run] --keep: session %s left running; attach with \"rysh attach %s\"\n"),
@@ -667,7 +721,7 @@ func executeHeadlessRun(cfg config.Config, configPath string, opts runOptions) (
 // artifacts. Scoped strictly to the named run-* session.
 func cleanupRunSession(store *session.Store, name string) {
 	if rec, err := store.Get(name); err == nil && rec.PID > 0 && session.ProcessAlive(rec.PID) {
-		_ = session.Terminate(rec.PID, 8*time.Second)
+		_ = session.TerminateDaemon(rec, 8*time.Second)
 	}
 	_ = store.Delete(name)
 }
@@ -682,7 +736,7 @@ func runHeadlessPrompt(rec session.Record, opts runOptions, collector *runCollec
 	deadline := time.Now().Add(opts.Timeout)
 	msg.SetSessionPrefix(rec.Name)
 
-	nc, err := nats.Connect(fmt.Sprintf("nats://127.0.0.1:%d", rec.NATSPort),
+	nc, err := bustoken.Dial(rec.NATSPort,
 		nats.Timeout(3*time.Second), nats.MaxReconnects(0))
 	if err != nil {
 		return runOutcome{Status: "error", ExitCode: runExitError, Detail: fmt.Sprintf("connect to session NATS: %v", err)}

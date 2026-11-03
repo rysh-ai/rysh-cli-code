@@ -385,3 +385,155 @@ func TestArbitrationStaysInlineWithoutMailbox(t *testing.T) {
 		t.Error("inline path armed a timer")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Idle terminal UIs (a window left attached where nobody types)
+// ---------------------------------------------------------------------------
+//
+// Two live pids stand in for two attached terminal UIs: this test process and
+// its parent. viewportLastInput replaces the tty read, so each test says when
+// each terminal last had input.
+
+// twoTUIClaimIDs returns claim ids for two distinct live processes.
+func twoTUIClaimIDs() (a, b string, pidA, pidB int) {
+	pidA, pidB = os.Getpid(), os.Getppid()
+	return fmt.Sprintf("tui:%d", pidA), fmt.Sprintf("tui:%d", pidB), pidA, pidB
+}
+
+// stubLastInput wires the pane's input clock to a map the test edits.
+func stubLastInput(p *PaneActor) map[int]time.Time {
+	inputs := map[int]time.Time{}
+	p.viewportLastInput = func(pid int) (time.Time, bool) {
+		at, ok := inputs[pid]
+		return at, ok
+	}
+	return inputs
+}
+
+// TestIdleTUIStopsClampingPane is the reported case: a 120x30 Terminal window
+// left attached on the Mac mini held every pane it showed to 46x11 inside the
+// user's 287x73 ssh window. A terminal UI idle well past the one in use no
+// longer counts, so the pane fills the window being typed in.
+func TestIdleTUIStopsClampingPane(t *testing.T) {
+	p := newSizeTestPane(t)
+	inputs := stubLastInput(p)
+	small, big, pidSmall, pidBig := twoTUIClaimIDs()
+	now := time.Now()
+	inputs[pidSmall] = now.Add(-20 * time.Minute)
+	inputs[pidBig] = now
+
+	p.claimPaneSize(small, 11, 46)
+	p.claimPaneSize(big, 54, 129)
+	if rows, cols := p.size(); rows != 54 || cols != 129 {
+		t.Fatalf("with the small window idle = %dx%d, want 54x129", rows, cols)
+	}
+
+	// Someone types in the small window: both are in use, so the pane goes back
+	// to a grid both can render.
+	inputs[pidSmall] = now.Add(time.Second)
+	p.claimPaneSize(big, 54, 129)
+	if rows, cols := p.size(); rows != 11 || cols != 46 {
+		t.Fatalf("with both windows in use = %dx%d, want 11x46", rows, cols)
+	}
+}
+
+// TestRecentInputOnBothKeepsSmallest: two terminal UIs typed into within
+// viewportIdleWindow of each other are both in use, so smallest still wins.
+func TestRecentInputOnBothKeepsSmallest(t *testing.T) {
+	p := newSizeTestPane(t)
+	inputs := stubLastInput(p)
+	a, b, pidA, pidB := twoTUIClaimIDs()
+	now := time.Now()
+	inputs[pidA] = now.Add(-viewportIdleWindow / 2)
+	inputs[pidB] = now
+
+	p.claimPaneSize(a, 20, 60)
+	p.claimPaneSize(b, 50, 200)
+	if rows, cols := p.size(); rows != 20 || cols != 60 {
+		t.Errorf("= %dx%d, want 20x60 (both in use)", rows, cols)
+	}
+}
+
+// TestMostRecentTUICountsHoweverOld: the margin is relative to the newest
+// input, not to the clock, so a pane watched for an hour without a keystroke
+// keeps the size of the terminal last typed into.
+func TestMostRecentTUICountsHoweverOld(t *testing.T) {
+	p := newSizeTestPane(t)
+	inputs := stubLastInput(p)
+	small, big, pidSmall, pidBig := twoTUIClaimIDs()
+	now := time.Now()
+	inputs[pidSmall] = now.Add(-3 * time.Hour)
+	inputs[pidBig] = now.Add(-time.Hour)
+
+	p.claimPaneSize(small, 11, 46)
+	p.claimPaneSize(big, 54, 129)
+	if rows, cols := p.size(); rows != 54 || cols != 129 {
+		t.Errorf("= %dx%d, want 54x129 (the terminal typed into last)", rows, cols)
+	}
+}
+
+// TestUnknownInputCountsAsInUse: a terminal UI whose tty cannot be read keeps
+// the smallest-wins rule, as do web claims, whose input the daemon never sees.
+func TestUnknownInputCountsAsInUse(t *testing.T) {
+	p := newSizeTestPane(t)
+	inputs := stubLastInput(p)
+	small, big, _, pidBig := twoTUIClaimIDs()
+	inputs[pidBig] = time.Now()
+	// small has no entry: its input time is unknown.
+	p.claimPaneSize(small, 11, 46)
+	p.claimPaneSize(big, 54, 129)
+	if rows, cols := p.size(); rows != 11 || cols != 46 {
+		t.Errorf("unknown tty = %dx%d, want 11x46", rows, cols)
+	}
+
+	w := newSizeTestPane(t)
+	stubLastInput(w)[os.Getpid()] = time.Now()
+	w.claimPaneSize("web:1", 30, 90)
+	w.claimPaneSize(liveClientID(), 54, 129)
+	if rows, cols := w.size(); rows != 30 || cols != 90 {
+		t.Errorf("web claim = %dx%d, want 30x90 (web is never idle)", rows, cols)
+	}
+}
+
+// TestReapLiftsClampWhenTUIGoesIdle: typing in one terminal sends no claim, so
+// the snapshot-driven sweep is what notices the other one went idle.
+func TestReapLiftsClampWhenTUIGoesIdle(t *testing.T) {
+	p := newSizeTestPane(t)
+	inputs := stubLastInput(p)
+	small, big, pidSmall, pidBig := twoTUIClaimIDs()
+	now := time.Now()
+	inputs[pidSmall] = now
+	inputs[pidBig] = now
+	p.claimPaneSize(small, 11, 46)
+	p.claimPaneSize(big, 54, 129)
+	if rows, cols := p.size(); rows != 11 || cols != 46 {
+		t.Fatalf("both in use = %dx%d, want 11x46", rows, cols)
+	}
+
+	inputs[pidBig] = now.Add(time.Minute) // the user types in the big window
+	p.lastSizeClaimReap = time.Now().Add(-2 * sizeClaimReapInterval)
+	p.reapStaleSizeClaims()
+	if rows, cols := p.size(); rows != 54 || cols != 129 {
+		t.Errorf("after sweep = %dx%d, want 54x129", rows, cols)
+	}
+}
+
+// TestReapLeavesOverrideAlone: with no claim gone and no change in who is
+// idle, the sweep must not re-arbitrate over a deliberate Override resize (a
+// share subscriber's fullscreen at its own resolution).
+func TestReapLeavesOverrideAlone(t *testing.T) {
+	p := newSizeTestPane(t)
+	inputs := stubLastInput(p)
+	a, b, pidA, pidB := twoTUIClaimIDs()
+	inputs[pidA] = time.Now()
+	inputs[pidB] = time.Now()
+	p.claimPaneSize(a, 20, 60)
+	p.claimPaneSize(b, 50, 200)
+
+	p.handleResize(70, 250) // Override
+	p.lastSizeClaimReap = time.Now().Add(-2 * sizeClaimReapInterval)
+	p.reapStaleSizeClaims()
+	if rows, cols := p.size(); rows != 70 || cols != 250 {
+		t.Errorf("sweep undid the override: %dx%d, want 70x250", rows, cols)
+	}
+}

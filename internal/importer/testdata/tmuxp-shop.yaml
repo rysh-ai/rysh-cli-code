@@ -1,0 +1,27 @@
+# tmuxp session file, as it would sit in $HOME/.config/tmuxp/shop.yaml
+session_name: shop
+start_directory: ~/work/shop
+shell_command_before:
+  - source .venv/bin/activate
+windows:
+  - window_name: dev
+    layout: even-horizontal
+    panes:
+      - shell_command:
+          - python manage.py runserver
+      - npm run watch
+      - null
+  - window_name: db
+    start_directory: /srv/db
+    layout: even-vertical
+    panes:
+      - shell_command: psql shop
+        start_directory: ./sql
+      - blank
+  - window_name: grid
+    layout: tiled
+    panes:
+      - htop
+      - pane
+      - pane
+      - pane

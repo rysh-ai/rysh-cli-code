@@ -182,8 +182,7 @@ func TestListenerAcquiresApprovedStandbyAfterLeaseExpiry(t *testing.T) {
 	enrollRuntime(t, standby, sp, "backup", "")
 	runCommand(t, leader, lp, "leader", "standbys", "--agents", registered.Agent.ID, "--auto")
 	leader.Close()
-	leader.mu.Lock()
-	leader.mu.Unlock()
+	func() { leader.mu.Lock(); defer leader.mu.Unlock() }() // wait for Close to release it
 	s.mu.Lock()
 	s.store.State.Leadership.LeaseUntil = time.Now().Add(-time.Second)
 	s.mu.Unlock()
@@ -449,6 +448,14 @@ func TestTaskCommandCapabilityCannotUseSupervisorOrOtherPane(t *testing.T) {
 	q.Args = []string{"connect", "https://example.com", "--key-secret", "X"}
 	if _, e := Call(context.Background(), r.socket, q); e == nil {
 		t.Fatal("task token changed connection")
+	}
+	// Publishing a local board is the user's opt-in (design 044 amendment,
+	// N3); a managed task can neither turn it on nor off.
+	for _, args := range [][]string{{"publish", "default"}, {"unpublish", "default"}, {"publish"}} {
+		q.Args = args
+		if _, e := Call(context.Background(), r.socket, q); e == nil {
+			t.Fatalf("task token ran %v", args)
+		}
 	}
 }
 

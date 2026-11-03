@@ -73,6 +73,10 @@ type webStartOpts struct {
 	// pairing approve/allow, humanoid governance) and forces a loopback bind
 	// (R2, --control).
 	Control bool
+	// ControlSecretFile is a handover file holding the control door's
+	// per-launch secret (--control-secret-file; web/control_secret.go). A path,
+	// never the secret: the server reads the file once and deletes it.
+	ControlSecretFile string
 	// Ngrok publishes the server at a public HTTPS URL, and persists that
 	// choice so every later start of this session does it again. NgrokDomain
 	// pins a reserved domain — without one the public URL is different after
@@ -205,6 +209,13 @@ func parseWebStartArgs(args []string, defHost string, defPort int) (webStartOpts
 
 		case a == "--control":
 			opts.Control = true
+		case a == "--control-secret-file":
+			if v, ok := next(); ok {
+				opts.ControlSecretFile = v
+			}
+		case strings.HasPrefix(a, "--control-secret-file="):
+			_, v, _ := strings.Cut(a, "=")
+			opts.ControlSecretFile = v
 
 		case a == "--ngrok", a == "--publish":
 			opts.Ngrok = true

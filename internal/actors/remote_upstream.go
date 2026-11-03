@@ -25,8 +25,10 @@ import (
 //
 // It is spawned as a child of PaneActor when pane sharing is activated.
 type RemoteUpstreamActor struct {
-	paneID      string
-	paneAlias   string
+	paneID    string
+	paneAlias string
+	// sessionName is the local session. It never names a remote subject:
+	// those sit under the upstream workspace id (remoteSubject).
 	sessionName string
 	config      config.UpstreamConfig
 	pub         *msg.NATSPublisher
@@ -35,6 +37,9 @@ type RemoteUpstreamActor struct {
 	localBr     *bridge.NATSBridge
 	connected   bool
 	stopRetry   chan struct{}
+	// readOnlyKey is set (actor thread only) once the upstream refused this
+	// pane's key as read-only: forwarding stops and never reconnects.
+	readOnlyKey bool
 
 	// Actor identity for sending messages from nats.go callbacks to the actor thread.
 	selfPID     *actor.PID
@@ -115,18 +120,30 @@ func (r *RemoteUpstreamActor) Receive(ctx actor.Context) {
 		slog.Info("remote-upstream: stopped", "pane", r.paneID)
 
 	case *msg.MsgRemoteUpstreamConnect:
+		if r.readOnlyKey {
+			return
+		}
 		r.connectRemote()
+
+	case *msgUpstreamReadOnlyKey:
+		r.stopForReadOnlyKey()
 
 	case *msg.MsgRemoteUpstreamDisconnect:
 		r.disconnectRemote()
 
 	case *msg.MsgUpstreamReconnected:
+		if r.readOnlyKey {
+			return
+		}
 		// Reconnection happened -- update state and re-publish status.
 		r.connected = true
 		r.publishRemoteStatus("connected")
 		slog.Info("remote-upstream: reconnection handled", "pane", r.paneID)
 
 	case *msg.MsgUpstreamConnectionClosed:
+		if r.readOnlyKey {
+			return // closed by stopForReadOnlyKey: no reconnect
+		}
 		// Permanent close -- attempt a full reconnect cycle.
 		r.connected = false
 		slog.Warn("remote-upstream: connection permanently closed, will attempt fresh reconnect",
@@ -247,6 +264,11 @@ func (r *RemoteUpstreamActor) connectRemote() {
 		upstream.NATSAPIKeyHeader(r.config.APIKey), // the key rides in a header, not the URL (F-86)
 		nats.MaxReconnects(maxReconnects),
 		nats.Token(r.config.APIKey),
+		readOnlyKeyErrorHandler("remote-upstream", func() {
+			if r.selfPID != nil && r.actorSystem != nil {
+				r.actorSystem.Root.Send(r.selfPID, &msgUpstreamReadOnlyKey{})
+			}
+		}),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
 			r.connected = false
 			slog.Warn("remote-upstream: disconnected",
@@ -296,6 +318,27 @@ func (r *RemoteUpstreamActor) connectRemote() {
 	r.publishRemoteStatus("connected")
 }
 
+// stopForReadOnlyKey stops forwarding after the upstream refused this pane's
+// key as read-only (read_only_key.go): every further publish would be refused
+// too. The connection is closed without a status publish and not redialled;
+// the pane is told once.
+func (r *RemoteUpstreamActor) stopForReadOnlyKey() {
+	if r.readOnlyKey {
+		return
+	}
+	r.readOnlyKey = true
+	slog.Warn("remote-upstream: upstream key is read-only; forwarding stopped", "pane", r.paneID)
+	r.connected = false
+	if r.remoteNC != nil {
+		r.remoteNC.Close()
+		r.remoteNC = nil
+	}
+	if r.pub != nil {
+		_ = r.pub.SendPaneRyshOutput(r.paneID,
+			"[rysh] upstream: stopped: the upstream key is read-only (forwarding a pane needs a key with write access)\n")
+	}
+}
+
 // disconnectRemote closes the remote NATS connection.
 func (r *RemoteUpstreamActor) disconnectRemote() {
 	if r.remoteNC != nil {
@@ -331,8 +374,7 @@ func (r *RemoteUpstreamActor) forwardToRemote(text string) {
 		return
 	}
 
-	// Remote subject pattern: ws.{workspace}.pane.{paneID}.output
-	subject := fmt.Sprintf("ws.%s.pane.%s.output", r.sessionName, r.paneID)
+	subject := r.remoteSubject("output")
 
 	payload := struct {
 		Text  string `json:"text"`
@@ -361,7 +403,7 @@ func (r *RemoteUpstreamActor) forwardPerModeToRemote(mode, text string) {
 		return
 	}
 
-	subject := fmt.Sprintf("ws.%s.pane.%s.output.%s", r.sessionName, r.paneID, mode)
+	subject := r.remoteSubject("output." + mode)
 
 	payload := struct {
 		Text  string `json:"text"`
@@ -384,13 +426,22 @@ func (r *RemoteUpstreamActor) forwardPerModeToRemote(mode, text string) {
 	}
 }
 
+// remoteSubject is ws.{workspace}.pane.{paneID}.{suffix}, where workspace is
+// the upstream workspace id this actor connects with (the same value as in
+// proxyPath). The server's subject ACL allows only "ws.<workspaceID>." on that
+// connection and closes it on anything else (R-B1); the local session name
+// never appears here.
+func (r *RemoteUpstreamActor) remoteSubject(suffix string) string {
+	return fmt.Sprintf("ws.%s.pane.%s.%s", r.config.WorkspaceName(), r.paneID, suffix)
+}
+
 // publishRemoteStatus sends a status update to the remote server.
 func (r *RemoteUpstreamActor) publishRemoteStatus(status string) {
 	if r.remoteNC == nil {
 		return
 	}
 
-	subject := fmt.Sprintf("ws.%s.pane.%s.status", r.sessionName, r.paneID)
+	subject := r.remoteSubject("status")
 
 	payload := struct {
 		Status string `json:"status"`

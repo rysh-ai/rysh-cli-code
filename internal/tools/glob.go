@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/rysh-ai/rysh-cli-code/internal/policy"
 )
 
 const globResultLimit = 1000
@@ -72,6 +74,10 @@ func (t *GlobTool) Execute(ctx context.Context, params json.RawMessage) (*ToolOu
 		}
 	}
 
+	if out := fsPolicyRefusal(basePath, policy.FSRead); out != nil {
+		return out, nil
+	}
+
 	var matches []string
 	var err error
 
@@ -86,6 +92,20 @@ func (t *GlobTool) Execute(ctx context.Context, params json.RawMessage) (*ToolOu
 			return ErrOutputf(ErrKindCancelled, "glob cancelled: %v", err), nil
 		}
 		return ErrOutputf(ErrKindInternal, "glob error: %s", err.Error()), nil
+	}
+
+	if policy.ActiveFS() != nil {
+		kept := matches[:0]
+		for _, m := range matches {
+			abs := m
+			if !filepath.IsAbs(abs) {
+				abs = filepath.Join(basePath, m)
+			}
+			if !fsPolicyHidden(abs) {
+				kept = append(kept, m)
+			}
+		}
+		matches = kept
 	}
 
 	sort.Strings(matches)

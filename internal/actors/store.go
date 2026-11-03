@@ -479,18 +479,45 @@ func (w *WorkspaceActor) secretTabScopeID(paneID string) string {
 	return sanitizeScope(t.id)
 }
 
+// projectSecretScope is the scope `rysh setup`, `rysh onboard` and `rysh doctor`
+// keep a project's secrets in (.rysh/secrets/default/): they run before any
+// daemon, so before the session's name decides its workspace scope. It is the
+// last scope a skill resolves from, so a session with a name of its own (E33:
+// setup gives each directory one) still finds the channel tokens setup stored,
+// and a tab or workspace value still overrides it.
+//
+// Only a session with no `workspaces:` list falls back to it. With an explicit
+// list, "default" can be another workspace's own scope, and one workspace must
+// never read another's secrets.
+const projectSecretScope = "default"
+
+// withProjectScope appends projectSecretScope to a scope chain that does not
+// already end in it, when on is set.
+func withProjectScope(chain []string, on bool) []string {
+	if !on || (len(chain) > 0 && chain[len(chain)-1] == projectSecretScope) {
+		return chain
+	}
+	return append(chain, projectSecretScope)
+}
+
+// projectScopeFallback reports whether this workspace resolves from the
+// project scope last: only the single implicit workspace of a session with no
+// `workspaces:` list.
+func (w *WorkspaceActor) projectScopeFallback() bool { return len(w.cfg.Workspaces) == 0 }
+
 // secretScopeChain returns the ordered scope tokens used to resolve ${NAME} when
-// a skill file is loaded from paneID: the pane's tab scope (most specific) then
-// the workspace scope (the shared default). The global environment is appended by
+// a skill file is loaded from paneID: the pane's tab scope (most specific), the
+// workspace scope, then the project scope. The global environment is appended by
 // GetLayered. The tab scope is omitted when it is empty or equals the workspace
-// scope, so a single-scope chain is returned in the common case.
+// scope, and the project scope when the workspace scope is it (a session named
+// "default") or the session lists its workspaces (projectScopeFallback).
 func (w *WorkspaceActor) secretScopeChain(paneID string) []string {
 	wsScope, _ := w.secretWorkspaceScope()
 	tabScope := w.secretTabScopeID(paneID)
 	if tabScope == "" || tabScope == wsScope {
-		return []string{wsScope}
+		return withProjectScope([]string{wsScope}, w.projectScopeFallback())
 	}
-	return []string{tabScope, wsScope}
+	return withProjectScope([]string{tabScope, wsScope}, w.projectScopeFallback())
 }
 
 // secretScopeLabel renders a resolved scope token from GetLayered as a friendly
@@ -659,7 +686,7 @@ func (w *WorkspaceActor) handleNamedStoreSubcommand(out *strings.Builder, paneID
 		fmt.Fprintf(out, "%s\n", strings.Repeat("-", 50))
 		fmt.Fprintf(out, "  storage: session -> persist (%s/<scope>) -> config[<scope>]\n", c.store.kind.writeDir())
 		fmt.Fprintf(out, "  a name tagged with several tiers resolves from the first listed\n")
-		fmt.Fprintf(out, "  skill resolution from a pane: tab -> workspace -> environment (global)\n")
+		fmt.Fprintf(out, "  skill resolution from a pane: tab -> workspace -> default (project) -> environment (global)\n")
 
 	case "get", "show":
 		if len(parts) < 2 {
@@ -670,7 +697,7 @@ func (w *WorkspaceActor) handleNamedStoreSubcommand(out *strings.Builder, paneID
 		name := parts[1]
 		// Reflect what a skill loaded from this pane would actually resolve for
 		// this store: tab (the --tab override, else the pane's tab) → workspace → env.
-		chain := []string{scope, wsScope}
+		chain := withProjectScope([]string{scope, wsScope}, w.projectScopeFallback())
 		if tabArg == "" {
 			chain = w.secretScopeChain(paneID)
 		}
@@ -696,7 +723,7 @@ func (w *WorkspaceActor) handleNamedStoreSubcommand(out *strings.Builder, paneID
 			return
 		}
 		name := parts[1]
-		chain := []string{scope, wsScope}
+		chain := withProjectScope([]string{scope, wsScope}, w.projectScopeFallback())
 		if tabArg == "" {
 			chain = w.secretScopeChain(paneID)
 		}

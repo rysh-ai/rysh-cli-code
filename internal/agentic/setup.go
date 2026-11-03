@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"github.com/rysh-ai/rysh-cli-code/internal/memory/recall"
+	"github.com/rysh-ai/rysh-cli-code/internal/policy"
 	"strings"
 	"time"
 
@@ -64,6 +66,14 @@ type Setup struct {
 	// and per-pane factories can build env blocks without re-os.Getwd().
 	workDir string
 
+	// sem is semantic recall (design 010 §3 S4): the indexer behind the
+	// context tool's action=search, opened lazily while policy enables it.
+	// newEmbedder builds the embedder from policy (nil: the loopback Ollama
+	// embedder; tests inject a fake). It is a pointer set by initMemory, so
+	// Setup copies that swap the provider share one indexer and one lock.
+	sem         *semanticState
+	newEmbedder func(policy.SemanticRules) (recall.Embedder, error)
+
 	// PromptReloader is installed by main.go at startup. When invoked
 	// (e.g. via SIGHUP or the ##agent reload-prompts workspace command),
 	// it re-reads the layered prompt store from disk and returns a fresh
@@ -96,6 +106,33 @@ type Setup struct {
 	// Explicit seats (recipe/config step & judge models) still win. Never nil
 	// after NewSetup/NewSetupAlwaysOn.
 	SessionLLM *provider.SessionDefaults
+
+	// KnownSecrets returns the session's registered secret values (##secret
+	// store), installed by the WorkspaceActor. The memory scrubber compares
+	// against them in-process; they are never logged or shown.
+	KnownSecrets func() []string
+
+	// mem is the cross-session memory wiring (crossmemory.go).
+	mem *memoryState
+
+	// profileRoot is the daemon's working directory at Setup time — the
+	// workspace root under which pane agent profiles live
+	// (PaneProfileDir). Set by NewSetup/NewSetupAlwaysOn.
+	profileRoot string
+}
+
+// PaneProfileDir is the one directory pane agent profile prompts are stored
+// in and read from: <daemon workspace root>/.rysh/pane-profiles (design 093
+// H1). "" when the Setup has no root (tests that build a bare Setup).
+func (s *Setup) PaneProfileDir() string {
+	if s == nil || strings.TrimSpace(s.profileRoot) == "" {
+		return ""
+	}
+	root, err := filepath.Abs(s.profileRoot)
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(root, ".rysh", "pane-profiles")
 }
 
 // Reload re-runs the installed PromptReloader closure and applies the
@@ -135,7 +172,7 @@ func (s *Setup) ApplyPrompts(p *Prompts, workDir string) {
 	// Re-assemble the system prompt from scratch so ApplyPrompts is
 	// idempotent: callers can re-apply (e.g. tests, or live reloads) and the
 	// result depends only on the current Prompts + workDir.
-	base := appendProjectMemory(p.defaultPrompt(), workDir)
+	base := s.withCrossSessionMemory(appendProjectMemory(p.defaultPrompt(), workDir))
 	withTodo := func(x string) string {
 		if td := p.todoGuidance(); td != "" {
 			return x + "\n\n" + td
@@ -278,7 +315,11 @@ func NewSetup(cfg config.Config, plKV nats.KeyValue) *Setup {
 	registry.Register("clipboard", tools.NewClipboardTool())
 	registry.Register("project_notes", tools.NewProjectNotesTool(workDir))
 	// Durable project memory (RYSH.md), auto-loaded into the system prompt.
-	registry.Register("memory_edit", tools.NewMemoryEditTool(workDir))
+	memEdit := tools.NewMemoryEditTool(workDir)
+	registry.Register("memory_edit", memEdit)
+	// Cross-session memory entries (design 010 §3a); bound to the Setup below.
+	memTool := tools.NewMemoryTool()
+	registry.Register("memory", memTool)
 	// Pipeline tools
 	registry.Register("rysh_build_pipeline", tools.NewRyshBuildPipelineTool(workDir, plKV))
 	// Background process tools (bash_session merges the former bash_output + kill_shell)
@@ -295,11 +336,12 @@ func NewSetup(cfg config.Config, plKV nats.KeyValue) *Setup {
 
 	// Load system prompt, then layer in durable project/user memory (RYSH.md).
 	systemPrompt := loadSystemPrompt(cfg.SystemPrompt)
+	basePrompt := systemPrompt
 	systemPrompt = appendProjectMemory(systemPrompt, workDir)
 
 	snatMgr, snatRejected := newSecretNATManager(cfg)
 
-	return &Setup{
+	s := &Setup{
 		Provider:     prov,
 		ToolRegistry: registry,
 		Scopes:       NewScopeRegistries(registry),
@@ -311,7 +353,12 @@ func NewSetup(cfg config.Config, plKV nats.KeyValue) *Setup {
 		SecretNAT:    snatMgr,
 		SNATRejected: snatRejected,
 		SessionLLM:   sessionLLM,
+		profileRoot:  workDir,
 	}
+	s.initMemory(openMemoryStore(cfg), startupMemoryRules(cfg), basePrompt)
+	memTool.Bind(s.MemoryStore(), s.memoryGate, s.knownSecrets)
+	memEdit.BindKnownSecrets(s.knownSecrets)
+	return s
 }
 
 // NewSetupAlwaysOn creates an agentic Setup regardless of the Enabled flag.
@@ -359,7 +406,11 @@ func NewSetupAlwaysOn(cfg config.Config, plKV nats.KeyValue) *Setup {
 	registry.Register("clipboard", tools.NewClipboardTool())
 	registry.Register("project_notes", tools.NewProjectNotesTool(workDir))
 	// Durable project memory (RYSH.md), auto-loaded into the system prompt.
-	registry.Register("memory_edit", tools.NewMemoryEditTool(workDir))
+	memEdit := tools.NewMemoryEditTool(workDir)
+	registry.Register("memory_edit", memEdit)
+	// Cross-session memory entries (design 010 §3a); bound to the Setup below.
+	memTool := tools.NewMemoryTool()
+	registry.Register("memory", memTool)
 	// Pipeline tools
 	registry.Register("rysh_build_pipeline", tools.NewRyshBuildPipelineTool(workDir, plKV))
 	// Background process tools (bash_session merges the former bash_output + kill_shell)
@@ -371,11 +422,12 @@ func NewSetupAlwaysOn(cfg config.Config, plKV nats.KeyValue) *Setup {
 	forgeMgr := forge.NewManager(registry, workDir, nil)
 
 	systemPrompt := loadSystemPrompt(cfg.SystemPrompt)
+	basePrompt := systemPrompt
 	systemPrompt = appendProjectMemory(systemPrompt, workDir)
 
 	snatMgr, snatRejected := newSecretNATManager(cfg)
 
-	return &Setup{
+	s := &Setup{
 		Provider:     prov,
 		ToolRegistry: registry,
 		Scopes:       NewScopeRegistries(registry),
@@ -387,7 +439,12 @@ func NewSetupAlwaysOn(cfg config.Config, plKV nats.KeyValue) *Setup {
 		SecretNAT:    snatMgr,
 		SNATRejected: snatRejected,
 		SessionLLM:   sessionLLM,
+		profileRoot:  workDir,
 	}
+	s.initMemory(openMemoryStore(cfg), startupMemoryRules(cfg), basePrompt)
+	memTool.Bind(s.MemoryStore(), s.memoryGate, s.knownSecrets)
+	memEdit.BindKnownSecrets(s.knownSecrets)
+	return s
 }
 
 // SNATRejectedDetector is one entry from the [snat] custom_detectors config
@@ -544,7 +601,7 @@ func (s *Setup) CreateLLMPromptExecutionActor(
 	perPaneRegistry.Register("session_history", tools.NewSessionHistoryTool(nc, cfg.SessionName))
 	// Context tools need JetStream — extract from NATS connection.
 	if js, err := nc.JetStream(); err == nil {
-		perPaneRegistry.Register("context", tools.NewContextTool(js))
+		perPaneRegistry.Register("context", s.newContextTool(js))
 		// Phase 3: todo tool (per-pane, JetStream-backed)
 		perPaneRegistry.Register("todo", tools.NewTodoTool(js, paneID))
 	}
@@ -596,6 +653,14 @@ func (s *Setup) CreateLLMPromptExecutionActor(
 	if s.SecretNAT != nil {
 		llm.SetSecretNAT(s.SecretNAT.Session(paneID))
 	}
+	// Auto-recall (design 010 §3 S5): per-turn cited memories, only while
+	// policy turns on both memory.semantic and auto_recall.
+	llm.SetRecallProvider(s.recallBlock)
+	// Native family tools (design 093 H1): family_ask / family_reply /
+	// family_status, bound to THIS pane's identity. Opt-in: offered only to a
+	// pane whose agent profile (`##pane profile set --tools …`) names them, so
+	// a pane without a profile keeps exactly its previous tool set.
+	llm.SetOptInTools(tools.NewFamilyToolRegistry(nc, pub, paneID))
 	return llm
 }
 
@@ -648,7 +713,7 @@ func (s *Setup) CreateAgentLLMPromptExecutionActor(
 	// unreachable for a headless agent or a humanoid driven from a chat app.
 	perAgentRegistry.Register("rysh_command", tools.NewRyshCommandTool(nc, cfg.SessionName, chatOutputPaneID))
 	if js, err := nc.JetStream(); err == nil {
-		perAgentRegistry.Register("context", tools.NewContextTool(js))
+		perAgentRegistry.Register("context", s.newContextTool(js))
 	}
 	perAgentRegistry.Register("list_tools", tools.NewListToolsTool(perAgentRegistry))
 
@@ -748,13 +813,15 @@ func (s *Setup) CreateHumanoidLLMWithChannelTools(
 	ct HumanoidChannelTools,
 ) *LLMPromptExecutionActor {
 	perRegistry := tools.NewChildRegistry(s.ToolRegistry)
-	perRegistry.Register("pane_inspect", tools.NewPaneInspectTool(nc, cfg.SessionName))
+	// No pane_inspect: a humanoid's input comes from outside the session
+	// (channel contacts), and the tool would let one read any pane's screen
+	// into a reply (security-lead ledger 113). Panes and agents keep it.
 	perRegistry.Register("pane_send", tools.NewPaneSendTool(nc, cfg.SessionName))
 	codecs := pub.Codecs()
 	perRegistry.Register("agents_list", tools.NewAgentsListTool(nc, cfg.SessionName, codecs))
 	perRegistry.Register("session_history", tools.NewSessionHistoryTool(nc, cfg.SessionName))
 	if js, err := nc.JetStream(); err == nil {
-		perRegistry.Register("context", tools.NewContextTool(js))
+		perRegistry.Register("context", s.newContextTool(js))
 	}
 
 	sp := systemPrompt

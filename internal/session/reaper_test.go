@@ -9,9 +9,14 @@ import (
 	"time"
 )
 
-// fixedProbe returns a probe func that always reports the given reachability.
-func fixedProbe(reachable bool) func(int, time.Duration) bool {
-	return func(int, time.Duration) bool { return reachable }
+// fixedProbe returns a probe func that always reports the given reachability:
+// true is a serving daemon, false a port with no listener (refused).
+func fixedProbe(reachable bool) func(int, time.Duration) probeResult {
+	r := probeRefused
+	if reachable {
+		r = probeServing
+	}
+	return func(int, time.Duration) probeResult { return r }
 }
 
 const oldEnough = -time.Hour // an UpdatedAt comfortably past any StartupGrace
@@ -53,10 +58,12 @@ func TestReap_KillsWedgedDaemon(t *testing.T) {
 	reaped := make(chan struct{})
 	go func() { _ = cmd.Wait(); close(reaped) }()
 
+	start, _ := ProcessStart(pid) // a daemon stamps its own start time
 	writeRecord(t, st, Record{
 		Name:      "wedged",
 		State:     "detached",
 		PID:       pid,
+		PIDStart:  start,
 		NATSPort:  24242,
 		UpdatedAt: time.Now().UTC().Add(oldEnough),
 	})
@@ -146,22 +153,53 @@ func TestReap_DeadPIDReconciledNotKilled(t *testing.T) {
 	}
 }
 
-// TestProbeWithRetries_StopsOnFirstSuccess verifies retries short-circuit once a
-// probe succeeds.
-func TestProbeWithRetries_StopsOnFirstSuccess(t *testing.T) {
+// TestRefusedEveryProbe_StopsOnFirstAnswer verifies the sweep stops probing,
+// and spares the daemon, as soon as one attempt finds a listener.
+func TestRefusedEveryProbe_StopsOnFirstAnswer(t *testing.T) {
 	calls := 0
 	opts := ReapOptions{
 		NATSProbeAttempts: 5,
 		NATSProbeTimeout:  time.Millisecond,
-		probe: func(int, time.Duration) bool {
+		probe: func(int, time.Duration) probeResult {
 			calls++
-			return calls == 2 // fail once, then succeed
+			if calls == 2 {
+				return probeServing
+			}
+			return probeRefused
 		},
 	}
-	if !probeWithRetries(opts, 24242) {
-		t.Fatal("probeWithRetries should report reachable")
+	if refusedEveryProbe(opts, 24242) {
+		t.Fatal("a port that answered once was read as refused")
 	}
 	if calls != 2 {
 		t.Errorf("expected 2 probe calls, got %d", calls)
+	}
+}
+
+// TestRefusedEveryProbe_InconclusiveSparesTheDaemon: a timeout (inconclusive)
+// on any attempt is never evidence enough to kill (QA-21).
+func TestRefusedEveryProbe_InconclusiveSparesTheDaemon(t *testing.T) {
+	for _, seq := range [][]probeResult{
+		{probeInconclusive, probeInconclusive, probeInconclusive},
+		{probeRefused, probeRefused, probeInconclusive},
+		{probeInconclusive, probeRefused, probeRefused},
+	} {
+		i := 0
+		opts := ReapOptions{
+			NATSProbeAttempts: len(seq),
+			NATSProbeTimeout:  time.Millisecond,
+			probe: func(int, time.Duration) probeResult {
+				r := seq[i]
+				i++
+				return r
+			},
+		}
+		if refusedEveryProbe(opts, 24242) {
+			t.Errorf("%v read as refused; a timeout must spare the daemon", seq)
+		}
+	}
+	opts := ReapOptions{NATSProbeAttempts: 3, NATSProbeTimeout: time.Millisecond, probe: fixedProbe(false)}
+	if !refusedEveryProbe(opts, 24242) {
+		t.Error("three refusals not read as refused")
 	}
 }

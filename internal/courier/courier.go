@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/board"
+	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 )
 
@@ -190,6 +191,32 @@ func Compose(boardID string, p *msg.MsgBoardPost, bin, session string) string {
 	return b.String()
 }
 
+// familyReplyTool is the native answer tool (internal/tools.FamilyReplyTool),
+// named here as a literal so the courier does not import the tool package.
+const familyReplyTool = "family_reply"
+
+// ComposeFor is Compose for a known recipient. A pane whose agent profile
+// allows the native family_reply tool (design 093 H1) has no shell, so the
+// shell ack instruction would be an order it cannot follow: it is told to
+// answer with family_reply on the thread instead, and the thread id is put in
+// the header where the tool's description says to find it. Every other pane
+// gets Compose's text unchanged.
+func ComposeFor(boardID string, p *msg.MsgBoardPost, bin, session string, meta map[string]string) string {
+	if !domain.AgentToolsAllow(meta, familyReplyTool) {
+		return Compose(boardID, p, bin, session)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "[rysh board %s | command %s | from %s (%s) | thread %s]\n",
+		boardID, p.CmdID, p.Persona, short(p.PaneID), p.ThreadID)
+	b.WriteString(strings.TrimSpace(p.Text))
+	b.WriteString("\n")
+	if p.File != "" {
+		fmt.Fprintf(&b, "File: %s (it is not readable with your tools; ask the sender for what you need).\n", p.File)
+	}
+	fmt.Fprintf(&b, "Answer with the %s tool: thread_id %q and your answer. Answer once.", familyReplyTool, p.ThreadID)
+	return b.String()
+}
+
 // shellQuote quotes s for a POSIX shell only when it needs it.
 func shellQuote(s string) string {
 	if s != "" && strings.IndexFunc(s, func(r rune) bool {
@@ -234,7 +261,20 @@ type Deps struct {
 	Backoff []time.Duration
 	// Log defaults to slog.Default().
 	Log *slog.Logger
+	// WaitIdle, when set, blocks until a rysh-native recipient's agent has no
+	// turn in flight, or ctx ends (design 093 H3). A prompt delivered to a
+	// native pane mid-turn would cancel that turn (the LLM actor serializes
+	// runs by cancelling the running one), so the courier waits for the turn
+	// to end first, at most NativeBusyWait, and then delivers anyway. Claude
+	// and codex routes are never waited on: their own inboxes queue.
+	WaitIdle func(ctx context.Context, paneID string) error
+	// NativeBusyWait bounds WaitIdle; 0 means DefaultNativeBusyWait.
+	NativeBusyWait time.Duration
 }
+
+// DefaultNativeBusyWait is how long a command waits for a busy rysh-native
+// recipient to finish its turn before it is delivered regardless.
+const DefaultNativeBusyWait = 5 * time.Minute
 
 // DefaultBackoff is design 050 §5.2's schedule.
 var DefaultBackoff = []time.Duration{time.Second, 2 * time.Second, 5 * time.Second, 15 * time.Second, 60 * time.Second}
@@ -280,6 +320,9 @@ func New(d Deps) *Courier {
 	}
 	if d.Log == nil {
 		d.Log = slog.Default()
+	}
+	if d.NativeBusyWait <= 0 {
+		d.NativeBusyWait = DefaultNativeBusyWait
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Courier{deps: d, ctx: ctx, cancel: cancel, queues: map[string]chan job{}, seen: map[string]struct{}{}}
@@ -363,8 +406,8 @@ func (c *Courier) run(q chan job) {
 // permanent refusal makes waiting pointless.
 func (c *Courier) deliver(j job) {
 	p := j.post
-	text := Compose(j.board, p, c.deps.Bin, c.deps.Session)
 	var last error
+	waited := false
 	for attempt := 0; attempt <= len(c.deps.Backoff); attempt++ {
 		if attempt > 0 {
 			select {
@@ -390,6 +433,23 @@ func (c *Courier) deliver(j job) {
 				break
 			}
 			continue
+		}
+		// Composed per attempt from the snapshot just taken: a native-profile
+		// pane is told to answer with its family_reply tool (ComposeFor).
+		text := ComposeFor(j.board, p, c.deps.Bin, c.deps.Session, t.Meta)
+		if r.Adapter == RouteRyshNative && c.deps.WaitIdle != nil && !waited {
+			// Never cancel the recipient's running turn: wait for it to end
+			// (bounded), then deliver. Once per command, not per attempt.
+			waited = true
+			wctx, wcancel := context.WithTimeout(c.ctx, c.deps.NativeBusyWait)
+			if err := c.deps.WaitIdle(wctx, p.ToPaneID); err != nil && c.ctx.Err() == nil {
+				c.deps.Log.Warn("courier: recipient still busy; delivering anyway", "cmd", p.CmdID,
+					"pane", short(p.ToPaneID), "err", err)
+			}
+			wcancel()
+			if c.ctx.Err() != nil {
+				return
+			}
 		}
 		ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
 		err = c.deps.Deliver(ctx, r, t, text)

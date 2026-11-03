@@ -29,8 +29,8 @@
 #   GITHUB_PATH             appended to when non-empty (standard Actions file)
 #
 # Supported platforms: linux/amd64, linux/arm64, darwin/amd64, darwin/arm64 —
-# exactly the tar.gz targets .goreleaser.yml publishes. The windows zip is a
-# CLI-only artifact and is not supported by this action.
+# exactly the tar.gz targets .goreleaser.yml publishes. The windows zip is not
+# supported by this action (its panes are untested on real Windows).
 
 set -euo pipefail
 
@@ -43,7 +43,7 @@ detect_platform() {
   os=$(uname -s | tr '[:upper:]' '[:lower:]')
   case "$os" in
     linux | darwin) ;;
-    *) fail "unsupported runner OS: $os (linux and macOS only; the Windows release is CLI-only and not supported by this action)" ;;
+    *) fail "unsupported runner OS: $os (linux and macOS only; the Windows release is not supported by this action)" ;;
   esac
   arch=$(uname -m)
   case "$arch" in

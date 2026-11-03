@@ -1,0 +1,14 @@
+approval:
+  always_gate:
+    - "curl*" # imported from Claude Code (deny/ask)
+    - "rm -rf*" # imported from Claude Code (deny/ask)
+    - "git push*" # imported from Claude Code (deny/ask)
+    - "*" # imported from Claude Code (deny/ask)
+
+# REVIEW — allow-rules imported from Claude Code by `rysh import claude`.
+# They are NOT active. To auto-approve one, move it into approval.auto_approve
+# yourself after checking it; rysh never loosens a policy on import.
+#   auto_approve:
+#     - "go test ./..."
+#     - "make lint"
+#     - "npm run test*"

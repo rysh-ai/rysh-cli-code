@@ -20,6 +20,7 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/channels"
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
+	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"github.com/rysh-ai/rysh-cli-code/internal/provider"
 	"github.com/rysh-ai/rysh-cli-code/internal/upstream"
 
@@ -75,6 +76,12 @@ type HumanoidActor struct {
 	// the workspace's ##secret store; nil means environment-only.
 	secrets *secretResolver
 
+	// emailAuthTold remembers, per claimed sender (a hash, never the address)
+	// and UTC day, that the owner was told about an unauthenticated mail
+	// (security-lead backlog 2, D4). Memory only, never logged.
+	emailAuthToldMu sync.Mutex
+	emailAuthTold   map[string]string
+
 	// provider is the skill-file `provider:` selection (design 006 MP2).
 	// Empty = the config/default provider (exactly the pre-MP2 behaviour).
 	provider string
@@ -111,6 +118,15 @@ type HumanoidActor struct {
 
 	// lastInbound tracks the inbound message context for routing outbound replies.
 	lastInbound *msg.MsgHumanoidInboundMessage
+	// ownerDM is the owner's last 1:1 DM on a gated channel: the only chat a
+	// MsgHumanoidNotifyOwner may reach (E33 slice E1, design 086). Kept in
+	// memory only, so a restarted daemon waits for the owner's next DM.
+	ownerDM *msg.MsgHumanoidInboundMessage
+	// panePins maps "channelType/threadID" to the pane that thread is pinned
+	// to with /use (E33 slice E2, design 086). In memory only.
+	panePins map[string]panePin
+	// listPanes stands in for the workspace snapshot in tests.
+	listPanes func() ([]paneRef, error)
 	// uiFocus tracks which email the desktop email client currently has open (or
 	// that the user is browsing the list, Listing=true). When set it takes
 	// precedence over lastInbound for human-governed prompt enrichment, so the AI
@@ -200,6 +216,9 @@ type HumanoidActor struct {
 	// every notice routes back to the thread that triggered it, and an
 	// orchestrator's done/error clears only that run's approvals.
 	pendingApprovals map[string]*pendingApproval
+	// spentEmailNotices holds the Message-IDs of email approval notices
+	// already decided (E7, channels_email_approval.go).
+	spentEmailNotices map[string]bool
 
 	// trustUntil is the expiry of a session-scoped trust grant (design 008
 	// RA5). While it is in the future, the assistant profile auto-approves
@@ -232,7 +251,7 @@ type HumanoidActor struct {
 	pairing *channels.PairingStore
 }
 
-// pendingApproval records a tool-use approval the assistant profile is holding
+// pendingApproval records a tool-use approval the humanoid is holding
 // until the owner replies. Keyed by RequestID in HumanoidActor.pendingApprovals
 // (X5). inbound snapshots the chat thread the triggering run belonged to so the
 // notice and the eventual decision route to that thread, not the live
@@ -245,6 +264,13 @@ type pendingApproval struct {
 	inbound        *msg.MsgHumanoidInboundMessage // nil for pane-typed prompts
 	description    string
 	at             time.Time
+	// noticeTS is the platform id of the approval notice as sent (Slack: its
+	// ts), when the adapter reports one. A Slack DM-level answer must be newer
+	// than it (D3, e20 N1).
+	noticeTS string
+	// noticeChannel is the channel the platform delivered the notice to
+	// (Slack: the owner's DM). D3 compares only within that channel (C1).
+	noticeChannel string
 }
 
 // genericDraft is a reply captured in human-governed mode for a channel that
@@ -624,15 +650,8 @@ func (h *HumanoidActor) Receive(ctx actor.Context) {
 		// phone, discord, chatbot): a reply is buffered as a pending draft and
 		// the human types "send" to post it, or "discard" to drop it. Any other
 		// text falls through and re-drafts via a fresh LLM prompt.
-		if len(h.pendingGenericDrafts) > 0 {
-			switch strings.ToLower(strings.TrimSpace(m.Prompt)) {
-			case "send", "yes", "confirm", "send it", "go ahead", "ok", "do it":
-				h.flushGenericDraft()
-				return
-			case "discard", "cancel", "no", "drop", "reject":
-				h.discardGenericDraft()
-				return
-			}
+		if h.handleGenericDraftCommand(m.Prompt) {
+			return
 		}
 		// Route LLM output to external buffer (not chat buffer). Clear
 		// chatOutputPaneID so emitOutput() publishes to NATS only;
@@ -964,32 +983,7 @@ func (h *HumanoidActor) Receive(ctx actor.Context) {
 		}
 
 	case *msg.MsgAttentionEnable:
-		if m.HumanoidName == h.name {
-			hasActiveChannel := false
-			for channelType := range h.adapters {
-				if channelType == "slack" || channelType == "email" || channelType == "chatbot" ||
-					channelType == "whatsapp" || channelType == "phone" ||
-					channelType == "discord" || channelType == "telegram" ||
-					channelType == "signal" || channelType == "imessage" ||
-					channelType == "teams" {
-					hasActiveChannel = true
-					break
-				}
-			}
-			if !hasActiveChannel {
-				if h.activeChatPaneID != "" {
-					_ = h.pub.SendPaneRyshOutput(h.activeChatPaneID,
-						"\n[attention] cannot enable: no external channels are running\n")
-				}
-				return
-			}
-			h.attentionEnabled = true
-			slog.Info("humanoid: attention enabled", "name", h.name)
-			if h.activeChatPaneID != "" {
-				_ = h.pub.SendPaneRyshOutput(h.activeChatPaneID,
-					fmt.Sprintf("\n[attention] enabled for humanoid %s\n", h.name))
-			}
-		}
+		h.handleAttentionEnable(m)
 
 	case *msg.MsgAttentionDisable:
 		if m.HumanoidName == h.name {
@@ -1044,6 +1038,12 @@ func (h *HumanoidActor) Receive(ctx actor.Context) {
 		case *msg.MsgChannelPairList:
 			// Synchronous listing for the ##humanoid pair list command.
 			_ = m.Reply(h.buildPairListReply(inner.Channel))
+		case *msg.MsgHumanoidMCPSend:
+			// `rysh mcp serve` channel_send (design 067), under governance.
+			_ = m.Reply(h.handleMCPSend(inner))
+		case *msg.MsgHumanoidNotifyOwner:
+			// The needs-you notifier's assistant sink (E33, design 086).
+			_ = m.Reply(h.handleNotifyOwner(inner))
 		}
 	}
 }
@@ -1080,6 +1080,12 @@ func (h *HumanoidActor) startChannel(channelType string, cc msg.ChannelConfig) {
 	cc, refused := h.resolveChannelCredentialsFromUpstream(channelType, cc)
 	if refused != nil {
 		h.reportChannelStatus(channelType, false, refused.Error())
+		return
+	}
+	if err := unresolvedCredentialRef(cc); err != nil {
+		slog.Error("humanoid: channel not started", "name", h.name,
+			"channel", channelType, "error", err)
+		h.reportChannelStatus(channelType, false, channelType+": "+err.Error())
 		return
 	}
 
@@ -1170,6 +1176,10 @@ func (h *HumanoidActor) resolveChannelCredentialsFromUpstream(channelType string
 		needsFetch = cc.Relay || cc.APIKey == "" || cc.Phone == ""
 	case "email":
 		needsFetch = cc.Relay
+	case "github":
+		// Relay mode (E-108) needs the connection's ids; direct mode keeps
+		// its own webhook secret and token and fetches nothing.
+		needsFetch = cc.Relay
 	}
 	slog.Debug("humanoid: resolveChannelCredentials", "name", h.name,
 		"channel", channelType, "needs_fetch", needsFetch,
@@ -1249,6 +1259,20 @@ func (h *HumanoidActor) resolveChannelCredentialsFromUpstream(channelType string
 			// wrong key left cc.Phone empty and Start() then rejected the
 			// channel with "phone (phone_number_id) is required".
 			cc.Phone = creds.Config["phone_number_id"]
+		}
+	case "github":
+		if cc.Relay {
+			// The server holds the App's webhook secret and private key and
+			// posts as the App: wire the transport, copy no secret down.
+			cc.RelayURL = h.cfg.Upstream.URL
+			cc.RelayAPIKey = h.cfg.Upstream.APIKey
+			cc.RelayWorkspace = h.cfg.Upstream.WorkspaceName()
+			cc.RelayWorkspaceID = creds.WorkspaceID
+			cc.RelayConnectionID = creds.ConnectionID
+			slog.Info("humanoid: github relay configured from upstream",
+				"name", h.name, "workspace", creds.WorkspaceID,
+				"connection", creds.ConnectionID)
+			return cc, nil
 		}
 	case "email":
 		if cc.Relay {
@@ -1348,6 +1372,9 @@ func (h *HumanoidActor) streamToPane(content string) {
 // handleInboundMessage processes an inbound message from an external channel.
 // It wraps the message in a contextual prompt and forwards it to the LLMPromptExecutionActor.
 func (h *HumanoidActor) handleInboundMessage(m *msg.MsgHumanoidInboundMessage) {
+	// L1: whoever sent it, a mail that latched email approvals off is
+	// reported to the owner before any gate decides on the mail itself.
+	h.noteEmailApprovalLatch(m)
 	slog.Debug("humanoid: handleInboundMessage called", "name", h.name,
 		"channel", m.ChannelType, "sender", m.SenderName,
 		"thread", m.ThreadID, "active", h.active,
@@ -1381,11 +1408,18 @@ func (h *HumanoidActor) handleInboundMessage(m *msg.MsgHumanoidInboundMessage) {
 	// existing deployments and tests are unchanged). Once a channel declares
 	// either, design 003's G5 fail-closed rule applies: an unknown sender
 	// never triggers an autonomous reply.
+	//
+	// Before it: a mail whose sender did not authenticate (sender_auth=fail,
+	// only with authserv_id set) is never admitted, gated channel or not.
+	if h.refuseUnauthenticatedEmail(m) {
+		return
+	}
 	if gated, policy := h.channelPairingGate(m.ChannelType); gated &&
 		!h.pairingAllowed(m.ChannelType, m.SenderID) {
 		h.handleUnpairedInbound(m, policy)
 		return
 	}
+	h.rememberOwnerDM(m)
 
 	// Assistant profile (design 008 RA5): a trust command is control input, not
 	// a prompt and not an approval decision, so it is parsed BEFORE the
@@ -1394,6 +1428,11 @@ func (h *HumanoidActor) handleInboundMessage(m *msg.MsgHumanoidInboundMessage) {
 	// autonomy.
 	if h.isAssistantProfile() && isTrustCommand(m.Content) {
 		h.handleTrustCommand(m)
+		return
+	}
+	// E33 slice E2: /panes and /use are control input too, after the gate.
+	if h.isAssistantProfile() && isPaneCommand(m.Content) {
+		h.handlePaneCommand(m)
 		return
 	}
 
@@ -1410,7 +1449,19 @@ func (h *HumanoidActor) handleInboundMessage(m *msg.MsgHumanoidInboundMessage) {
 			slog.Info("humanoid: assistant channel reply treated as approval decision",
 				"name", h.name, "channel", m.ChannelType, "sender", m.SenderID,
 				"request_id", pa.requestID)
-			h.handleTextApproval(m.Content, m)
+			h.handleTextApproval(approvalDecisionText(m), m)
+			return
+		}
+		// D4: a DM decision that would answer more than one approval decides
+		// nothing; say where to answer instead of queueing it as a prompt.
+		if h.slackDMApprovalAmbiguous(m) {
+			h.replySlackDMAmbiguous(m)
+			return
+		}
+		// E7: an answer to an email notice that was already decided is a
+		// no-op, not a new prompt.
+		if h.emailReplyToSpentNotice(m) {
+			slog.Info("humanoid: answer to an already decided email approval ignored", "name", h.name)
 			return
 		}
 	}
@@ -1976,6 +2027,9 @@ func (h *HumanoidActor) processInbound(m *msg.MsgHumanoidInboundMessage) {
 
 	// Build contextual prompt for the LLMPromptExecutionActor.
 	prompt := h.buildContextualPrompt(m, conv)
+	if pin, ok := h.panePins[convKey]; ok {
+		prompt = pinnedPrompt(pin, prompt)
+	}
 	// Human-governed Slack: replace the auto-reply prompt with a draft-only
 	// instruction — the AI prepares the reply via slack_draft and shows it; the
 	// outbound flush is suppressed, and the human's typed "send" triggers
@@ -2061,6 +2115,9 @@ func (h *HumanoidActor) handleTextApproval(text string, from *msg.MsgHumanoidInb
 	}
 	delete(h.pendingApprovals, pa.requestID)
 	reqID := pa.requestID
+	if pa.inbound != nil && pa.inbound.ChannelType == "email" {
+		h.markEmailNoticeSpent(pa.noticeTS) // E7: single-use
+	}
 
 	normalized := strings.ToLower(strings.TrimSpace(text))
 	var decision msg.ApprovalDecision
@@ -2105,6 +2162,8 @@ func (h *HumanoidActor) handleTextApproval(text string, from *msg.MsgHumanoidInb
 // held for that same thread — so a "yes" on Slack can never release an approval
 // held on WhatsApp. A pane-typed reply (from == nil) carries no thread and
 // resolves the oldest pending approval. Returns nil when nothing matches.
+// With no same-thread match, a top-level decision in the owner's Slack DM may
+// resolve the single approval held in that DM (slackDMApproval, e20 D1-D5).
 func (h *HumanoidActor) resolvePendingApproval(from *msg.MsgHumanoidInboundMessage) *pendingApproval {
 	var best *pendingApproval
 	for _, pa := range h.pendingApprovals {
@@ -2114,6 +2173,12 @@ func (h *HumanoidActor) resolvePendingApproval(from *msg.MsgHumanoidInboundMessa
 		if best == nil || pa.at.Before(best.at) {
 			best = pa
 		}
+	}
+	if best == nil && from != nil {
+		if pa := h.slackDMApproval(from); pa != nil {
+			return pa
+		}
+		return h.emailReplyApproval(from)
 	}
 	return best
 }
@@ -2184,14 +2249,23 @@ func (h *HumanoidActor) autoApproveTools() bool {
 }
 
 // handleApprovalRequest routes a tool-use approval from the child
-// orchestrator. Team humanoids approve immediately (auto-approve is on, so a
-// request only reaches us via a legacy/no-flag path). The assistant profile
-// instead HOLDS the request pending and surfaces it to the owner — in the
-// registered pane's mode buffer and, when the request was triggered by a
-// channel message, as a draft notice over that same channel — so the owner
-// replies "yes"/"no" (pane input or channel message) to release or reject it.
+// orchestrator. The assistant profile HOLDS the request pending and surfaces
+// it to the owner — in the registered pane's mode buffer and, when the request
+// was triggered by a channel message, as a draft notice over that same
+// channel — so the owner replies "yes"/"no" (pane input or channel message) to
+// release or reject it.
+//
+// A team humanoid holds the request too when something deliberately gated it:
+// a policy gate (always_gate / bash.deny) or its own auto_approve: false. Its
+// chat members are not its owner, so the notice goes to the pane only and
+// only pane input decides it. Any other request reaching a team humanoid is a
+// stray from a legacy/no-flag path and is approved immediately.
 func (h *HumanoidActor) handleApprovalRequest(m *msg.MsgApprovalRequest) {
 	if !h.isAssistantProfile() {
+		if isPolicyGatedApproval(m) || !h.autoApproveTools() {
+			h.holdApproval(m, false)
+			return
+		}
 		// Humanoids run headless and auto-approve every tool call (Problem 2).
 		// The child orchestrator is configured with autoApproveAll, so it
 		// normally never publishes an approval request. If one still reaches us
@@ -2206,11 +2280,26 @@ func (h *HumanoidActor) handleApprovalRequest(m *msg.MsgApprovalRequest) {
 
 	// design 008 RA5: an active trust grant releases held actions without a
 	// per-call round trip. Checked before the hold so the owner's window
-	// actually takes effect; every release is reported back to them.
+	// actually takes effect; every release is reported back to them. A
+	// policy-gated request is never released this way (trustAutoApprove).
 	if h.trustAutoApprove(m) {
 		return
 	}
+	h.holdApproval(m, true)
+}
 
+// isPolicyGatedApproval reports whether the orchestrator raised this request
+// because a policy GATE rule matched (design 013). decideApproval's gate is
+// carried only in the description, as withPolicyRule's citation; text that
+// merely looks like it can only make a request held, never released.
+func isPolicyGatedApproval(m *msg.MsgApprovalRequest) bool {
+	return strings.Contains(m.Description, "[gated by policy rule ")
+}
+
+// holdApproval records m as pending and shows the notice in the pane. With
+// notifyChannel, the notice also goes over the channel that triggered the run,
+// so the owner can answer from their chat app.
+func (h *HumanoidActor) holdApproval(m *msg.MsgApprovalRequest, notifyChannel bool) {
 	// Snapshot the thread that triggered this run so the notice, and the
 	// eventual decision, route to that thread even after a newer message on a
 	// different thread updates h.lastInbound (X5).
@@ -2226,12 +2315,37 @@ func (h *HumanoidActor) handleApprovalRequest(m *msg.MsgApprovalRequest) {
 	}
 	h.pendingApprovals[m.RequestID] = pa
 	notice := fmt.Sprintf(
-		"[approval required] %s\nReply \"yes\" to approve, \"no\" to reject (anything else rejects with your text as the reason).\nOr reply \"trust 30m\" to stop being asked for a while.",
+		"[approval required] %s\nReply \"yes\" to approve, \"no\" to reject (anything else rejects with your text as the reason).",
 		m.Description)
-	slog.Info("humanoid: assistant approval pending (fail closed)", "name", h.name,
+	if pa.inbound != nil && pa.inbound.ChannelType == "slack" {
+		// On Slack every top-level message is its own thread and an approval
+		// resolves only from the notice's thread (resolvePendingApproval), so
+		// say where to answer (e20 ruling 2026-11-01).
+		notice = strings.Replace(notice, "Reply \"yes\" to approve", "Reply \"yes\" in this thread to approve", 1)
+	}
+	if pa.inbound != nil && pa.inbound.ChannelType == "email" {
+		// An emailed answer counts only as a reply to this very mail, from
+		// the owner's own mailbox (E1, E6, E7).
+		notice = strings.Replace(notice, "Reply \"yes\" to approve", "Reply \"yes\" from your own mailbox to approve", 1) +
+			"\nDo not forward this mail: a reply to it can approve the action."
+	}
+	if isPolicyGatedApproval(m) {
+		notice += "\nPolicy gated this one, so a trust grant does not release it."
+	} else {
+		notice += "\nOr reply \"trust 30m\" to stop being asked for a while."
+	}
+	if !notifyChannel {
+		notice = fmt.Sprintf(
+			"[approval required] %s\nType \"yes\" here to approve, \"no\" to reject (anything else rejects with your text as the reason).",
+			m.Description)
+	}
+	slog.Info("humanoid: approval pending (fail closed)", "name", h.name,
 		"request_id", m.RequestID, "description", m.Description)
 	if h.activeChatPaneID != "" {
 		_ = h.pub.SendPaneModeOutput(h.activeChatPaneID, h.name, "\n"+notice+"\n")
+	}
+	if !notifyChannel {
+		return
 	}
 	// Route the draft back over the channel that triggered THIS run (pa.inbound,
 	// captured above), so the owner can approve from their chat app ("assistant
@@ -2244,7 +2358,19 @@ func (h *HumanoidActor) handleApprovalRequest(m *msg.MsgApprovalRequest) {
 				Content:     notice,
 				ThreadID:    pa.inbound.ThreadID,
 			}
-			if err := adapter.Send(context.Background(), out); err != nil {
+			var err error
+			if ids, ok := adapter.(channels.MessageIDSender); ok {
+				// Keep the notice's own platform id: a Slack DM-level answer
+				// must be newer than it (D3, e20 N1).
+				var sent channels.SentMessage
+				if sent, err = ids.SendWithID(context.Background(), out); err == nil {
+					pa.noticeTS = sent.ID
+					pa.noticeChannel = sent.Channel
+				}
+			} else {
+				err = adapter.Send(context.Background(), out)
+			}
+			if err != nil {
 				slog.Warn("humanoid: assistant approval notice send failed",
 					"name", h.name, "channel", pa.inbound.ChannelType, "err", err)
 			}
@@ -2303,9 +2429,15 @@ func (h *HumanoidActor) setupForProvider() *agentic.Setup {
 // constructed provider, and which key lands here is the part worth pinning.
 func (h *HumanoidActor) providerOverrideConfig(family string) config.Config {
 	cfg := h.cfg
-	cfg.ProviderName = family
 	cfg.DefaultModel = strings.TrimSpace(h.providerModel) // "" = provider's own default
-	cfg.APIURL = ""                                       // selected provider's own default endpoint
+	// A same-family selection only re-pins the model, as the pane's does: it
+	// keeps the session's configured key and endpoint. Dropping them left the
+	// assistant profile setup writes (it pins `model:`) with no key at all (E33).
+	if family == providerFamily(h.cfg.ProviderName) {
+		return cfg
+	}
+	cfg.ProviderName = family
+	cfg.APIURL = "" // selected provider's own default endpoint
 	// A humanoid belongs to no tab, so its keys resolve at the workspace scope.
 	cfg.APIKey = h.secrets.providerAPIKey("", family)
 	return cfg
@@ -2870,6 +3002,9 @@ func (h *HumanoidActor) flushOutboundOnCompletion(phase string) {
 		h.outboundBuffer.Reset()
 		h.outboundPending = false
 	default:
+		if phase == "error" {
+			content = withModelErrorNotice(content)
+		}
 		if content != "" {
 			h.routeOutboundToChannel(content)
 		}
@@ -2884,6 +3019,44 @@ func (h *HumanoidActor) flushOutboundOnCompletion(phase string) {
 			PaneID: h.activeChatPaneID,
 		})
 	}
+}
+
+// modelErrorNotice is what the owner reads in the chat when the model call
+// behind a reply failed. The orchestrator streams the error itself as output
+// type "error", which never reaches the channel, so without this a failed run
+// looked like a bot ignoring its owner (E33). The error text stays in the pane
+// and the logs; the chat gets only what to do next.
+func modelErrorNotice() string {
+	return "Sorry, I couldn't answer that: the model call failed. On the computer running this session, run `" +
+		progname.Rewrite("rysh doctor") + "` in the project directory to check the provider and its API key."
+}
+
+// withModelErrorNotice appends the notice to a partial reply, or is the whole
+// reply when the run produced no text.
+func withModelErrorNotice(content string) string {
+	if content == "" {
+		return modelErrorNotice()
+	}
+	return content + "\n\n" + modelErrorNotice()
+}
+
+// handleGenericDraftCommand applies pane-typed text to the generic draft queue:
+// "send" (and synonyms) posts the oldest pending draft, "discard" (and
+// synonyms) drops it. It reports whether the text was such a command; with no
+// pending draft, or any other text, it does nothing and returns false.
+func (h *HumanoidActor) handleGenericDraftCommand(text string) bool {
+	if len(h.pendingGenericDrafts) == 0 {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "send", "yes", "confirm", "send it", "go ahead", "ok", "do it":
+		h.flushGenericDraft()
+		return true
+	case "discard", "cancel", "no", "drop", "reject":
+		h.discardGenericDraft()
+		return true
+	}
+	return false
 }
 
 // flushGenericDraft posts the OLDEST pending generic-governed draft to its
@@ -2946,6 +3119,21 @@ func (h *HumanoidActor) buildContextualPrompt(
 		if m.ThreadID != "" {
 			cb.writef("Message-ID: %s\n", m.ThreadID)
 		}
+	} else if m.ChannelType == "github" {
+		// gap04: an @mention on an issue or pull request. The adapter keeps
+		// the comment itself in Content (so "@<bot_login> yes" can answer an
+		// approval); where it was said comes from Metadata.
+		kind := "issue"
+		if m.Metadata["kind"] == "pull_request" {
+			kind = "pull request"
+		}
+		// The title, branch and file path are never rendered: whoever opened
+		// the issue or PR wrote them, possibly a stranger (lead ruling R7).
+		cb.writef("[GitHub mention on %s %s]\n", kind, m.ThreadID)
+		cb.writef("From: @%s\n", m.SenderID)
+		if url := m.Metadata["url"]; url != "" {
+			cb.writef("URL: %s\n", url)
+		}
 	} else {
 		cb.writef("[Inbound message via %s]\n", m.ChannelType)
 		cb.writef("From: %s (ID: %s)\n", m.SenderName, m.SenderID)
@@ -2979,6 +3167,8 @@ func (h *HumanoidActor) buildContextualPrompt(
 		cb.writef("Respond to this email. Your response will be sent as an email reply.\n")
 		cb.writef("Use a professional email tone. Do NOT include greeting/signature unless appropriate.\n")
 		cb.writef("Keep your reply focused and concise.\n")
+	} else if m.ChannelType == "github" {
+		cb.writef("Do what the comment asks. Your response will be posted as a comment on %s, so use GitHub Markdown.\n", m.ThreadID)
 	} else {
 		cb.writef("Respond to this message. Your response will be sent back via %s.\n", m.ChannelType)
 		cb.writef("Keep your reply concise and appropriate for the %s platform.\n", m.ChannelType)
@@ -3503,4 +3693,37 @@ func truncateStr(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// handleAttentionEnable turns attention on when at least one external channel
+// adapter is running, and says why not in the pane otherwise.
+func (h *HumanoidActor) handleAttentionEnable(m *msg.MsgAttentionEnable) {
+	if m.HumanoidName == h.name {
+		hasActiveChannel := false
+		for channelType := range h.adapters {
+			if channelType == "slack" || channelType == "email" || channelType == "chatbot" ||
+				channelType == "whatsapp" || channelType == "phone" ||
+				channelType == "discord" || channelType == "telegram" ||
+				channelType == "signal" || channelType == "imessage" ||
+				channelType == "teams" || channelType == "mattermost" ||
+				channelType == "matrix" || channelType == "line" ||
+				channelType == "github" {
+				hasActiveChannel = true
+				break
+			}
+		}
+		if !hasActiveChannel {
+			if h.activeChatPaneID != "" {
+				_ = h.pub.SendPaneRyshOutput(h.activeChatPaneID,
+					"\n[attention] cannot enable: no external channels are running\n")
+			}
+			return
+		}
+		h.attentionEnabled = true
+		slog.Info("humanoid: attention enabled", "name", h.name)
+		if h.activeChatPaneID != "" {
+			_ = h.pub.SendPaneRyshOutput(h.activeChatPaneID,
+				fmt.Sprintf("\n[attention] enabled for humanoid %s\n", h.name))
+		}
+	}
 }

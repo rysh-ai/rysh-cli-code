@@ -5,6 +5,7 @@
 package actors
 
 import (
+	"errors"
 	"os"
 
 	"github.com/creack/pty"
@@ -45,8 +46,15 @@ func pollablePTY(f *os.File) *os.File {
 	return nf
 }
 
+// errNotPTY is setPTYSize's answer for a terminal that is not a PTY master.
+var errNotPTY = errors.New("pane terminal is not a PTY")
+
 // setPTYSize sets the PTY window size without calling Fd() (see pollablePTY).
-func setPTYSize(f *os.File, ws *pty.Winsize) error {
+func setPTYSize(t paneTerm, ws *pty.Winsize) error {
+	f, ok := t.(*os.File)
+	if !ok || f == nil {
+		return errNotPTY
+	}
 	rc, err := f.SyscallConn()
 	if err != nil {
 		return err
