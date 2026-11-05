@@ -40,7 +40,7 @@ func TestWireTest_PlantedSecretNeverLeaves(t *testing.T) {
 		t.Fatalf("endpoint = %q, want %q", Endpoint(), srv.BaseURL())
 	}
 
-	const planted = "sk_live_ABCD1234abcd5678EFGH9012"
+	planted := plantedKey
 	reqBody := `{"model":"claude-opus-4-8","system":"remember my key is ` + planted +
 		`","messages":[{"role":"user","content":"hello"}]}`
 
@@ -55,7 +55,7 @@ func TestWireTest_PlantedSecretNeverLeaves(t *testing.T) {
 	if strings.Contains(captured, planted) {
 		t.Fatalf("SECURITY FAILURE: planted secret leaked upstream:\n%s", captured)
 	}
-	if !strings.Contains(captured, "sk_live_SNAT") {
+	if !strings.Contains(captured, snatTokenPrefix) {
 		t.Fatalf("expected synthetic token upstream, got:\n%s", captured)
 	}
 	// Response streamed back intact.

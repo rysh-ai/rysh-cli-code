@@ -293,15 +293,17 @@ func TestParityAPILoginGate(t *testing.T) {
 }
 
 // dialWS connects a websocket client to a started Server, presenting a login
-// JWT on the ?token= query when one is needed (the same path the browser uses,
-// since a WebSocket handshake cannot carry an Authorization header).
+// JWT as the token subprotocol entry when one is needed (the same path the
+// browser uses, since a WebSocket handshake cannot carry an Authorization
+// header and a token never goes in the URL).
 func dialWS(t *testing.T, port int, token string) *websocket.Conn {
 	t.Helper()
 	url := fmt.Sprintf("ws://127.0.0.1:%d/ws?stream=0", port)
+	dialer := *websocket.DefaultDialer
 	if token != "" {
-		url += "&token=" + token
+		dialer.Subprotocols = []string{TokenSubprotocol, TokenSubprotocolPrefix + token}
 	}
-	conn, resp, err := websocket.DefaultDialer.Dial(url, controlSecretHeaders())
+	conn, resp, err := dialer.Dial(url, controlSecretHeaders())
 	if err != nil {
 		code := 0
 		if resp != nil {

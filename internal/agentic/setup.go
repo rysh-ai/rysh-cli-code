@@ -799,6 +799,17 @@ type HumanoidChannelTools struct {
 	SlackHumanGoverned    func() bool
 	EmailHumanGoverned    func() bool
 	WhatsAppHumanGoverned func() bool
+
+	// SessionTools grants the tools that reach into the session (pane_send,
+	// session_history, agents_list). Only the owner's assistant on channels
+	// whose sender the provider authenticates gets them (security-lead ledger
+	// 193); a team humanoid's contacts are not its owner. pane_inspect is never
+	// on a humanoid (ledger 113). RyshCommand adds rysh_command on top (the
+	// adapter-less owner assistant, as before). PinnedPane, when set, keeps
+	// pane_send to the pane the current turn is pinned to.
+	SessionTools bool
+	RyshCommand  bool
+	PinnedPane   func() string
 }
 
 // CreateHumanoidLLMWithChannelTools builds a humanoid's LLM actor with every
@@ -816,10 +827,21 @@ func (s *Setup) CreateHumanoidLLMWithChannelTools(
 	// No pane_inspect: a humanoid's input comes from outside the session
 	// (channel contacts), and the tool would let one read any pane's screen
 	// into a reply (security-lead ledger 113). Panes and agents keep it.
-	perRegistry.Register("pane_send", tools.NewPaneSendTool(nc, cfg.SessionName))
-	codecs := pub.Codecs()
-	perRegistry.Register("agents_list", tools.NewAgentsListTool(nc, cfg.SessionName, codecs))
-	perRegistry.Register("session_history", tools.NewSessionHistoryTool(nc, cfg.SessionName))
+	// The other session tools only with ct.SessionTools (ledger 193).
+	if ct.SessionTools {
+		paneSend := tools.NewPaneSendTool(nc, cfg.SessionName)
+		if ct.PinnedPane != nil {
+			perRegistry.Register("pane_send", tools.NewPinnedPaneSendTool(paneSend, ct.PinnedPane))
+		} else {
+			perRegistry.Register("pane_send", paneSend)
+		}
+		codecs := pub.Codecs()
+		perRegistry.Register("agents_list", tools.NewAgentsListTool(nc, cfg.SessionName, codecs))
+		perRegistry.Register("session_history", tools.NewSessionHistoryTool(nc, cfg.SessionName))
+		if ct.RyshCommand {
+			perRegistry.Register("rysh_command", tools.NewRyshCommandTool(nc, cfg.SessionName, chatOutputPaneID))
+		}
+	}
 	if js, err := nc.JetStream(); err == nil {
 		perRegistry.Register("context", s.newContextTool(js))
 	}

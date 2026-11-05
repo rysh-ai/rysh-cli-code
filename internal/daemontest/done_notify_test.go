@@ -46,7 +46,12 @@ func TestDetachedDaemonNotifiesWhenALongRunEnds(t *testing.T) {
     webhook: %q
 `, srv.URL))
 
-	if out, code := s.CLI(t, "send", s.Name, "echo "+doneScreenMarker+"; sleep 4", "--mode", "shell"); code != 0 {
+	// The watcher samples (a look every min(doneLook, done_after) = 2s, plus the
+	// 0.5s program poll), so it times a run from its first busy look to its first
+	// idle one and can see it up to ~2.5s short, more under load. A run of
+	// done_after + 2s (sleep 4) then read as under done_after and was dropped
+	// (QA-30, load ~80); sleep 8 leaves three look intervals of slack.
+	if out, code := s.CLI(t, "send", s.Name, "echo "+doneScreenMarker+"; sleep 8", "--mode", "shell"); code != 0 {
 		t.Fatalf("send: exit %d\n%s", code, out)
 	}
 

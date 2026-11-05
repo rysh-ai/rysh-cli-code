@@ -1404,33 +1404,53 @@ func loadFrom(explicitPath string, w io.Writer) (Config, error) {
 	}
 	// The provider api_key may be a ${ENV} secret reference written by
 	// `rysh onboard` (design 004 G4: references in YAML, never literals).
-	// Resolve it through the config-level tiers (.rysh/secrets files, then the
-	// environment) BEFORE applyEnvOverrides: an unresolved reference degrades
-	// to "" so the ANTHROPIC_API_KEY fallback below still applies, instead of
-	// the literal "${VAR}" string being sent to the provider as a key.
-	if EnvRefPattern.MatchString(cfg.APIKey) {
-		expanded, missing := ExpandEnvRefs(cfg.APIKey, func(name string) (string, bool) {
-			return LookupSecretRef(ryshDir, name)
-		})
-		if len(missing) > 0 {
-			cfg.APIKey = ""
-		} else {
-			cfg.APIKey = expanded
-		}
+	// Resolve it BEFORE applyEnvOverrides: an unresolved reference degrades to
+	// "" so the conventional fallback below still applies, instead of the
+	// literal "${VAR}" string being sent to the provider as a key. Only the
+	// provider's own key names, and the environment only for its official URL
+	// (resolveProviderKey).
+	provider, apiURL := effectiveProvider(cfg)
+	if key, kerr := resolveProviderKey(ryshDir, provider, apiURL, cfg.APIKey); kerr != nil {
+		fmt.Fprintf(w, progname.Rewrite("rysh: warning: %s: %v; the value is not used\n"), file, kerr)
+		cfg.APIKey = ""
+	} else {
+		cfg.APIKey = key
 	}
 	// The web login travels the same way: `##rysh web start --username/--password`
 	// writes the values into the secrets tier and the ${NAME} references into
 	// [web]. An unresolved reference degrades to "" — an auto-start then reports
 	// a missing login instead of serving the UI behind the literal "${...}".
-	cfg.WebUsername = resolveSecretRef(ryshDir, cfg.WebUsername)
-	cfg.WebPassword = resolveSecretRef(ryshDir, cfg.WebPassword)
-	cfg.Email.Address = resolveSecretRef(ryshDir, cfg.Email.Address)
-	cfg.Email.Username = resolveSecretRef(ryshDir, cfg.Email.Username)
-	cfg.Email.Password = resolveSecretRef(ryshDir, cfg.Email.Password)
-	cfg.Email.MailgunDomain = resolveSecretRef(ryshDir, cfg.Email.MailgunDomain)
-	cfg.Email.MailgunBaseURL = resolveSecretRef(ryshDir, cfg.Email.MailgunBaseURL)
-	cfg.Email.MailgunAPIKey = resolveSecretRef(ryshDir, cfg.Email.MailgunAPIKey)
-	cfg.Email.MailgunWebhookSigningKey = resolveSecretRef(ryshDir, cfg.Email.MailgunWebhookSigningKey)
+	// The company connect key: `rysh connect` and `##config load` keep it in
+	// the secrets tier and write ${RYSH_UPSTREAM_API_KEY} here (CD2). Only
+	// that exact reference resolves; any other is refused (ledger 167 X1).
+	if key, kerr := ResolveUpstreamKey(ryshDir, cfg.Upstream.APIKey); kerr != nil {
+		fmt.Fprintf(w, progname.Rewrite("rysh: warning: %s: %v; the upstream key is not used\n"), file, kerr)
+		cfg.Upstream.APIKey = ""
+	} else {
+		cfg.Upstream.APIKey = key
+	}
+	// Each credential field may name only its own secrets, read from the
+	// secrets tier beside this file (resolveFieldRef); a URL field takes none.
+	for _, f := range []struct {
+		field string
+		v     *string
+	}{
+		{"web.username", &cfg.WebUsername},
+		{"web.password", &cfg.WebPassword},
+		{"email.address", &cfg.Email.Address},
+		{"email.username", &cfg.Email.Username},
+		{"email.password", &cfg.Email.Password},
+		{"email.mailgun_domain", &cfg.Email.MailgunDomain},
+		{"email.mailgun_base_url", &cfg.Email.MailgunBaseURL},
+		{"email.mailgun_api_key", &cfg.Email.MailgunAPIKey},
+		{"email.mailgun_webhook_signing_key", &cfg.Email.MailgunWebhookSigningKey},
+	} {
+		val, ferr := resolveFieldRef(ryshDir, f.field, *f.v)
+		if ferr != nil {
+			fmt.Fprintf(w, progname.Rewrite("rysh: warning: %s: %v; the value is not used\n"), file, ferr)
+		}
+		*f.v = val
+	}
 	cfg = applyEnvOverrides(cfg)
 	// Fold the automation model-seat defaults into every kind (recipe >
 	// automation.<kind> > automation.loop > built-ins), so the internal loop
@@ -2221,7 +2241,7 @@ func applyEnvOverrides(cfg Config) Config {
 	}
 	if v := env("RYSH_API_KEY"); v != "" {
 		cfg.APIKey = v
-	} else if cfg.APIKey == "" {
+	} else if _, apiURL := effectiveProvider(cfg); cfg.APIKey == "" && providerKeyFamilyOf(cfg.ProviderName).envAllowed(apiURL) {
 		// Provider-conventional fallback, keyed by the provider selected above
 		// (RYSH_PROVIDER wins over the config file at this point), so
 		// `RYSH_PROVIDER=<name> <NAME>_API_KEY=... rysh` needs no rysh-specific
@@ -2229,6 +2249,9 @@ func applyEnvOverrides(cfg Config) Config {
 		// resolves the same thing for a per-pane/humanoid provider override —
 		// the two disagreeing is how a session ends up authenticating one way
 		// at the top level and another inside a pane.
+		//
+		// Only while the provider URL is empty or official: a custom URL named
+		// by a config file never receives a key from the environment.
 		//
 		// A FOREIGN key must never flow to a provider: handing OpenAI or Gemini
 		// an ambient ANTHROPIC_API_KEY produces a confusing upstream 401 that

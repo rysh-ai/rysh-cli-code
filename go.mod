@@ -2,7 +2,7 @@ module github.com/rysh-ai/rysh-cli-code
 
 go 1.26.0
 
-require github.com/rysh-ai/rysh-cli-shared v0.2.14
+require github.com/rysh-ai/rysh-cli-shared v0.2.15
 
 require (
 	connectrpc.com/connect v1.21.0

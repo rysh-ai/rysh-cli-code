@@ -58,8 +58,8 @@ func TestPaneInspect_PaneAnswers(t *testing.T) {
 	if out.Error != "" {
 		t.Fatalf("pane_inspect failed against a live pane: %s", out.Error)
 	}
-	if !strings.Contains(out.Content, `"snapshot"`) {
-		t.Fatalf("content = %q, want the pane snapshot reply", out.Content)
+	if !strings.Contains(out.Content, `"pane_id"`) {
+		t.Fatalf("content = %q, want the compact pane view", out.Content)
 	}
 	if out.Metadata["pane_id"] != "pane-1" {
 		t.Fatalf("metadata = %v, want pane_id pane-1", out.Metadata)

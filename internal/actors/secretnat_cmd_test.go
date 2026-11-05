@@ -34,17 +34,17 @@ func newSnatTestWorkspace(t *testing.T, cfgSecrets map[string]map[string]string)
 // it back.
 func TestPushKnownSecrets(t *testing.T) {
 	w := newSnatTestWorkspace(t, map[string]map[string]string{
-		"ws-main":  {"STRIPE_KEY": "sk_live_4eC39HqLyjWDarjtT1zdp7dc"},
+		"ws-main":  {"STRIPE_KEY": stripeLiveKey("FAKE0000FAKE0000FAKE0000")},
 		"tab-1111": {"TAB_TOKEN": "tabvalue-123456"},
 	})
 	w.pushKnownSecrets()
 
 	sess := w.snatManager().Session("pane-1")
-	out := sess.Sanitize("use sk_live_4eC39HqLyjWDarjtT1zdp7dc and tabvalue-123456")
+	out := sess.Sanitize("use " + stripeLiveKey("FAKE0000FAKE0000FAKE0000") + " and tabvalue-123456")
 	if out != "use ${STRIPE_KEY} and ${TAB_TOKEN}" {
 		t.Fatalf("known tier not applied: %q", out)
 	}
-	if got := sess.Restore(out); !strings.Contains(got, "sk_live_4eC39") || !strings.Contains(got, "tabvalue-123456") {
+	if got := sess.Restore(out); !strings.Contains(got, stripeLiveKey("FAKE0000")) || !strings.Contains(got, "tabvalue-123456") {
 		t.Fatalf("restore failed: %q", got)
 	}
 }
@@ -112,7 +112,7 @@ func TestSnatCommandOutputNeverLeaksValues(t *testing.T) {
 func TestSnatCommandGetRevealsLocally(t *testing.T) {
 	const detected = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
 	w := newSnatTestWorkspace(t, map[string]map[string]string{
-		"ws-main": {"STRIPE_KEY": "sk_live_51H8KNOWNsecretVALUE0000abcd"},
+		"ws-main": {"STRIPE_KEY": stripeLiveKey("KNOWN000KNOWN000KNOWN000")},
 	})
 	w.pushKnownSecrets()
 	sess := w.snatManager().Session("pane-1")
@@ -136,13 +136,13 @@ func TestSnatCommandGetRevealsLocally(t *testing.T) {
 	// get a known-tier ${NAME} -> real value.
 	out.Reset()
 	w.handleSnatSubcommand(&out, "pane-1", []string{"get", "${STRIPE_KEY}"})
-	if !strings.Contains(out.String(), "sk_live_51H8KNOWNsecretVALUE0000abcd") {
+	if !strings.Contains(out.String(), stripeLiveKey("KNOWN000KNOWN000KNOWN000")) {
 		t.Fatalf("##snat get ${NAME} did not reveal known value:\n%s", out.String())
 	}
 
 	// unknown token -> graceful refusal, no panic.
 	out.Reset()
-	w.handleSnatSubcommand(&out, "pane-1", []string{"get", "sk_live_SNAT999999"})
+	w.handleSnatSubcommand(&out, "pane-1", []string{"get", stripeLiveKey("SNAT999999")})
 	if !strings.Contains(out.String(), "no mapping") {
 		t.Fatalf("expected 'no mapping' for unknown token:\n%s", out.String())
 	}
@@ -154,7 +154,7 @@ func TestSnatCommandMode(t *testing.T) {
 	var out strings.Builder
 	w.handleSnatSubcommand(&out, "pane-1", []string{"mode", "private"})
 	sess := w.snatManager().Session("pane-1")
-	got := sess.Sanitize("sk_live_4eC39HqLyjWDarjtT1zdp7dc")
+	got := sess.Sanitize(stripeLiveKey("FAKE0000FAKE0000FAKE0000"))
 	if !strings.Contains(got, "SECRET_TOKEN_001") {
 		t.Fatalf("private mode not applied: %q", got)
 	}

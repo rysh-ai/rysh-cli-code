@@ -7,13 +7,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/rysh-ai/rysh-cli-code/internal/company"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 )
 
@@ -30,6 +34,7 @@ const (
 	companySnapshotTTL        = 10 * time.Second
 	companyToolDefaultLimit   = 50
 	companyToolMaxLimit       = 500
+	companyLedgerMaxLimit     = 200 // the server's page cap (accountant design note §4)
 )
 
 type companyFetchFunc func(ctx context.Context) (*msg.CompanySnapshot, error)
@@ -39,6 +44,7 @@ type companyFetchFunc func(ctx context.Context) (*msg.CompanySnapshot, error)
 // not fetch the company three times.
 type companyTools struct {
 	fetch companyFetchFunc
+	books companyBooks // nil: the bookkeeping tools answer "not available"
 	now   func() time.Time
 
 	mu     sync.Mutex
@@ -96,11 +102,127 @@ var companyToolSpecs = []companyToolSpec{
 		Description: "The company's managed services and their state: mailbox, phone number, selected services and messaging channels.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
 	},
+	{
+		Name:        "company_deadlines",
+		Description: "The company's filing deadlines from Companies House: annual accounts and confirmation statement, each with next_due, next_made_up_to and overdue. {linked:false} when no company number is linked yet.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
+	},
+	{
+		Name:        "company_ledger",
+		Description: "The owner's bookkeeping ledger, newest first: entries (entry_date, direction in/out, amount_pence, currency, category, note) and totals over the whole filtered range, all amounts in integer pence. Read-only. Optional from/to dates (YYYY-MM-DD, inclusive), category, direction and limit; for the next page pass before = the previous page's next_before.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"from":{"type":"string","description":"first date, YYYY-MM-DD"},"to":{"type":"string","description":"last date, YYYY-MM-DD"},"category":{"type":"string","description":"only this category key"},"direction":{"type":"string","enum":["in","out"]},"limit":{"type":"integer","minimum":1,"maximum":200,"description":"at most this many entries (server default 100)"},"before":{"type":"string","description":"next_before from the previous page"}},"additionalProperties":false}`),
+	},
+}
+
+// companyBooks reads the accountant routes for the bound company (AC4).
+type companyBooks interface {
+	Deadlines(ctx context.Context) (json.RawMessage, error)
+	Ledger(ctx context.Context, q url.Values) (json.RawMessage, error)
+}
+
+var (
+	companyCategoryRe = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
+	// before is the server's opaque next_before cursor; it is echoed back, so
+	// only a plain token shape is accepted.
+	companyCursorRe = regexp.MustCompile(`^[A-Za-z0-9:._~+-]{1,200}$`)
+)
+
+// ledgerQuery validates company_ledger's arguments into the server's query.
+// Unknown fields are refused, so a typo is an error the model sees, not a
+// silently unfiltered page.
+func ledgerQuery(args json.RawMessage) (url.Values, error) {
+	var in struct {
+		From      string `json:"from"`
+		To        string `json:"to"`
+		Category  string `json:"category"`
+		Direction string `json:"direction"`
+		Limit     int    `json:"limit"`
+		Before    string `json:"before"`
+	}
+	if len(bytes.TrimSpace(args)) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(args))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&in); err != nil {
+			return nil, err
+		}
+	}
+	q := url.Values{}
+	for _, d := range []struct{ key, val string }{{"from", in.From}, {"to", in.To}} {
+		if d.val == "" {
+			continue
+		}
+		if _, err := time.Parse("2006-01-02", d.val); err != nil {
+			return nil, fmt.Errorf("%s must be a date as YYYY-MM-DD", d.key)
+		}
+		q.Set(d.key, d.val)
+	}
+	if in.Category != "" {
+		if !companyCategoryRe.MatchString(in.Category) {
+			return nil, errors.New("category must be a category key (lowercase letters, digits, _ or -)")
+		}
+		q.Set("category", in.Category)
+	}
+	switch in.Direction {
+	case "":
+	case "in", "out":
+		q.Set("direction", in.Direction)
+	default:
+		return nil, errors.New(`direction must be "in" or "out"`)
+	}
+	if in.Before != "" {
+		if !companyCursorRe.MatchString(in.Before) {
+			return nil, errors.New("before must be the next_before value of the previous page")
+		}
+		q.Set("before", in.Before)
+	}
+	switch {
+	case in.Limit < 0:
+		return nil, errors.New("limit must be positive")
+	case in.Limit > companyLedgerMaxLimit:
+		q.Set("limit", fmt.Sprint(companyLedgerMaxLimit))
+	case in.Limit > 0:
+		q.Set("limit", fmt.Sprint(in.Limit))
+	}
+	return q, nil
+}
+
+// callBooks runs company_deadlines / company_ledger. They read the server on
+// every call (no snapshot) and pass its JSON through.
+func (t *companyTools) callBooks(ctx context.Context, name string, args json.RawMessage) (string, bool) {
+	if t.books == nil {
+		return "the bookkeeping tools are not available in this session", true
+	}
+	var raw json.RawMessage
+	var err error
+	if name == "company_deadlines" {
+		raw, err = t.books.Deadlines(ctx)
+	} else {
+		q, qerr := ledgerQuery(args)
+		if qerr != nil {
+			return "invalid arguments: " + qerr.Error(), true
+		}
+		raw, err = t.books.Ledger(ctx, q)
+	}
+	switch {
+	case errors.Is(err, company.ErrBooksNotEnabled):
+		return "the bookkeeping assistant is not enabled for this company: the owner turns on " +
+			"'Bookkeeping assistant' in the company's services on rysh.ai", true
+	case err != nil:
+		return "company books unavailable: " + err.Error(), true
+	}
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, raw, "", "  "); err != nil {
+		return "the server answered with invalid JSON", true
+	}
+	return buf.String(), false
 }
 
 // call runs one tool. The text is JSON; isErr marks a failure the model should
 // read as such (the server unreachable, the key revoked, an unknown tool).
 func (t *companyTools) call(ctx context.Context, name string, args json.RawMessage) (text string, isErr bool) {
+	if name == "company_deadlines" || name == "company_ledger" {
+		return t.callBooks(ctx, name, args)
+	}
 	var in struct {
 		Status string `json:"status"`
 		Kind   string `json:"kind"`

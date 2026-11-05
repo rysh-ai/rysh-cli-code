@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -106,6 +107,26 @@ type Bus struct {
 	log     *slog.Logger
 }
 
+// shownBusURL is a bus URL as an error may show it: any user info (a user and
+// password, or a token given as the user) becomes REDACTED. url.Redacted is
+// not enough: it masks only the password. A comma list of servers (as
+// nats.Connect takes) is redacted entry by entry; an entry that does not parse
+// is not shown at all.
+func shownBusURL(raw string) string {
+	parts := strings.Split(raw, ",")
+	for i, part := range parts {
+		u, err := url.Parse(strings.TrimSpace(part))
+		if err != nil || u.Host == "" {
+			return "(unparseable bus URL)"
+		}
+		if u.User != nil {
+			u.User = url.User("REDACTED")
+		}
+		parts[i] = u.String()
+	}
+	return strings.Join(parts, ",")
+}
+
 // New creates and starts a Bus according to cfg.
 func New(cfg Config) (*Bus, error) {
 	b := &Bus{attach: cfg.Attach, log: cfg.Logger}
@@ -132,11 +153,11 @@ func New(cfg Config) (*Bus, error) {
 						if tokErr != nil {
 							cause = tokErr
 						}
-						return nil, fmt.Errorf("connect to external NATS at %s: %w", cfg.URL, bustoken.Missing(port, cause))
+						return nil, fmt.Errorf("connect to external NATS at %s: %w", shownBusURL(cfg.URL), bustoken.Missing(port, cause))
 					}
 				}
 			}
-			return nil, fmt.Errorf("connect to external NATS at %s: %w", cfg.URL, err)
+			return nil, fmt.Errorf("connect to external NATS at %s: %w", shownBusURL(cfg.URL), err)
 		}
 		b.nc = nc
 

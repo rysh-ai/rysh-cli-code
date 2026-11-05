@@ -2,14 +2,14 @@
 
 package main
 
+// The open-source export prunes commands_doc_test.go (docs/ is not exported), and
+// family_cmd_test.go also reads the dispatch list, so the parser lives here.
+
 import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
-	"regexp"
 	"strconv"
-	"strings"
 	"testing"
 )
 
@@ -79,29 +79,4 @@ func identName(e ast.Expr) string {
 		return id.Name
 	}
 	return ""
-}
-
-// Every command the binary dispatches has its line in docs/commands.md.
-func TestCommandsDocListsEveryCommand(t *testing.T) {
-	doc, err := os.ReadFile("../../docs/commands.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	names := dispatchedCommands(t)
-	// Non-empty first: a parser that finds nothing would pass vacuously.
-	if len(names) < 40 {
-		t.Fatalf("read only %d commands from main.go: %v", len(names), names)
-	}
-	for _, n := range names {
-		if strings.HasPrefix(n, "-") {
-			continue // flag aliases of version/help
-		}
-		// `rysh NAME …`, or NAME inside a `rysh a\|NAME\|b …` alternation (the
-		// table escapes its pipes).
-		const alt = `\\\|`
-		line := regexp.MustCompile("`rysh ([a-z-]+" + alt + ")*" + regexp.QuoteMeta(n) + "([` ]|" + alt + ")")
-		if !line.Match(doc) {
-			t.Errorf("docs/commands.md has no line for `rysh %s`", n)
-		}
-	}
 }

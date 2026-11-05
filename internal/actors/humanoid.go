@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/asynkron/protoactor-go/actor"
@@ -125,6 +126,9 @@ type HumanoidActor struct {
 	// panePins maps "channelType/threadID" to the pane that thread is pinned
 	// to with /use (E33 slice E2, design 086). In memory only.
 	panePins map[string]panePin
+	// turnPin is the pane the running turn is pinned to ("" for none),
+	// read by the humanoid's pane_send (ledger 193 c).
+	turnPin atomic.Value
 	// listPanes stands in for the workspace snapshot in tests.
 	listPanes func() ([]paneRef, error)
 	// uiFocus tracks which email the desktop email client currently has open (or
@@ -564,20 +568,29 @@ func (h *HumanoidActor) Receive(ctx actor.Context) {
 			h.warnNoToolSupport(h.humanGovernedChannels())
 		}
 
-		var agActor *agentic.LLMPromptExecutionActor
-		if toolsOK && (ct.WhatsApp != nil || ct.Email != nil || ct.Slack != nil) {
+		// Every humanoid gets the humanoid registry (never the general agent
+		// one): the session tools only as the owner's assistant on channels
+		// that authenticate their sender (security-lead ledger 193), and
+		// pane_send kept to the pinned pane while a pin applies.
+		profile := ""
+		if h.isAssistantProfile() {
+			profile = "assistant"
+		}
+		ct.SessionTools = humanoidSessionTools(profile, h.contacts)
+		ct.PinnedPane = h.currentTurnPin
+		hasAdapters := ct.WhatsApp != nil || ct.Email != nil || ct.Slack != nil
+		if toolsOK && hasAdapters {
 			h.drafts = channels.NewDraftStore()
 			ct.Drafts = h.drafts
-			agActor = agSetup.CreateHumanoidLLMWithChannelTools(
-				h.name, h.cfg, h.pub, h.nc,
-				h.systemPrompt, h.activeChatPaneID, ct,
-			)
 		} else {
-			agActor = agSetup.CreateAgentLLMPromptExecutionActor(
-				h.name, h.cfg, h.pub, h.nc,
-				h.systemPrompt, h.activeChatPaneID,
-			)
+			// No channel toolset (none configured, or the provider cannot call
+			// tools): the adapter-less owner assistant keeps rysh_command.
+			ct = agentic.HumanoidChannelTools{SessionTools: ct.SessionTools, RyshCommand: ct.SessionTools, PinnedPane: ct.PinnedPane}
 		}
+		agActor := agSetup.CreateHumanoidLLMWithChannelTools(
+			h.name, h.cfg, h.pub, h.nc,
+			h.systemPrompt, h.activeChatPaneID, ct,
+		)
 		// Humanoids run headless (driven by external channels with no human at
 		// the keyboard), so tool calls are auto-approved by default — no
 		// approval pane, no waiting. `auto_approve: false` in the skill file
@@ -2029,6 +2042,9 @@ func (h *HumanoidActor) processInbound(m *msg.MsgHumanoidInboundMessage) {
 	prompt := h.buildContextualPrompt(m, conv)
 	if pin, ok := h.panePins[convKey]; ok {
 		prompt = pinnedPrompt(pin, prompt)
+		h.turnPin.Store(pin.ID)
+	} else {
+		h.turnPin.Store("")
 	}
 	// Human-governed Slack: replace the auto-reply prompt with a draft-only
 	// instruction — the AI prepares the reply via slack_draft and shows it; the

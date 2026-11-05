@@ -55,3 +55,55 @@ func TestHumanoidRegistryLacksPaneInspect(t *testing.T) {
 		t.Error("the agent registry lost pane_inspect")
 	}
 }
+
+// The tools that reach into the session (pane_send, session_history,
+// agents_list, rysh_command) are not on a humanoid's registry unless the
+// caller grants SessionTools; pane_inspect never is. rysh_command comes only
+// with RyshCommand (the adapter-less owner assistant, as before).
+func TestHumanoidSessionToolsOnlyWhenGranted(t *testing.T) {
+	os.Setenv("RYSH_AGENTIC_ENABLED", "true")
+	defer os.Unsetenv("RYSH_AGENTIC_ENABLED")
+	srv, err := server.NewServer(&server.Options{Host: "127.0.0.1", Port: -1, NoLog: true, NoSigs: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Start()
+	if !srv.ReadyForConnections(5 * time.Second) {
+		t.Fatal("nats not ready")
+	}
+	defer srv.Shutdown()
+	nc, err := nats.Connect(srv.ClientURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	cfg := config.Config{ProviderName: "claude"}
+	s := NewSetupAlwaysOn(cfg, nil)
+	pub := msg.NewNATSPublisher(nc, msg.DefaultCodecRegistry())
+	session := []string{"pane_send", "session_history", "agents_list", "rysh_command", "pane_inspect"}
+
+	team := s.CreateHumanoidLLMWithChannelTools("team", cfg, pub, nc, "", "", HumanoidChannelTools{})
+	for _, name := range session {
+		if _, ok := team.TurnTools().Get(name); ok {
+			t.Errorf("a humanoid without SessionTools offers %s", name)
+		}
+	}
+	owner := s.CreateHumanoidLLMWithChannelTools("owner", cfg, pub, nc, "", "", HumanoidChannelTools{SessionTools: true})
+	for _, name := range []string{"pane_send", "session_history", "agents_list"} {
+		if _, ok := owner.TurnTools().Get(name); !ok {
+			t.Errorf("a humanoid with SessionTools lacks %s", name)
+		}
+	}
+	for _, name := range []string{"pane_inspect", "rysh_command"} {
+		if _, ok := owner.TurnTools().Get(name); ok {
+			t.Errorf("a humanoid with SessionTools (no RyshCommand) offers %s", name)
+		}
+	}
+	adapterless := s.CreateHumanoidLLMWithChannelTools("tg", cfg, pub, nc, "", "", HumanoidChannelTools{SessionTools: true, RyshCommand: true})
+	if _, ok := adapterless.TurnTools().Get("rysh_command"); !ok {
+		t.Error("the adapter-less owner assistant lost rysh_command")
+	}
+	if _, ok := adapterless.TurnTools().Get("pane_inspect"); ok {
+		t.Error("the adapter-less owner assistant offers pane_inspect")
+	}
+}

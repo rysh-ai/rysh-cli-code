@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -54,6 +55,7 @@ func runCompanyCLI(cfg config.Config, args []string) error {
 	tools := newCompanyTools(func(ctx context.Context) (*msg.CompanySnapshot, error) {
 		return client.Fetch(ctx, companyID)
 	})
+	tools.books = clientBooks{client: client, companyID: companyID}
 
 	switch sub {
 	case "mcp":
@@ -160,4 +162,18 @@ func formatCompanyMinor(minor int64, currency string) string {
 		cur = "GBP"
 	}
 	return fmt.Sprintf("%s %d.%02d", cur, minor/100, minor%100)
+}
+
+// clientBooks binds the company client's accountant reads to one company.
+type clientBooks struct {
+	client    *company.Client
+	companyID string
+}
+
+func (b clientBooks) Deadlines(ctx context.Context) (json.RawMessage, error) {
+	return b.client.Deadlines(ctx, b.companyID)
+}
+
+func (b clientBooks) Ledger(ctx context.Context, q url.Values) (json.RawMessage, error) {
+	return b.client.Ledger(ctx, b.companyID, q)
 }

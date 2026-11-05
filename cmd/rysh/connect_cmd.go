@@ -24,7 +24,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -65,10 +67,12 @@ type connectClaim struct {
 }
 
 // connectResult is what --json prints. The key is deliberately absent: it is
-// in the config file the caller adopts, and stdout is often a log.
+// in the secrets file named here, and stdout is often a log. SecretsFile is
+// absolute so the desktop app checks that exact file (CD2).
 type connectResult struct {
 	Directory   string `json:"directory"`
 	ConfigFile  string `json:"config_file"`
+	SecretsFile string `json:"secrets_file"`
 	Session     string `json:"session"`
 	ServerURL   string `json:"server_url"`
 	WorkspaceID string `json:"workspace_id"`
@@ -103,13 +107,13 @@ func runConnect(cfg config.Config, logger *slog.Logger, args []string) error {
 	if err != nil {
 		return err
 	}
-	cfgPath, err := writeCompanyWorkspace(dir, claim)
+	cfgPath, secretsPath, err := writeCompanyWorkspace(dir, claim)
 	if err != nil {
 		return err
 	}
 
 	result := connectResult{
-		Directory: dir, ConfigFile: cfgPath, Session: claim.Company.Slug,
+		Directory: dir, ConfigFile: cfgPath, SecretsFile: secretsPath, Session: claim.Company.Slug,
 		ServerURL: claim.ServerURL, WorkspaceID: claim.WorkspaceID,
 	}
 	result.Company.ID = claim.Company.ID
@@ -155,6 +159,9 @@ func claimCompany(server, code, vehicle, device string) (*connectClaim, error) {
 	if !strings.HasPrefix(server, "http://") && !strings.HasPrefix(server, "https://") {
 		return nil, fmt.Errorf("server must be a URL such as https://letchat.ai, got %q", server)
 	}
+	if err := checkClaimServer(server, server); err != nil {
+		return nil, err
+	}
 	if code == "" {
 		return nil, errors.New("the connect code is empty")
 	}
@@ -165,8 +172,7 @@ func claimCompany(server, code, vehicle, device string) (*connectClaim, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := connectHTTPClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("could not reach %s — check the URL and your connection", server)
 	}
@@ -192,7 +198,61 @@ func claimCompany(server, code, vehicle, device string) (*connectClaim, error) {
 	if claim.ServerURL == "" {
 		claim.ServerURL = server
 	}
+	if err := checkClaimServer(server, claim.ServerURL); err != nil {
+		return nil, err
+	}
 	return &claim, nil
+}
+
+// connectHTTPClient is the client the claim is sent with (a test seam: tests
+// swap in an httptest TLS client).
+var connectHTTPClient = func() *http.Client { return &http.Client{Timeout: 15 * time.Second} }
+
+// checkClaimServer refuses a connection that would carry the connect code or
+// the key over plain http to anything but this machine, or move a link opened
+// over https somewhere weaker (security-lead ledger 190). The server_url the
+// claim names is written into the workspace config and carries the key from
+// then on, so for an https link it must be https on the same host and port;
+// http, for the link or the claim, is allowed only to a loopback address.
+// checkClaimServer(link, link) checks the link alone, before anything is sent.
+func checkClaimServer(link, claimed string) error {
+	l, err := url.Parse(strings.TrimRight(strings.TrimSpace(link), "/"))
+	if err != nil || l.Host == "" {
+		return fmt.Errorf("server must be a URL such as https://letchat.ai, got %q", link)
+	}
+	if l.Scheme == "http" && !isLoopbackHost(l.Hostname()) {
+		return fmt.Errorf("refusing %s: plain http is allowed only to a loopback server; use https", link)
+	}
+	c, err := url.Parse(strings.TrimRight(strings.TrimSpace(claimed), "/"))
+	if err != nil || c.Host == "" {
+		return fmt.Errorf("%s returned a server_url that is not a URL; refusing the claim", link)
+	}
+	switch c.Scheme {
+	case "https":
+	case "http":
+		if !isLoopbackHost(c.Hostname()) {
+			return fmt.Errorf("%s answered with server_url http://%s; refusing the claim: plain http is allowed only to a loopback server, use https", link, c.Host)
+		}
+	default:
+		return fmt.Errorf("%s answered with a server_url that is not https; refusing the claim", link)
+	}
+	if l.Scheme == "https" {
+		if c.Scheme != "https" {
+			return fmt.Errorf("%s answered with server_url %s://%s; refusing the claim: a link opened over https stays on https", link, c.Scheme, c.Host)
+		}
+		if !strings.EqualFold(c.Host, l.Host) {
+			return fmt.Errorf("%s answered with server_url on another host (%s); refusing the claim: the key stays with the server you opened", link, c.Host)
+		}
+	}
+	return nil
+}
+
+func isLoopbackHost(h string) bool {
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }
 
 // companyWorkspaceDir is <base>/<slug>: --dir wins, then $RYSH_COMPANIES_DIR,
@@ -222,45 +282,48 @@ func companyWorkspaceDir(explicit, slug string) (string, error) {
 	return filepath.Join(base, slug), nil
 }
 
-// writeCompanyWorkspace creates the directory (if needed) and writes the
-// upstream connection, the company block and the session name into its
-// rysh.config.yaml. A directory that already belongs to ANOTHER company is
-// refused: the connect key would otherwise be written into someone else's
-// workspace and both companies would fight over one session name.
-func writeCompanyWorkspace(dir string, claim *connectClaim) (string, error) {
+// writeCompanyWorkspace creates the directory (if needed), stores the key in
+// its .rysh/secrets tier and writes the upstream connection (the key as the
+// ${RYSH_UPSTREAM_API_KEY} reference), the company block and the session name
+// into its rysh.config.yaml. A plain key left by an older connect is replaced.
+// A directory that already belongs to ANOTHER company is refused: the connect
+// key would otherwise be written into someone else's workspace and both
+// companies would fight over one session name. Returns the config path and
+// the secrets file path.
+func writeCompanyWorkspace(dir string, claim *connectClaim) (string, string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("could not create %s: %w", dir, err)
+		return "", "", fmt.Errorf("could not create %s: %w", dir, err)
 	}
 	cfgPath := filepath.Join(dir, "rysh.config.yaml")
 	if _, err := os.Stat(cfgPath); err == nil {
 		existing := config.LoadFrom(cfgPath)
 		if existing.Company.ID != "" && existing.Company.ID != claim.Company.ID {
-			return "", fmt.Errorf("%s already belongs to company %q (%s); pass --dir <path> to connect this one elsewhere",
+			return "", "", fmt.Errorf("%s already belongs to company %q (%s); pass --dir <path> to connect this one elsewhere",
 				dir, existing.Company.Name, existing.Company.Slug)
 		}
 	} else {
 		header := "# rysh company workspace — written by `rysh connect` (design 037).\n" +
-			"# upstream.api_key is a READ-ONLY key for this company's workspace; revoke it from the dashboard.\n" +
+			"# upstream.api_key names a READ-ONLY key for this company's workspace, stored in .rysh/secrets;\n" +
+			"# revoke it from the dashboard.\n" +
 			"rysh:\n  session_name: " + claim.Company.Slug + "\n"
 		if err := os.WriteFile(cfgPath, []byte(header), 0o600); err != nil {
-			return "", fmt.Errorf("could not write %s: %w", cfgPath, err)
+			return "", "", fmt.Errorf("could not write %s: %w", cfgPath, err)
 		}
 	}
-	if err := config.SetUpstreamConnection(cfgPath, claim.ServerURL, claim.APIKey, claim.WorkspaceID); err != nil {
-		return "", fmt.Errorf("write upstream connection: %w", err)
-	}
-	if err := config.SetCompanyBlock(cfgPath, config.CompanyConfig{
-		ID: claim.Company.ID, Name: claim.Company.Name, Slug: claim.Company.Slug,
-		FQDN: claim.Company.FQDN, Server: claim.ServerURL,
-	}); err != nil {
-		return "", fmt.Errorf("write company block: %w", err)
+	secretsPath, err := config.WriteCompanyBinding(cfgPath, config.RyshDirForConfigFile(cfgPath), &config.CompanyBinding{
+		URL: claim.ServerURL, APIKey: claim.APIKey, WorkspaceID: claim.WorkspaceID,
+		Company: config.CompanyConfig{
+			ID: claim.Company.ID, Name: claim.Company.Name, Slug: claim.Company.Slug,
+			FQDN: claim.Company.FQDN, Server: claim.ServerURL,
+		},
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("write company binding: %w", err)
 	}
 	if err := config.SetSessionName(cfgPath, claim.Company.Slug); err != nil {
-		return "", fmt.Errorf("write session name: %w", err)
+		return "", "", fmt.Errorf("write session name: %w", err)
 	}
-	// The key is in the file: keep it to the owner.
-	_ = os.Chmod(cfgPath, 0o600)
-	return cfgPath, nil
+	return cfgPath, secretsPath, nil
 }
 
 func defaultConnectDevice() string {

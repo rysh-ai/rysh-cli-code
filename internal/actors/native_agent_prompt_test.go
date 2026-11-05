@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/config"
 )
@@ -198,9 +199,10 @@ func TestThePromptLineDeliversOnceAndFailsClosed(t *testing.T) {
 			line := nativeAgentCommand(nativeAgentSpec{Kind: nativeAgentClaude, SessionID: promptTestPane, PromptFile: staged})
 
 			run := func() {
-				cmd := exec.Command(shPath, "-c", line)
-				cmd.Env = append(os.Environ(), "PATH="+bin+":/usr/bin:/bin")
-				_ = cmd.Run() // a failed read is EXPECTED to exit non-zero below
+				// A failed read is EXPECTED to exit non-zero below; a hang is not.
+				if runShellLine(shPath, line, append(os.Environ(), "PATH="+bin+":/usr/bin:/bin"), 20*time.Second) {
+					t.Fatalf("shell line did not finish in 20s (its process group was killed)\nline: %s", line)
+				}
 			}
 			run()
 			got, err := os.ReadFile(argv)

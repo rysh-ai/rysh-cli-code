@@ -3,7 +3,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -121,7 +123,9 @@ func readSecretFile(path string) (string, bool) {
 // <ryshDir>/secrets/<scope>/<name> with restrictive permissions (0700 dirs,
 // 0600 file) and a protective .gitignore at the secrets root, mirroring the
 // ##secret command's persisted-secret layout so the runtime store resolves it.
-// Returns the written path.
+// The file is replaced atomically (temp file + rename in the same directory),
+// so a reader never sees a half-written value and a symlink planted at the
+// path is replaced, not followed. Returns the written path, absolute.
 func WriteSecret(ryshDir, scope, name, value string) (string, error) {
 	if !secretNameOK(name) {
 		return "", fmt.Errorf("invalid secret name %q (use letters, digits and underscore; must not start with a digit)", name)
@@ -129,10 +133,30 @@ func WriteSecret(ryshDir, scope, name, value string) (string, error) {
 	if scope == "" {
 		scope = "default"
 	}
+	if abs, err := filepath.Abs(ryshDir); err == nil {
+		ryshDir = abs
+	}
 	root := filepath.Join(ryshDir, "secrets")
 	dir := filepath.Join(root, scope)
+	// Never through a symlink or into another user's directory (ledger 167
+	// X2): checked before MkdirAll, which would follow a symlinked root, and
+	// again after it.
+	for _, d := range []string{root, dir} {
+		if err := checkSecretsDir(d, true); err != nil {
+			return "", err
+		}
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create %s: %w", dir, err)
+	}
+	// MkdirAll leaves an existing directory's mode alone: tighten both levels.
+	for _, d := range []string{root, dir} {
+		if err := checkSecretsDir(d, false); err != nil {
+			return "", err
+		}
+		if err := os.Chmod(d, 0o700); err != nil {
+			return "", fmt.Errorf("restrict %s: %w", d, err)
+		}
 	}
 	// Protective .gitignore so a project that tracks .rysh/ never commits
 	// plaintext secrets (same content the ##secret command writes).
@@ -141,10 +165,90 @@ func WriteSecret(ryshDir, scope, name, value string) (string, error) {
 		_ = os.WriteFile(gi, []byte("# rysh secrets — never commit these\n*\n!.gitignore\n"), 0o600)
 	}
 	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+	tmp, err := os.CreateTemp(dir, "."+name+".tmp-*") // created 0600
+	if err != nil {
 		return "", fmt.Errorf("write secret file: %w", err)
 	}
+	_, werr := tmp.Write([]byte(value))
+	cerr := tmp.Close()
+	if werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Rename(tmp.Name(), path)
+	}
+	if werr != nil {
+		_ = os.Remove(tmp.Name())
+		return "", fmt.Errorf("write secret file: %w", werr)
+	}
 	return path, nil
+}
+
+// configFieldRefs lists, per config field, the only secret names a ${NAME}
+// reference in that field may use. A field that is not listed (a URL such as
+// email.mailgun_base_url) takes no reference at all.
+var configFieldRefs = map[string][]string{
+	"web.username":                      {"RYSH_WEB_USERNAME"},
+	"web.password":                      {"RYSH_WEB_PASSWORD"},
+	"email.address":                     {"EMAIL_ADDRESS"},
+	"email.username":                    {"EMAIL_USERNAME"},
+	"email.password":                    {"EMAIL_PASSWORD"},
+	"email.mailgun_domain":              {"MAILGUN_DOMAIN", "MAILGUN_SANDBOX_DOMAIN"},
+	"email.mailgun_api_key":             {"MAILGUN_API_KEY"},
+	"email.mailgun_webhook_signing_key": {"MAILGUN_WEBHOOK_SIGNING_KEY"},
+}
+
+// resolveFieldRef resolves one credential field of a config file. A value
+// without "${" is a literal and is returned unchanged. Otherwise the whole
+// value must be one ${NAME} whose NAME is on the field's list, and it is read
+// from the persisted secrets tier under ryshDir only (any scope; never the
+// process environment); unresolved, it is "". Anything else is refused, and
+// the error names the field, never a value.
+func resolveFieldRef(ryshDir, field, value string) (string, error) {
+	v := strings.TrimSpace(value)
+	if !strings.Contains(v, "${") {
+		return value, nil
+	}
+	m := EnvRefPattern.FindStringSubmatch(v)
+	if m == nil || m[0] != v {
+		return "", fmt.Errorf("%s: a ${NAME} reference must be the whole value", field)
+	}
+	allowed := configFieldRefs[field]
+	ok := false
+	for _, name := range allowed {
+		if name == m[1] {
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		if len(allowed) == 0 {
+			return "", fmt.Errorf("%s takes no ${NAME} reference; write the value itself", field)
+		}
+		return "", fmt.Errorf("%s may only reference ${%s}", field, strings.Join(allowed, "} or ${"))
+	}
+	s, _ := LookupStoredSecretRef(ryshDir, m[1])
+	return s, nil
+}
+
+// checkSecretsDir refuses a secrets directory that is a symlink, not a
+// directory, or owned by another user. missingOK accepts a path that does
+// not exist yet.
+func checkSecretsDir(d string, missingOK bool) error {
+	info, err := os.Lstat(d)
+	switch {
+	case err != nil && missingOK && errors.Is(err, fs.ErrNotExist):
+		return nil
+	case err != nil:
+		return fmt.Errorf("check %s: %w", d, err)
+	case info.Mode()&os.ModeSymlink != 0:
+		return fmt.Errorf("%s is a symlink; refusing to write a secret through it", d)
+	case !info.IsDir():
+		return fmt.Errorf("%s is not a directory; refusing to write a secret there", d)
+	case !ownedByMe(info):
+		return fmt.Errorf("%s is owned by another user; refusing to write a secret there", d)
+	}
+	return nil
 }
 
 // secretNamePat validates secret names — the same shape as an environment
@@ -154,21 +258,3 @@ var secretNamePat = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // secretNameOK reports whether name is a legal secret/env identifier (and a
 // safe single-segment filename).
 func secretNameOK(name string) bool { return secretNamePat.MatchString(name) }
-
-// resolveSecretRef expands a value that is a ${NAME} secret reference through
-// the config-level tiers, returning "" when the reference cannot be resolved —
-// a half-expanded literal is never a usable credential, and an empty one is at
-// least reported as missing by whoever needs it. Values that carry no reference
-// are returned unchanged.
-func resolveSecretRef(ryshDir, value string) string {
-	if !EnvRefPattern.MatchString(value) {
-		return value
-	}
-	expanded, missing := ExpandEnvRefs(value, func(name string) (string, bool) {
-		return LookupSecretRef(ryshDir, name)
-	})
-	if len(missing) > 0 {
-		return ""
-	}
-	return expanded
-}

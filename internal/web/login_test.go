@@ -282,9 +282,14 @@ func TestLogin_IssuesUsableToken(t *testing.T) {
 	if got := getWithBearer(r, "/api/env", reply.Token); got.Code != http.StatusOK {
 		t.Fatalf("/api/env with bearer = %d, want 200", got.Code)
 	}
-	// And on the WebSocket upgrade, which cannot carry a header.
-	if got := getWithBearer(r, "/ws?stream=1&token="+reply.Token, ""); got.Code != http.StatusOK {
-		t.Fatalf("/ws with ?token= = %d, want 200", got.Code)
+	// S2: a valid JWT in the URL opens nothing. The WebSocket upgrade carries
+	// it as a subprotocol entry (TestToken_RealUpgradeAnswersPlainSubprotocol);
+	// a query string ends up in logs, history and Referer headers.
+	if got := getWithBearer(r, "/ws?stream=1&token="+reply.Token, ""); got.Code != http.StatusUnauthorized {
+		t.Fatalf("/ws with a valid JWT in ?token= = %d, want 401", got.Code)
+	}
+	if got := getWithBearer(r, "/api/env?token="+reply.Token, ""); got.Code != http.StatusUnauthorized {
+		t.Fatalf("/api/env with a valid JWT in ?token= = %d, want 401", got.Code)
 	}
 }
 

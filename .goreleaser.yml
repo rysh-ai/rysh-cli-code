@@ -11,7 +11,9 @@
 #
 # It deliberately needs NO secret beyond a GITHUB_TOKEN that can create releases
 # on this repository:
-#   - no `signs` block      (no GPG key in a public repo)
+#   - one `signs` block     signs checksums.txt with the release key named by its
+#                           public fingerprint; the private key never leaves the
+#                           release host (no key, passphrase or env template here)
 #   - no `blobs` block      (no S3 credentials)
 #   - no `brews` push       (the formula step self-skips unless a
 #                            HOMEBREW_TAP_TOKEN secret is present)
@@ -144,6 +146,29 @@ archives:
 checksum:
   name_template: "checksums.txt"
   algorithm: sha256
+
+# Signed checksums (from v0.2.15): ONE detached, armored signature of checksums.txt,
+# published as checksums.txt.sig. checksums.txt covers every archive and package, so
+# verifying it verifies them all; install-rysh.sh refuses a release without it.
+# --local-user is the release key's PUBLIC primary fingerprint (the signing subkey
+# FFEF27771AFA05C94723EF73DC6704C6D820C707 signs). The passphrase reaches gpg only
+# through gpg-agent; --pinentry-mode error makes an unprimed agent fail at once, never
+# prompt. Verify: gpg --verify checksums.txt.sig checksums.txt, VALIDSIG primary
+# 7516CA5CD0B1A64E5B4B9F0D6815300AB56A1364.
+signs:
+  - artifacts: checksum
+    signature: "${artifact}.sig"
+    args:
+      - "--batch"
+      - "--pinentry-mode"
+      - "error"
+      - "--local-user"
+      - "7516CA5CD0B1A64E5B4B9F0D6815300AB56A1364"
+      - "--armor"
+      - "--output"
+      - "${signature}"
+      - "--detach-sign"
+      - "${artifact}"
 
 nfpms:
   - id: rysh-packages

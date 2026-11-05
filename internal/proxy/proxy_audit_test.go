@@ -196,7 +196,7 @@ func TestProxyPublishesAuditRecord_BudgetExceeded(t *testing.T) {
 // (which ServeHTTP has already redacted) verbatim.
 func TestWriteAuditBody(t *testing.T) {
 	ts := time.Unix(1_700_000_000, 0)
-	body := []byte(`{"model":"claude","system":"key is sk_live_SNAT_abc"}`)
+	body := []byte(`{"model":"claude","system":"key is ` + snatTokenPrefix + `_abc"}`)
 
 	t.Run("off by default writes nothing", func(t *testing.T) {
 		dir := t.TempDir()

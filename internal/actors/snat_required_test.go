@@ -31,7 +31,7 @@ func TestSNATRequired_BlocksUntilRegistered(t *testing.T) {
 
 	// STRIPE_KEY is registered; GITHUB_TOKEN is not. Policy requires both.
 	w := newSnatTestWorkspace(t, map[string]map[string]string{
-		"ws-main": {"STRIPE_KEY": "sk_live_4eC39HqLyjWDarjtT1zdp7dc"},
+		"ws-main": {"STRIPE_KEY": stripeLiveKey("FAKE0000FAKE0000FAKE0000")},
 	})
 	w.policy = &policy.Policy{SNATRequired: []string{"STRIPE_KEY", "GITHUB_TOKEN"}, Loaded: true}
 
@@ -72,7 +72,7 @@ func TestSNATRequired_BlocksUntilRegistered(t *testing.T) {
 // snat.required list, nothing is missing and nothing is blocked.
 func TestSNATRequired_NoneRequired(t *testing.T) {
 	clearPolicyGlobals(t)
-	w := newSnatTestWorkspace(t, map[string]map[string]string{"ws-main": {"STRIPE_KEY": "sk_live_4eC39HqLyjWDarjtT1zdp7dc"}})
+	w := newSnatTestWorkspace(t, map[string]map[string]string{"ws-main": {"STRIPE_KEY": stripeLiveKey("FAKE0000FAKE0000FAKE0000")}})
 	w.policy = &policy.Policy{Loaded: true} // no SNATRequired
 
 	if got := w.missingRequiredSecrets(); got != nil {
@@ -88,7 +88,7 @@ func TestSNATRequired_NoneRequired(t *testing.T) {
 // missing vs registered state.
 func TestRenderRequiredSecretStatus(t *testing.T) {
 	clearPolicyGlobals(t)
-	w := newSnatTestWorkspace(t, map[string]map[string]string{"ws-main": {"STRIPE_KEY": "sk_live_4eC39HqLyjWDarjtT1zdp7dc"}})
+	w := newSnatTestWorkspace(t, map[string]map[string]string{"ws-main": {"STRIPE_KEY": stripeLiveKey("FAKE0000FAKE0000FAKE0000")}})
 	w.policy = &policy.Policy{SNATRequired: []string{"STRIPE_KEY", "GITHUB_TOKEN"}, Loaded: true}
 
 	var out strings.Builder

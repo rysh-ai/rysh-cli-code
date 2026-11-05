@@ -20,7 +20,7 @@ import (
 // POST /api/auth/login returns a one-month JWT the browser keeps in
 // localStorage and presents as `Authorization: Bearer …` or TokenHeader (and on
 // the WebSocket upgrade, which cannot carry headers, as a TokenSubprotocolPrefix
-// subprotocol entry; ?token= only from older bundles). When it expires the UI shows
+// subprotocol entry; never in the URL). When it expires the UI shows
 // the login form again — there is no refresh token.
 //
 // There used to be a second door: a bearer access token pasted once as ?token=
@@ -197,9 +197,10 @@ func tokenSubprotocolEntries(r *http.Request) []string {
 }
 
 // presentedTokens returns the login JWTs this request offers: Authorization:
-// Bearer, TokenHeader, a TokenSubprotocolPrefix subprotocol entry, and ?token=.
-// ?token= is kept only for web bundles built before the subprotocol; it puts
-// the JWT in a URL and goes in the release after the client ships (S2).
+// Bearer, TokenHeader and a TokenSubprotocolPrefix subprotocol entry. A token
+// in the query string is not read (S2): it would put the JWT in a URL, where
+// logs, history and Referer headers keep it. Every client sends one of the
+// three since v0.2.14 (the embedded bundle and the desktop app, ledger 86).
 // An Authorization header that is not Bearer (nginx's Basic) is not ours and
 // is ignored. More than one TokenHeader value or subprotocol entry is
 // ambiguous and refuses the request (ok false), whatever else it carries.
@@ -213,8 +214,7 @@ func presentedTokens(c *gin.Context) (toks []string, ok bool) {
 	if len(hdr) == 1 {
 		toks = append(toks, strings.TrimSpace(hdr[0]))
 	}
-	toks = append(toks, sub...)
-	return append(toks, c.Query("token")), true
+	return append(toks, sub...), true
 }
 
 // jwtSubject verifies a login JWT presented on this request (presentedTokens)
@@ -315,7 +315,7 @@ func (s *Server) hostGuard() gin.HandlerFunc {
 //  2. otherwise the login is required:
 //  3. path is /health           → allow (liveness probes stay public)
 //  4. valid login JWT           → allow (presentedTokens: Bearer, TokenHeader,
-//     the token subprotocol on /ws, or ?token= from older bundles)
+//     the token subprotocol on /ws; never ?token=)
 //  5. the request is the app shell or an /api/auth/* endpoint → allow, so the
 //     login page can load and submit
 //  6. otherwise                 → 401 Unauthorized

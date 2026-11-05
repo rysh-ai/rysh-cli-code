@@ -59,8 +59,18 @@ func (w *WorkspaceActor) handleUpstreamConnect(out io.Writer, args []string) {
 		return
 	}
 
+	// The key goes into the secrets tier beside the config and the YAML gets
+	// only the ${RYSH_UPSTREAM_API_KEY} reference, the same as rysh connect
+	// (CD2; security-lead ledger 167 X4).
 	cfgFile := config.ConfigPath(strings.TrimSpace(w.cfg.ConfigFile))
-	if err := config.SetUpstreamConnection(cfgFile, url, apiKey, info.ID); err != nil {
+	ref, secretsPath, err := config.StoreUpstreamKey(config.RyshDirForConfigFile(cfgFile), apiKey)
+	if err != nil {
+		o.Header("upstream connect failed")
+		o.Row("  resolved workspace %q (%s) but could not store the key: %v", info.Name, info.ID, err)
+		w.failRysh("upstream connect: store key: %v", err)
+		return
+	}
+	if err := config.SetUpstreamConnection(cfgFile, url, ref, info.ID); err != nil {
 		o.Header("upstream connect failed")
 		o.Row("  resolved workspace %q (%s) but could not write %s: %v", info.Name, info.ID, cfgFile, err)
 		w.failRysh("upstream connect: write config: %v", err)
@@ -84,6 +94,7 @@ func (w *WorkspaceActor) handleUpstreamConnect(out io.Writer, args []string) {
 	o.Field("governance", "off (unchanged)")
 	o.Rule()
 	o.Row("  written to %s", cfgFile)
+	o.Row("  key stored in %s (the config names it as %s)", secretsPath, ref)
 	o.Row("  governance stays off: reporting local spend to the server is a separate")
 	o.Row("  opt-in — set upstream.governance: true only if you want it")
 	o.Row("  restart rysh for sharing to activate, then: ##share pane")

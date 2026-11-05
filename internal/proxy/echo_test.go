@@ -19,10 +19,6 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 )
 
-// planted is live-SHAPED but synthetic. Real shape is the point: it is what the
-// SecretNAT detector tier has to catch, in a request or in a response.
-const plantedKey = "sk_live_ABCD1234abcd5678EFGH9012"
-
 func testSNAT(t *testing.T) *secretnat.Manager {
 	t.Helper()
 	mgr, err := secretnat.NewManager(secretnat.Options{
@@ -171,7 +167,7 @@ func TestResponseEchoScan_IgnoresRyshsOwnTokens(t *testing.T) {
 	_ = resp.Body.Close()
 
 	// Non-vacuous: the response really did contain a SNAT token.
-	if !strings.Contains(forwarded, "sk_live_SNAT") {
+	if !strings.Contains(forwarded, snatTokenPrefix) {
 		t.Fatalf("the request was not redacted, so this proves nothing: %s", forwarded)
 	}
 	audits := srv.RecentAudits(5)
@@ -238,7 +234,7 @@ func TestAuditContent_EndToEnd(t *testing.T) {
 	if strings.Contains(string(stored), plantedKey) {
 		t.Fatalf("SECURITY FAILURE: audit_content stored the plaintext secret:\n%s", stored)
 	}
-	if !strings.Contains(string(stored), "sk_live_SNAT") {
+	if !strings.Contains(string(stored), snatTokenPrefix) {
 		t.Fatalf("stored body is not the redacted one (no SNAT token):\n%s", stored)
 	}
 	// Non-vacuous: the rest of the request really is there, so the test cannot

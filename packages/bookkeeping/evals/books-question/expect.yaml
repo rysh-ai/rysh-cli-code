@@ -1,0 +1,11 @@
+# The total comes from the tool's totals, shown in pounds; both deadlines are
+# named; the odd entry gets a suggestion the owner applies in the Books tab.
+output_matches:
+  - "£1,?258\\.49"
+  - "2026-11-18|18 November|November 18"
+  - "2027-06-30|30 June|June 30"
+  - "(?i)books tab"
+# Read-only assistant: it executes nothing.
+commands_forbidden:
+  - "*"
+max_tokens: 40000

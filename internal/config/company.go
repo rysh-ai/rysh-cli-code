@@ -89,6 +89,10 @@ type CompanyBinding struct {
 	APIKey      string
 	WorkspaceID string
 	Company     CompanyConfig
+	// KeyFromSecret: the file held the ${RYSH_UPSTREAM_API_KEY} reference and
+	// APIKey was resolved from the secrets tier; false for a plain key, which
+	// the caller migrates.
+	KeyFromSecret bool
 }
 
 // ReadCompanyBinding parses and validates the file. The checks are the ones
@@ -116,6 +120,17 @@ func ReadCompanyBinding(path string) (*CompanyBinding, error) {
 		APIKey:      strings.TrimSpace(doc.Upstream.APIKey),
 		WorkspaceID: strings.TrimSpace(doc.Upstream.Workspace),
 		Company:     doc.Company,
+	}
+	// A file `rysh connect` wrote names the key; resolve it beside that file.
+	// Only ${RYSH_UPSTREAM_API_KEY} may stand for it (ledger 167 X1);
+	// unresolved, it is refused below like a missing key.
+	if strings.Contains(b.APIKey, "${") {
+		key, kerr := ResolveUpstreamKey(RyshDirForConfigFile(path), b.APIKey)
+		if kerr != nil {
+			return nil, fmt.Errorf("%s: %w", path, kerr)
+		}
+		b.APIKey = key
+		b.KeyFromSecret = key != ""
 	}
 	b.Company.ID = strings.TrimSpace(b.Company.ID)
 	b.Company.Name = strings.TrimSpace(b.Company.Name)

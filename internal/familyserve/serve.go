@@ -386,6 +386,7 @@ type paneWorker struct {
 	wake    chan struct{}
 	events  chan paneEvent
 	subs    []*nats.Subscription
+	stop    chan struct{} // ends the subscription reader
 }
 
 // workerLocked returns the pane's worker, starting it (and its exact-subject
@@ -417,37 +418,50 @@ func (w *paneWorker) push(ev paneEvent) {
 
 func (w *paneWorker) subscribe() error {
 	decode := w.s.decoder()
-	for _, sc := range []struct {
-		subject string
-		fn      func(interface{})
-	}{
-		{msg.T("pane", w.pane, "llm_prompt_execution", "status"), func(d interface{}) {
+	handlers := map[string]func(interface{}){
+		msg.T("pane", w.pane, "llm_prompt_execution", "status"): func(d interface{}) {
 			if st, ok := d.(*msg.MsgAgenticStatus); ok {
 				w.push(paneEvent{kind: evStatus, orch: st.OrchestratorID, phase: st.Phase})
 			}
-		}},
-		{msg.T("pane", w.pane, "llm_prompt_execution", "output"), func(d interface{}) {
+		},
+		msg.T("pane", w.pane, "llm_prompt_execution", "output"): func(d interface{}) {
 			if o, ok := d.(*msg.MsgAgenticOutput); ok {
 				w.push(paneEvent{kind: evOutput, orch: o.OrchestratorID, typ: o.Type, content: o.Content})
 			}
-		}},
-		{msg.T("pane", w.pane, "approval", "request"), func(d interface{}) {
+		},
+		msg.T("pane", w.pane, "approval", "request"): func(d interface{}) {
 			if r, ok := d.(*msg.MsgApprovalRequest); ok {
 				w.push(paneEvent{kind: evApproval, orch: r.OrchestratorID, content: r.Description})
 			}
-		}},
-	} {
-		fn := sc.fn
-		sub, err := w.s.cfg.NC.Subscribe(sc.subject, func(m *nats.Msg) {
-			if d, ok := decode(m.Data); ok {
-				fn(d)
-			}
-		})
+		},
+	}
+	// One channel for all three subjects: the connection's read loop fills it
+	// in wire order. Separate async subscriptions each deliver on their own
+	// goroutine, so a turn's done status could overtake its text (QA-32).
+	ch := make(chan *nats.Msg, cap(w.events))
+	for subject := range handlers {
+		sub, err := w.s.cfg.NC.ChanSubscribe(subject, ch)
 		if err != nil {
 			return err
 		}
 		w.subs = append(w.subs, sub)
 	}
+	stop := make(chan struct{})
+	w.stop = stop
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case m := <-ch:
+				if fn := handlers[m.Subject]; fn != nil {
+					if d, ok := decode(m.Data); ok {
+						fn(d)
+					}
+				}
+			}
+		}
+	}()
 	return nil
 }
 
@@ -456,6 +470,10 @@ func (w *paneWorker) unsubscribe() {
 		_ = sub.Unsubscribe()
 	}
 	w.subs = nil
+	if w.stop != nil {
+		close(w.stop)
+		w.stop = nil
+	}
 }
 
 // enqueue appends t unless max prompts already wait (the running one is not

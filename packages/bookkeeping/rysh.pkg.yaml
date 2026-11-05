@@ -1,0 +1,6 @@
+name: "@rysh/bookkeeping"
+version: "0.1.0"
+type: agent
+description: "Bookkeeping tools and an AI assistant for an AI-native company's owner: reads the ledger and filing deadlines, suggests categories the owner sets"
+entry: SKILL.md
+min_rysh: "0.2.15"

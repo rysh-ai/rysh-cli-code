@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rysh-ai/rysh-cli-code/internal/config"
 )
 
 // The OSS on-ramp. Before `##upstream connect`, the path from `brew install
@@ -122,12 +124,29 @@ func TestUpstreamConnect_HappyPathPersistsUUID(t *testing.T) {
 		"initial_panes: 3",
 		"enabled: true",
 		"url: " + srv.URL,
-		"api_key: rysh_sk_test_key",
+		"api_key: ${RYSH_UPSTREAM_API_KEY}",
 		"workspace: " + testWorkspaceUUID,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("config file missing %q after connect:\n%s", want, got)
 		}
+	}
+	// The key itself is in the secrets tier beside the config, owner-only,
+	// never in the YAML (security-lead ledger 167 X4, as rysh connect does).
+	if strings.Contains(got, "rysh_sk_test_key") {
+		t.Errorf("the key value is in the config file:\n%s", got)
+	}
+	secret := filepath.Join(filepath.Dir(path), ".rysh", "secrets", "default", "RYSH_UPSTREAM_API_KEY")
+	if info, err := os.Lstat(secret); err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("secrets file %s: %v %v", secret, err, info)
+	}
+	if v := readFile(t, secret); v != "rysh_sk_test_key" {
+		t.Error("the secrets file does not hold the key")
+	}
+	t.Setenv("RYSH_UPSTREAM_API_KEY", "")
+	t.Setenv("RYSH_DIR", "")
+	if k := config.LoadFrom(path).Upstream.APIKey; k != "rysh_sk_test_key" {
+		t.Error("the written config does not resolve back to the key")
 	}
 	// The name is NOT the wire namespace. Writing it there is the exact trap
 	// the UpstreamConfig.Workspace comment warns about.

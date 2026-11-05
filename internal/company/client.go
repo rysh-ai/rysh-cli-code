@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -24,7 +26,11 @@ var (
 	// follower treats specially: the key was revoked from the dashboard (or the
 	// company was deleted), and polling harder will not help.
 	ErrUnauthorized = errors.New("the server rejected this company's key — reconnect from the dashboard")
-	errNotFound     = errors.New("not found")
+	// ErrBooksNotEnabled is the accountant routes' 404 {code:"not_enabled"}:
+	// the server flag is off, or (ledger, connect key) the company's
+	// bookkeeping assistant service is not on.
+	ErrBooksNotEnabled = errors.New("the bookkeeping assistant is not enabled for this company")
+	errNotFound        = errors.New("not found")
 )
 
 // Client reads a company over the owner routes with a connect key.
@@ -42,7 +48,36 @@ func NewClient(baseURL, apiKey string) *Client {
 	}
 }
 
+// apiError is a refusal the server explained with a code (and, for
+// "invalid", the fields it refused). Only the code and field names are kept,
+// never the server's free text. A coded 404 still counts as not found.
+type apiError struct {
+	path   string // what was read, as errors name it
+	status int
+	code   string
+	fields []string
+}
+
+func (e *apiError) Error() string {
+	msg := fmt.Sprintf("%s returned HTTP %d: %s", e.path, e.status, e.code)
+	if len(e.fields) > 0 {
+		msg += " (fields: " + strings.Join(e.fields, ", ") + ")"
+	}
+	return msg
+}
+
+func (e *apiError) Is(target error) bool {
+	return target == errNotFound && e.status == http.StatusNotFound
+}
+
 func (c *Client) get(ctx context.Context, path string, out any) error {
+	return c.getNamed(ctx, path, path, out)
+}
+
+// getNamed is get with errors that call the resource name rather than its
+// path: a Books route's path says accountant, which is not product copy
+// (U-27 Q6), and the error reaches the owner in a tool result.
+func (c *Client) getNamed(ctx context.Context, path, name string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
 	if err != nil {
 		return err
@@ -58,18 +93,59 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		return ErrUnauthorized
-	case resp.StatusCode == http.StatusNotFound:
-		return errNotFound
 	case resp.StatusCode >= 300:
-		return fmt.Errorf("%s returned HTTP %d", path, resp.StatusCode)
+		var e struct {
+			Code   string            `json:"code"`
+			Fields map[string]string `json:"fields"`
+		}
+		_ = json.Unmarshal(body, &e)
+		switch {
+		case resp.StatusCode == http.StatusNotFound && e.Code == "not_enabled":
+			return ErrBooksNotEnabled
+		case e.Code != "":
+			fields := make([]string, 0, len(e.Fields))
+			for f := range e.Fields {
+				fields = append(fields, f)
+			}
+			sort.Strings(fields)
+			return &apiError{path: name, status: resp.StatusCode, code: e.Code, fields: fields}
+		case resp.StatusCode == http.StatusNotFound:
+			return errNotFound
+		}
+		return fmt.Errorf("%s returned HTTP %d", name, resp.StatusCode)
 	}
 	if out == nil {
 		return nil
 	}
 	if err := json.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("%s: invalid JSON: %w", path, err)
+		return fmt.Errorf("%s: invalid JSON: %w", name, err)
 	}
 	return nil
+}
+
+// Deadlines reads the company's filing deadlines (Companies House, cached by
+// the server; accountant AC2). The server's JSON is passed through.
+func (c *Client) Deadlines(ctx context.Context, companyID string) (json.RawMessage, error) {
+	var raw json.RawMessage
+	if err := c.getNamed(ctx, "/api/ai-native-companies/"+url.PathEscape(companyID)+"/accountant/deadlines", "the Books deadlines", &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// Ledger reads one page of the company's bookkeeping ledger, newest first,
+// filtered by q (from, to, category, direction, limit, before). The server's
+// JSON is passed through; amounts are integer pence.
+func (c *Client) Ledger(ctx context.Context, companyID string, q url.Values) (json.RawMessage, error) {
+	path := "/api/ai-native-companies/" + url.PathEscape(companyID) + "/accountant/ledger"
+	if enc := q.Encode(); enc != "" {
+		path += "?" + enc
+	}
+	var raw json.RawMessage
+	if err := c.getNamed(ctx, path, "the Books ledger", &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
 // progressEvent is the provisioning envelope the company GET replays; it is
@@ -88,7 +164,7 @@ type progressEvent struct {
 // endpoint never blanks the view. An authorization failure anywhere is
 // returned as ErrUnauthorized, because it means the key, not the endpoint.
 func (c *Client) Fetch(ctx context.Context, companyID string) (*msg.CompanySnapshot, error) {
-	base := "/api/ai-native-companies/" + companyID
+	base := "/api/ai-native-companies/" + url.PathEscape(companyID) // one path segment (ledger 174 T1)
 	var head struct {
 		Company msg.CompanyInfo `json:"company"`
 		Events  []progressEvent `json:"events"`

@@ -208,13 +208,15 @@ func TestToken_SubprotocolRefusals(t *testing.T) {
 	}
 }
 
-// S2: ?token= keeps working for bundles built before the subprotocol, until
-// its removal in the release after the client ships.
-func TestToken_LegacyQueryStillWorks(t *testing.T) {
+// S2: the client that sends the token subprotocol / TokenHeader shipped in
+// v0.2.14, so a valid JWT in ?token= no longer opens anything.
+func TestToken_QueryTokenIsRefused(t *testing.T) {
 	r, _ := loginRouter(t)
 	tok := loginToken(t, r)
-	if w := getWithHeaders(r, "/ws?stream=1&token="+tok, nil); w.Code != http.StatusOK {
-		t.Fatalf("/ws with ?token= = %d, want 200 (old bundles)", w.Code)
+	for _, path := range []string{"/ws?stream=1&token=" + tok, "/api/env?token=" + tok} {
+		if w := getWithHeaders(r, path, nil); w.Code != http.StatusUnauthorized {
+			t.Fatalf("%s with a valid JWT in ?token= = %d, want 401", strings.SplitN(path, "?", 2)[0], w.Code)
+		}
 	}
 }
 

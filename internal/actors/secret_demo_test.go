@@ -11,7 +11,7 @@ import (
 // TestFakeSecretShape verifies the demo decoy keeps the value's shape (length,
 // punctuation, character classes), never equals it, and is deterministic.
 func TestFakeSecretShape(t *testing.T) {
-	for _, v := range []string{"sk_live_ABC123xyz", "xoxb-1234-abcd-EFGH", "hunter2", "a", "p@ss.w0rd/Z"} {
+	for _, v := range []string{stripeLiveKey("FAKE0000fake"), "xoxb-1234-abcd-EFGH", "hunter2", "a", "p@ss.w0rd/Z"} {
 		f := fakeSecret(v)
 		if f == v {
 			t.Errorf("fakeSecret(%q) returned the real value", v)

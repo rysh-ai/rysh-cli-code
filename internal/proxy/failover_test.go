@@ -133,7 +133,7 @@ func TestFailover_RetriesToSecondary(t *testing.T) {
 func TestFailover_ReplayedBodyIsStillRedacted(t *testing.T) {
 	// Same live-shaped key the design 001 wire test plants, so the detector
 	// tier is known to fire on it and this test cannot pass vacuously.
-	const planted = "sk_live_ABCD1234abcd5678EFGH9012"
+	planted := plantedKey
 
 	primary, psrv := newRecordingUpstream(func(w http.ResponseWriter, _ *http.Request, _ int) {
 		w.WriteHeader(http.StatusBadGateway)
@@ -171,7 +171,7 @@ func TestFailover_ReplayedBodyIsStillRedacted(t *testing.T) {
 		}
 		// Positive evidence: redaction actually ran on this attempt, rather
 		// than the secret merely never being present.
-		if !strings.Contains(got, "sk_live_SNAT") {
+		if !strings.Contains(got, snatTokenPrefix) {
 			t.Fatalf("%s body carries no SNAT token — redaction did not run: %s", name, got)
 		}
 	}

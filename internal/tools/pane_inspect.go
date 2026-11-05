@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -100,8 +101,25 @@ func (t *PaneInspectTool) Execute(ctx context.Context, params json.RawMessage) (
 		return ErrOutputf(ErrKindValidation, "invalid response from pane: %v", err), nil
 	}
 
-	// Return the raw snapshot payload — the pane snapshot contains output, status, mode, etc.
-	content := string(respEnvelope.Payload)
+	// Answer with a compact view: who the pane is, its state, and the last
+	// tailLines lines of its current output. The rest of the snapshot (other
+	// modes' output, histories, conversations) is not what the agent asked
+	// for and does not reach the model.
+	var snapReply msg.MsgPaneSnapshotReply
+	if err := json.Unmarshal(respEnvelope.Payload, &snapReply); err != nil {
+		return ErrOutputf(ErrKindValidation, "invalid snapshot from pane: %v", err), nil
+	}
+	snap := snapReply.Snapshot
+	tail, truncated := lastLines(snap.Output, tailLines)
+	b, err := json.MarshalIndent(paneInspectView{
+		PaneID: p.PaneID, Title: snap.Title, Mode: snap.Mode, Status: snap.Status,
+		Program: snap.Program, LastCommand: snap.LastCommand,
+		OutputTail: tail, Truncated: truncated,
+	}, "", "  ")
+	if err != nil {
+		return ErrOutputf(ErrKindInternal, "failed to encode the answer: %v", err), nil
+	}
+	content := string(b)
 
 	return &ToolOutput{
 		Content: content,
@@ -110,4 +128,49 @@ func (t *PaneInspectTool) Execute(ctx context.Context, params json.RawMessage) (
 			"tail_lines": fmt.Sprintf("%d", tailLines),
 		},
 	}, nil
+}
+
+// paneInspectView is what pane_inspect returns to the model.
+type paneInspectView struct {
+	PaneID      string `json:"pane_id"`
+	Title       string `json:"title,omitempty"`
+	Mode        string `json:"mode,omitempty"`
+	Status      string `json:"status,omitempty"`
+	Program     string `json:"program,omitempty"`
+	LastCommand string `json:"last_command,omitempty"`
+	OutputTail  string `json:"output_tail"`
+	Truncated   bool   `json:"truncated"`
+}
+
+// paneInspectMaxTailBytes caps output_tail: a single huge line (a minified
+// file, a progress bar without newlines) must not flood the model.
+const paneInspectMaxTailBytes = 64 << 10
+
+// lastLines returns the last n lines of s (a trailing newline does not count
+// as an extra line), at most paneInspectMaxTailBytes of them (the end is
+// kept), and whether anything before them was cut.
+func lastLines(s string, n int) (string, bool) {
+	if n <= 0 {
+		return "", s != ""
+	}
+	body := strings.TrimSuffix(s, "\n")
+	out, cut := s, false
+	if body != "" {
+		idx := len(body)
+		for i := 0; i < n; i++ {
+			j := strings.LastIndexByte(body[:idx], '\n')
+			if j < 0 {
+				idx = -1
+				break
+			}
+			idx = j
+		}
+		if idx >= 0 {
+			out, cut = s[idx+1:], true
+		}
+	}
+	if len(out) > paneInspectMaxTailBytes {
+		out, cut = out[len(out)-paneInspectMaxTailBytes:], true
+	}
+	return out, cut
 }

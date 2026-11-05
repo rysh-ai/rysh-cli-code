@@ -92,29 +92,34 @@ func (w *WorkspaceActor) handleConfigLoad(o ryshOut, paneID, arg string) {
 	if abs, aerr := filepath.Abs(path); aerr == nil && abs == cfgFile {
 		sameFile = true
 	}
-	if !sameFile {
-		if _, serr := os.Stat(cfgFile); errors.Is(serr, fs.ErrNotExist) {
-			header := "# rysh.config.yaml — written by ##config load on " + time.Now().UTC().Format(time.RFC3339) + "\n"
-			if werr := os.WriteFile(cfgFile, []byte(header), 0o600); werr != nil {
-				o.Header("config load failed")
-				o.Row("  could not create %s: %v", cfgFile, werr)
-				w.failRysh("config load: %v", werr)
-				return
+	// The key goes into the session's secrets tier and the YAML gets only the
+	// ${RYSH_UPSTREAM_API_KEY} reference (CD2). Loading the session's own file
+	// skips the write unless it still holds a plain key: then it is migrated
+	// in place. The secret goes where LoadFrom(cfgFile) resolves it: the next
+	// daemon start and the `rysh company mcp --config` child both load that
+	// way (w.cfg.RyshDir can differ when this command created the file).
+	ryshDir := config.RyshDirForConfigFile(cfgFile)
+	secretsPath := ""
+	if !sameFile || !binding.KeyFromSecret {
+		if !sameFile {
+			if _, serr := os.Stat(cfgFile); errors.Is(serr, fs.ErrNotExist) {
+				header := "# rysh.config.yaml — written by ##config load on " + time.Now().UTC().Format(time.RFC3339) + "\n"
+				if werr := os.WriteFile(cfgFile, []byte(header), 0o600); werr != nil {
+					o.Header("config load failed")
+					o.Row("  could not create %s: %v", cfgFile, werr)
+					w.failRysh("config load: %v", werr)
+					return
+				}
 			}
 		}
-		if werr := config.SetUpstreamConnection(cfgFile, binding.URL, binding.APIKey, binding.WorkspaceID); werr != nil {
+		p, werr := config.WriteCompanyBinding(cfgFile, ryshDir, binding)
+		if werr != nil {
 			o.Header("config load failed")
 			o.Row("  could not write %s: %v", cfgFile, werr)
 			w.failRysh("config load: %v", werr)
 			return
 		}
-		if werr := config.SetCompanyBlock(cfgFile, binding.Company); werr != nil {
-			o.Header("config load failed")
-			o.Row("  could not write %s: %v", cfgFile, werr)
-			w.failRysh("config load: %v", werr)
-			return
-		}
-		_ = os.Chmod(cfgFile, 0o600)
+		secretsPath = p
 	}
 
 	// Apply to the running session: ##upstream status and ##company answer
@@ -155,6 +160,9 @@ func (w *WorkspaceActor) handleConfigLoad(o ryshOut, paneID, arg string) {
 	o.Rule()
 	if !sameFile {
 		o.Row("  written to %s", cfgFile)
+	}
+	if secretsPath != "" {
+		o.Row("  key stored in %s (the config names it as ${%s})", secretsPath, config.UpstreamKeySecretName)
 	}
 	o.Row("  this pane opens the company view; ##company lists orders, enquiries and activity")
 	o.Row("  from a shell: rysh company status|orders|enquiries|activity|services [--json]")
@@ -199,7 +207,7 @@ func (w *WorkspaceActor) registerCompanyTools(paneID, cfgFile string) string {
 		"--env", "RYSH_COMPANY_CONFIG=" + cfgFile,
 		"--prefix", "",
 	})
-	return "company_status, company_orders, company_enquiries, company_activity, company_services (MCP server \"company\", connecting…)"
+	return "company_status, company_orders, company_enquiries, company_activity, company_services, company_deadlines, company_ledger (MCP server \"company\", connecting…)"
 }
 
 func (w *WorkspaceActor) printConfigBinding(o ryshOut) {
