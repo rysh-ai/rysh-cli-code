@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -333,12 +334,55 @@ func (m Model) forwardRawMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// paneResize is one visible pane's PTY size as this TUI lays it out.
+type paneResize struct {
+	paneID     string
+	rows, cols int
+}
+
 // sendPaneResizes computes the effective pane dimensions and sends MsgPaneResize
-// to each visible pane. Called on tea.WindowSizeMsg.
+// to each visible pane. Called on tea.WindowSizeMsg and on mode changes.
 func (m *Model) sendPaneResizes() {
+	m.sendPaneSizes(m.paneResizeList())
+}
+
+// sendPaneResizesIfLayoutChanged sizes the pane PTYs when a workspace snapshot
+// changed the layout since the last sizes sent (video story 045): Bubble Tea's
+// first WindowSizeMsg arrives before the first snapshot, when there is no pane
+// to size, so without this the first pane kept the PTY default 80x24 until a
+// mode change. An unchanged layout sends nothing.
+func (m *Model) sendPaneResizesIfLayoutChanged() {
+	sizes := m.paneResizeList()
+	if paneResizeKey(sizes) == m.lastPaneResizeKey {
+		return
+	}
+	m.sendPaneSizes(sizes)
+}
+
+func (m *Model) sendPaneSizes(sizes []paneResize) {
+	m.lastPaneResizeKey = paneResizeKey(sizes)
+	for _, r := range sizes {
+		_ = m.pub.Send(msgpkg.T("pane", r.paneID, "inbox"), &msgpkg.MsgPaneResize{
+			Rows:     r.rows,
+			Cols:     r.cols,
+			ClientID: sizeClientID(),
+		})
+	}
+}
+
+func paneResizeKey(sizes []paneResize) string {
+	var b strings.Builder
+	for _, r := range sizes {
+		fmt.Fprintf(&b, "%s=%dx%d;", r.paneID, r.rows, r.cols)
+	}
+	return b.String()
+}
+
+// paneResizeList is each visible pane's PTY size for the current layout.
+func (m *Model) paneResizeList() []paneResize {
 	tab := m.activeTab()
 	if tab == nil {
-		return
+		return nil
 	}
 
 	// Fullscreen: only the maximized pane is visible, so size its PTY to the
@@ -353,12 +397,7 @@ func (m *Model) sendPaneResizes() {
 		for _, pane := range tab.FlatPanes() {
 			if pane.ID == m.fullscreenPaneID {
 				fsRows, fsCols := fullscreenPTYDims(m.bodyDims())
-				_ = m.pub.Send(msgpkg.T("pane", pane.ID, "inbox"), &msgpkg.MsgPaneResize{
-					Rows:     fsRows,
-					Cols:     fsCols,
-					ClientID: sizeClientID(),
-				})
-				return
+				return []paneResize{{paneID: pane.ID, rows: fsRows, cols: fsCols}}
 			}
 		}
 		// Fullscreen pane no longer exists — fall through to normal sizing.
@@ -366,8 +405,9 @@ func (m *Model) sendPaneResizes() {
 
 	lanes := tab.FlatLanes()
 	if len(lanes) == 0 {
-		return
+		return nil
 	}
+	var out []paneResize
 
 	colWidths := laneWidths(lanes, m.paneAvailWidth(len(lanes)))
 	totalHeight := m.bodyHeight()
@@ -421,14 +461,10 @@ func (m *Model) sendPaneResizes() {
 			if paneCols < 1 {
 				paneCols = 1
 			}
-			subject := msgpkg.T("pane", pane.ID, "inbox")
-			_ = m.pub.Send(subject, &msgpkg.MsgPaneResize{
-				Rows:     paneRows,
-				Cols:     paneCols,
-				ClientID: sizeClientID(),
-			})
+			out = append(out, paneResize{paneID: pane.ID, rows: paneRows, cols: paneCols})
 		}
 	}
+	return out
 }
 
 // fullscreenPTYDims returns the PTY rows/cols a fullscreen pane occupies for a
@@ -529,6 +565,12 @@ func (m *Model) syncRawMode() tea.Cmd {
 	m.syncCompanyMode()
 	pane := m.findPaneInSnapshot(m.snapshot.ActivePaneID)
 	if pane == nil {
+		return nil
+	}
+	// A Stale pane is a past reading (its actor missed the snapshot deadline)
+	// that carryStalePanes had no earlier state to replace. Neither enter nor
+	// leave on it: the next answered snapshot decides.
+	if pane.Stale {
 		return nil
 	}
 	if m.paneShowsLiveApp(pane) && m.mode == modeNormal && m.relayPaneID == "" {

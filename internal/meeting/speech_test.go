@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -535,5 +536,23 @@ func TestElevenLabsTranscriberListensForKurdish(t *testing.T) {
 	defer f.mu.Unlock()
 	if !strings.Contains(f.query, "language_code=kur") {
 		t.Fatalf("query %q", f.query)
+	}
+}
+
+// A send fails when the server has closed the stream, usually just after it
+// said why; the reader's reason wins over a bare "send failed" (infra-ops'
+// Linux flake 11-06: auth_error raced the audio send).
+func TestElevenLabsSendFailureNamesTheReaderReason(t *testing.T) {
+	readErr := make(chan error, 1)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		readErr <- errors.New("elevenlabs: auth_error")
+	}()
+	if err := elevenLabsSendFailed(context.Background(), readErr); err == nil || err.Error() != "elevenlabs: auth_error" {
+		t.Fatalf("err %v, want the reader's reason", err)
+	}
+	// No reason within the wait: the send failure itself.
+	if err := elevenLabsSendFailed(context.Background(), make(chan error)); err == nil || err.Error() != "elevenlabs send failed" {
+		t.Fatalf("err %v, want elevenlabs send failed", err)
 	}
 }

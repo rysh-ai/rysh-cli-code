@@ -46,6 +46,10 @@ type upstreamStub struct {
 	capPeriod   string
 	spentUSD    int64
 	usdReported []int64 // SpentSinceMicroUSD of every lease call, in order
+
+	// replyDelay holds each answer back after the stub has recorded the call,
+	// the window in which the client is still renewing.
+	replyDelay time.Duration
 }
 
 // leaseCallCount reads leaseCalls under the stub's lock. Allow() renews on a
@@ -69,7 +73,14 @@ func newUpstreamStub(ceiling int64) *upstreamStub {
 
 func (s *upstreamStub) do(req *http.Request) (*http.Response, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	delay := s.replyDelay
+	resp, err := s.answerLocked(req)
+	s.mu.Unlock()
+	time.Sleep(delay)
+	return resp, err
+}
+
+func (s *upstreamStub) answerLocked(req *http.Request) (*http.Response, error) {
 	if s.fail {
 		return nil, io.ErrUnexpectedEOF
 	}

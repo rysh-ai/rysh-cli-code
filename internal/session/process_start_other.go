@@ -5,5 +5,5 @@
 package session
 
 // ProcessStart is not implemented on this platform: the identity of a PID
-// cannot be proven, so TerminateDaemon signals only a legacy-argv match.
+// cannot be proven, so TerminateDaemon never signals a daemon here.
 func ProcessStart(pid int) (int64, bool) { return 0, false }

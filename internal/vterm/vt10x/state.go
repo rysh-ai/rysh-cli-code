@@ -514,9 +514,21 @@ func (t *State) captureScrollback(orig, n int) {
 	}
 	for i := 0; i < n; i++ {
 		src := t.lines[orig+i]
-		// Trim trailing blank cells (default glyphs) to bound memory.
+		// Trim trailing blank cells to bound memory. A cell is 16 bytes, so an
+		// untrimmed row costs 16×cols: ~3.9KB at 242 columns, ~7.7MB for a full
+		// 2000-line ring, per pane.
+		//
+		// Blank means unwritten (Char 0) OR an ERASED space: clear() writes ' '
+		// with the current attributes, not 0, and an inline TUI like Claude Code
+		// erases every line it repaints (ESC[2K). Checking only Char == 0 trimmed
+		// nothing for those panes, so every row was stored at full terminal width.
+		//
+		// The predicate is the one the host's renderer (rysh internal/vterm
+		// renderGlyphsANSI) trims by, so nothing visible is dropped: a space is
+		// kept if it carries a non-default colour or a visible attribute (a
+		// reverse-video or underlined run must survive).
 		end := len(src)
-		for end > 0 && src[end-1].Char == 0 {
+		for end > 0 && blankTrailingGlyph(src[end-1]) {
 			end--
 		}
 		cp := make(line, end)
@@ -529,6 +541,16 @@ func (t *State) captureScrollback(orig, n int) {
 		// Compact down to the front so the backing array stays bounded.
 		t.scrollback = t.scrollback[:copy(t.scrollback, t.scrollback[excess:])]
 	}
+}
+
+// blankTrailingGlyph reports whether g can be dropped from the end of a
+// scrollback row without changing how the row renders. See captureScrollback.
+func blankTrailingGlyph(g Glyph) bool {
+	if g.Char == 0 {
+		return true
+	}
+	const visible = attrReverse | attrUnderline | attrBold | attrItalic | attrBlink | attrFaint
+	return g.Char == ' ' && g.FG == DefaultFG && g.BG == DefaultBG && g.Mode&visible == 0
 }
 
 // SetScrollbackMax sets the maximum number of scrolled-off lines retained.

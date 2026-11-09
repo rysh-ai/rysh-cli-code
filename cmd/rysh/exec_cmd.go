@@ -58,6 +58,7 @@ func runExecCmd(cfg config.Config, args []string) error {
 	rest, tabID := extractStringFlag(rest, "--tab-id")
 	rest, paneID := extractStringFlag(rest, "--pane-id")
 	rest, asJSON := extractBoolFlag(rest, "--json")
+	rest, onActive := extractBoolFlag(rest, "--active")
 
 	// Everything after "--" is the command body verbatim, so a body may begin
 	// with a dash without being mistaken for a flag.
@@ -69,7 +70,7 @@ func runExecCmd(cfg config.Config, args []string) error {
 	command = strings.TrimPrefix(command, "##")
 	if command == "" {
 		return errors.New(progname.Rewrite(
-			"usage: rysh exec [--session <name>] [--tab-id <id>] [--pane-id <id>] [--json] -- '##<command> [args...]'"))
+			"usage: rysh exec [--session <name>] [--tab-id <id>] [--pane-id <id> | --active] [--json] -- '##<command> [args...]'"))
 	}
 
 	if sess == "" {
@@ -80,7 +81,12 @@ func runExecCmd(cfg config.Config, args []string) error {
 		return err
 	}
 
-	resp, err := cli.RyshCommandResult(store, sess, tabID, paneID, command)
+	paneID, quiet := execTarget(tabID, paneID, onActive, sess, os.Getenv("RYSH_PANE"), os.Getenv("RYSH_SESSION"))
+	run := cli.RyshCommandResult
+	if quiet {
+		run = cli.RyshCommandQuiet
+	}
+	resp, err := run(store, sess, tabID, paneID, command)
 	if err != nil {
 		// Transport failure: the command never ran. Distinct from a command
 		// that ran and refused, though both exit 1 — a script reading --json
@@ -134,6 +140,33 @@ func runExecCmd(cfg config.Config, args []string) error {
 		os.Exit(1)
 	}
 	return nil
+}
+
+// execTarget decides which pane an exec runs on, and whether quietly.
+//
+// Run from inside a pane ($RYSH_PANE, in the same session), an exec with no
+// --pane-id / --tab-id targets THAT pane — the caller's own — and runs quietly
+// (no echo, no history; see cli.RyshCommandQuiet). It used to target the
+// workspace's active pane, which is the human's: with dozens of agents in a
+// session, every agent's `rysh exec` echoed into the pane the human was
+// working in, and each echo's history append refreshed the layout of every
+// pane — the load that pushed the human's claude pane past its snapshot
+// deadline and flipped it to its shell view. An explicit --pane-id naming the
+// caller's own pane is quiet for the same reason.
+//
+// --active restores the old target for a script that means "wherever the
+// human is". Outside a pane, or aimed at another session, nothing changes.
+func execTarget(tabID, paneID string, onActive bool, sess, envPane, envSession string) (string, bool) {
+	envPane = strings.TrimSpace(envPane)
+	envSession = strings.TrimSpace(envSession)
+	inThisSession := envPane != "" && (envSession == "" || envSession == sess)
+	if !inThisSession || onActive || tabID != "" {
+		return paneID, false
+	}
+	if paneID == "" {
+		return envPane, true
+	}
+	return paneID, paneID == envPane
 }
 
 // printExecJSON writes the result as one line on stdout.

@@ -298,21 +298,40 @@ func (w *WorkspaceActor) boardAgentUsage(out *strings.Builder, why string) error
 	return fmt.Errorf("%s", why)
 }
 
-// handleBoardAgentPrompt routes one line from the board's input field to the
-// board claude (design 027 §5.2).
+// dispatchBoardAgentPrompt routes one line from the board's input field to the
+// board claude (design 027 §5.2), with the route on a worker (ansa_dispatch.go):
+// the target checks read this actor's state and run here, the ~2 s route does
+// not. Called on the actor's goroutine; returns at once.
 //
 // Everything typed goes here — no verbatim `@tag` bypass (ruling 2). The board
 // claude is in the path precisely so it can reword, add context, or refuse, and
 // a fast path around it would be a way to route that its judgement never sees.
 //
-// Liveness is ASKED, not inferred: routeThroughAnsa probes the target before
+// Liveness is ASKED, not inferred: the route probes the target before
 // delivering, so an unreachable board claude comes back as a refusal with a
 // code rather than as a send that looks fine and lands nowhere. That is the
 // F-25 lesson — "delivered to <name>" while nobody woke — and it is why this
-// reports the router's verdict verbatim instead of its own optimism.
-func (w *WorkspaceActor) handleBoardAgentPrompt(m *msg.MsgBoardAgentPrompt) *msg.MsgCLIResponse {
+// replies with the router's verdict verbatim instead of its own optimism.
+func (w *WorkspaceActor) dispatchBoardAgentPrompt(req *msg.RequestEnvelope, m *msg.MsgBoardAgentPrompt) {
+	paneID, refusal := w.boardAgentPromptTarget(m)
+	if refusal != nil {
+		_ = req.Reply(refusal)
+		return
+	}
+	r := w.ansaRouterDetached()
+	d := w.ansaDispatch()
+	accepted := d.now()
+	text := strings.TrimSpace(m.Text)
+	d.spawn(func() {
+		_ = req.Reply(boardAgentPromptResponse(d.route(r, accepted, "", paneID, "", text)))
+	})
+}
+
+// boardAgentPromptTarget picks the board claude's pane for a prompt, or
+// refuses. Reads actor state: call it on the actor's goroutine.
+func (w *WorkspaceActor) boardAgentPromptTarget(m *msg.MsgBoardAgentPrompt) (string, *msg.MsgCLIResponse) {
 	if m == nil || strings.TrimSpace(m.Text) == "" {
-		return &msg.MsgCLIResponse{OK: false, Error: "empty prompt"}
+		return "", &msg.MsgCLIResponse{OK: false, Error: "empty prompt"}
 	}
 
 	pane, err := w.resolveBoardAgent(m.Board)
@@ -320,7 +339,7 @@ func (w *WorkspaceActor) handleBoardAgentPrompt(m *msg.MsgBoardAgentPrompt) *msg
 		// A board with an input field and no claude behind it must say so. The
 		// alternative — accepting the line and dropping it — is the confident
 		// receipt this whole track exists to kill.
-		return &msg.MsgCLIResponse{OK: false, Error: err.Error()}
+		return "", &msg.MsgCLIResponse{OK: false, Error: err.Error()}
 	}
 
 	// A pane at its shell prompt is not a board claude, whatever it is called.
@@ -328,15 +347,20 @@ func (w *WorkspaceActor) handleBoardAgentPrompt(m *msg.MsgBoardAgentPrompt) *msg
 	// mode is shell mode), so "are you alive" runs in bash and the board
 	// reports a send. Refuse, and say how to bring the claude back.
 	if w.boardAgentAtShell(pane.ID) {
-		return &msg.MsgCLIResponse{OK: false, Error: fmt.Sprintf(
+		return "", &msg.MsgCLIResponse{OK: false, Error: fmt.Sprintf(
 			"the board claude's pane %s is at a shell prompt — its claude is not running, nothing was sent; restart it with %s",
 			shortID(pane.ID), boardAgentUpCommand(m.Board))}
 	}
 
-	// The sender is the board claude's own pane rather than the human's: the
-	// board pane is shell-less and cannot be a sender, and inventing an ambient
-	// one would be a lie about who is talking (workspace_ansa.go).
-	res := w.routeThroughAnsa("", pane.ID, "", strings.TrimSpace(m.Text))
+	return pane.ID, nil
+}
+
+// boardAgentPromptResponse is the board input's answer for a route result.
+//
+// The route has no sender: the board pane is shell-less and cannot be one, and
+// inventing an ambient one would be a lie about who is talking
+// (workspace_ansa.go).
+func boardAgentPromptResponse(res *msg.MsgAnsaRouteResult) *msg.MsgCLIResponse {
 	if !res.OK {
 		return &msg.MsgCLIResponse{OK: false, Error: ansaRefusalLine(res)}
 	}

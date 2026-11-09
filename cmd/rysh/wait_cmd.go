@@ -256,7 +256,7 @@ func runWaitCmd(cfg config.Config, args []string) (int, error) {
 	defer c.Close()
 
 	observe := func() waitObs {
-		resp, err := cli.RyshCommandResult(store, opts.Session, "", "", "pane info "+opts.PaneID+" --json")
+		resp, err := cli.RyshCommandQuiet(store, opts.Session, "", "", "pane info "+opts.PaneID+" --json")
 		if err != nil {
 			return waitObs{Activity: actors.PaneActivityUnknown}
 		}
@@ -296,7 +296,7 @@ func runScreenCmd(cfg config.Config, args []string) error {
 	}
 	// Resolve a given-name or title to the id first, as `rysh wait` does: the
 	// screen read addresses the pane by id.
-	resp, err := cli.RyshCommandResult(store, sess, "", "", "pane info "+paneID+" --json")
+	resp, err := cli.RyshCommandQuiet(store, sess, "", "", "pane info "+paneID+" --json")
 	if err != nil {
 		return err
 	}

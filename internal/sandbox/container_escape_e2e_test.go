@@ -72,7 +72,7 @@ func TestContainerEscapeGitMetadataE2E(t *testing.T) {
 			Workspace: ws, Home: sbxHome, HostHome: home, RyshDir: rysh,
 			Argv: []string{"/bin/sh", "-c", script},
 			Env:  []string{"PATH=" + os.Getenv("PATH"), "LANG=C"},
-			ID:   "g1esc" + strings.Repeat("x", n%3) + string(rune('a'+n%26)),
+			ID:   e2eID(t, "g1esc"+strings.Repeat("x", n%3)+string(rune('a'+n%26))),
 		}
 		plan, err := (&Container{UID: os.Getuid(), GID: os.Getgid()}).Prepare(s)
 		if err != nil {
@@ -185,7 +185,7 @@ func TestContainerEscapeModulesParentRenameE2E(t *testing.T) {
 			Workspace: ws, Home: sbxHome, HostHome: home, RyshDir: rysh,
 			Argv: []string{"/bin/sh", "-c", script},
 			Env:  []string{"PATH=" + os.Getenv("PATH"), "LANG=C"},
-			ID:   "g1ren" + string(rune('a'+n%26)),
+			ID:   e2eID(t, "g1ren"+string(rune('a'+n%26))),
 		}
 		plan, err := (&Container{UID: os.Getuid(), GID: os.Getgid()}).Prepare(s)
 		if err != nil {
@@ -286,7 +286,7 @@ done; echo done`
 		Workspace: ws, Home: sbxHome, HostHome: home, RyshDir: rysh,
 		Argv: []string{"/bin/sh", "-c", script},
 		Env:  []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LANG=C"},
-		ID:   "g1bustok",
+		ID:   e2eID(t, "g1bustok"),
 	}
 	plan, err := (&Container{UID: os.Getuid(), GID: os.Getgid()}).Prepare(s)
 	if err != nil {

@@ -81,13 +81,27 @@ func foregroundCLI(pid int) string {
 	return identifyCLI(pid, processName(pid))
 }
 
+// unverifiedPrefix marks a kernel name that is an allowed CLI's name on a
+// program not identified as that CLI (see identifyCLI).
+const unverifiedPrefix = "unverified:"
+
 // identifyCLI is foregroundCLI for a pid whose kernel name is already known.
 // argv is read only for an interpreter, whose script is checked against the
 // CLI's install locations; it never establishes an identity on its own.
+//
+// The kernel name is the launcher's choice too: a file named claude, or on
+// Linux any binary exec'd through a symlink named claude, is "claude". So an
+// unidentified program with an allowed CLI's name comes back
+// "unverified:claude": the proxy does not watch it, `##pane list` and the
+// process events do not call it claude, and the hooks bridge does not take it
+// for a bridged claude (security-lead, 11-06).
 func identifyCLI(pid int, comm string) string {
 	_, argv := processExecArgs(pid)
 	if name, ok := proxy.IdentifyCLI(processRealExe(pid), argv); ok {
 		return name
+	}
+	if _, known := proxy.ProfileFor(comm); known {
+		return unverifiedPrefix + comm
 	}
 	return comm
 }

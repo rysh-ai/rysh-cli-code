@@ -235,6 +235,11 @@ type PaneSnapshot struct {
 	// "show & (re)bind the browser now" signal, so re-running the command from
 	// another display mode reliably switches the pane back to web.
 	WebActivateSeq int `json:"web_activate_seq,omitempty"`
+	// PreferredMode is a mode the daemon asked this pane to open (e.g.
+	// "company" after ##config load); a front-end that attaches later opens
+	// it once if enabled. Cleared when the user picks another mode or the
+	// mode is disabled. "" = none.
+	PreferredMode string `json:"preferred_mode,omitempty"`
 	// PTYRows/PTYCols are the pane's live PTY grid, and SizeViewports is how
 	// many viewports are currently claiming a size on it (see
 	// msg.MsgPaneResize). A pane on screen in more than one place is sized to
@@ -320,6 +325,15 @@ type PaneSnapshot struct {
 
 	// Connected-to state: the remote pane ID this pane is subscribed to via upstream.
 	ConnectedToPaneID string `json:"connected_to_pane_id,omitempty"`
+
+	// Stale marks a snapshot the PANE did not supply: its actor missed the
+	// snapshot deadline (busy mailbox — a claude redraw storm, dozens of agents
+	// in one session), so the group served the last answer it had, or, with
+	// none, a placeholder. Every field is then a past reading, not the present,
+	// and a client must not act on a transition it shows — above all must not
+	// leave the live (raw) view because RawMode reads false. A pane that was
+	// running claude when it last answered is still running claude.
+	Stale bool `json:"stale,omitempty"`
 
 	// Raw/interactive terminal mode state.
 	RawMode bool `json:"raw_mode,omitempty"`

@@ -76,7 +76,9 @@ func Dispatch(ctx context.Context, pub *msg.NATSPublisher, r Route, t Target, te
 		}
 		return SendCodexQueue(ctx, bin, r.Address, text)
 	case RouteRyshNative:
-		return pub.Send(msg.T("pane", t.PaneID, "inbox"), &msg.MsgPaneExecPrompt{Prompt: text})
+		// A delivery: it waits behind the agent's run in flight instead of
+		// cancelling it (QA-36).
+		return pub.Send(msg.T("pane", t.PaneID, "inbox"), &msg.MsgPaneExecPrompt{Prompt: text, Queue: true})
 	}
 	return fmt.Errorf("unknown route %q", r.Adapter)
 }

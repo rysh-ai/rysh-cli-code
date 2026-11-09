@@ -123,6 +123,9 @@ type world struct {
 	mu       sync.Mutex
 	execs    []*msg.MsgPaneExecPrompt // every MsgPaneExecPrompt a shim received
 	execPane []string
+	// beforeForward, when set, runs in the shim before a prompt reaches the
+	// pane's LLM actor (a test interleaves another run's events there).
+	beforeForward func(pane string)
 }
 
 func newWorld(t *testing.T) *world { t.Helper(); return newWorldWith(t, nil) }
@@ -291,7 +294,13 @@ func (w *world) servePane(id string) {
 		if !m.Literal && strings.HasPrefix(m.Prompt, "##>") {
 			return // PaneActor.executePrompt: a pipeline event, not a prompt
 		}
-		_ = w.pub.Send(llmInbox, &msg.MsgAgenticPrompt{Prompt: m.Prompt})
+		w.mu.Lock()
+		before := w.beforeForward
+		w.mu.Unlock()
+		if before != nil {
+			before(id)
+		}
+		_ = w.pub.Send(llmInbox, &msg.MsgAgenticPrompt{Prompt: m.Prompt, RequestID: m.RequestID, Queue: m.Queue})
 	})
 	w.sub(msg.T("pane", id, "snapshot"), func(_ interface{}, env *msg.NATSEnvelope) {
 		_ = w.pub.Send(env.ReplyTo, &msg.MsgPaneSnapshotReply{Snapshot: domain.PaneSnapshot{ID: id, Meta: w.metaOf(id)}})

@@ -53,14 +53,14 @@ func (p *PaneActor) size() (rows, cols int) { return int(p.ptyRows), int(p.ptyCo
 func TestSmallestClaimWins(t *testing.T) {
 	p := newSizeTestPane(t)
 
-	p.claimPaneSize("web:1", 50, 200)
+	p.claimPaneSize("web:1", 50, 200, false)
 	if rows, cols := p.size(); rows != 50 || cols != 200 {
 		t.Fatalf("single claim = %dx%d, want 50x200", rows, cols)
 	}
 
 	// A terminal attaches at a smaller size — the PTY must shrink to fit it,
 	// not stay at the app's size (which the terminal would have to truncate).
-	p.claimPaneSize(liveClientID(), 24, 80)
+	p.claimPaneSize(liveClientID(), 24, 80, false)
 	if rows, cols := p.size(); rows != 24 || cols != 80 {
 		t.Fatalf("after small claim = %dx%d, want 24x80", rows, cols)
 	}
@@ -68,8 +68,8 @@ func TestSmallestClaimWins(t *testing.T) {
 	// Axes are minimised independently: a short-but-wide viewport joins a
 	// tall-but-narrow one and the result is short AND narrow.
 	p2 := newSizeTestPane(t)
-	p2.claimPaneSize("web:1", 60, 100) // tall, narrow
-	p2.claimPaneSize("web:2", 20, 300) // short, wide
+	p2.claimPaneSize("web:1", 60, 100, false) // tall, narrow
+	p2.claimPaneSize("web:2", 20, 300, false) // short, wide
 	if rows, cols := p2.size(); rows != 20 || cols != 100 {
 		t.Errorf("mixed claims = %dx%d, want 20x100 (min of each axis)", rows, cols)
 	}
@@ -81,8 +81,8 @@ func TestSmallestClaimWins(t *testing.T) {
 func TestClaimReplacesOwnPrevious(t *testing.T) {
 	p := newSizeTestPane(t)
 
-	p.claimPaneSize("web:1", 20, 60)
-	p.claimPaneSize("web:1", 60, 200) // same viewport, resized larger
+	p.claimPaneSize("web:1", 20, 60, false)
+	p.claimPaneSize("web:1", 60, 200, false) // same viewport, resized larger
 	if rows, cols := p.size(); rows != 60 || cols != 200 {
 		t.Errorf("after own re-claim = %dx%d, want 60x200 — a viewport must not "+
 			"be permanently constrained by its own earlier size", rows, cols)
@@ -93,8 +93,8 @@ func TestClaimReplacesOwnPrevious(t *testing.T) {
 // withdraws its claim and the pane expands to whatever viewports remain.
 func TestReleaseRestoresRoom(t *testing.T) {
 	p := newSizeTestPane(t)
-	p.claimPaneSize("web:1", 60, 200)
-	p.claimPaneSize("web:2", 24, 80)
+	p.claimPaneSize("web:1", 60, 200, false)
+	p.claimPaneSize("web:2", 24, 80, false)
 	if rows, _ := p.size(); rows != 24 {
 		t.Fatalf("expected the smaller claim to win, got %d rows", rows)
 	}
@@ -126,8 +126,8 @@ func TestDeadTUIClaimIsPruned(t *testing.T) {
 	p := newSizeTestPane(t)
 	// A pid that is certainly not running. 0 and negatives are rejected by the
 	// parser; this one is past any plausible live process in a test sandbox.
-	p.claimPaneSize("tui:2147483646", 24, 80)
-	p.claimPaneSize("web:1", 60, 200)
+	p.claimPaneSize("tui:2147483646", 24, 80, false)
+	p.claimPaneSize("web:1", 60, 200, false)
 
 	// The dead terminal must not be holding the pane at 24x80.
 	if rows, cols := p.size(); rows != 60 || cols != 200 {
@@ -140,8 +140,8 @@ func TestDeadTUIClaimIsPruned(t *testing.T) {
 	// A malformed tui: id is treated the same way — it can never be proven
 	// alive, so it must not be able to clamp a pane forever.
 	p2 := newSizeTestPane(t)
-	p2.claimPaneSize("tui:not-a-pid", 24, 80)
-	p2.claimPaneSize("web:1", 60, 200)
+	p2.claimPaneSize("tui:not-a-pid", 24, 80, false)
+	p2.claimPaneSize("web:1", 60, 200, false)
 	if rows, _ := p2.size(); rows != 60 {
 		t.Errorf("unparsable TUI claim still constrains the pane: %d rows", rows)
 	}
@@ -152,8 +152,8 @@ func TestDeadTUIClaimIsPruned(t *testing.T) {
 // "the app always wins".
 func TestLiveTUIClaimSurvives(t *testing.T) {
 	p := newSizeTestPane(t)
-	p.claimPaneSize(liveClientID(), 24, 80)
-	p.claimPaneSize("web:1", 60, 200)
+	p.claimPaneSize(liveClientID(), 24, 80, false)
+	p.claimPaneSize("web:1", 60, 200, false)
 	p.pruneDeadSizeClaims()
 
 	if _, held := p.sizeClaims[liveClientID()]; !held {
@@ -170,9 +170,9 @@ func TestLiveTUIClaimSurvives(t *testing.T) {
 // otherwise a stream of anonymous resizes would ratchet the pane to nothing.
 func TestAnonymousClaimsShareOneKey(t *testing.T) {
 	p := newSizeTestPane(t)
-	p.claimPaneSize("", 20, 60)
-	p.claimPaneSize("", 40, 120)
-	p.claimPaneSize("", 60, 180)
+	p.claimPaneSize("", 20, 60, false)
+	p.claimPaneSize("", 40, 120, false)
+	p.claimPaneSize("", 60, 180, false)
 
 	if len(p.sizeClaims) != 1 {
 		t.Errorf("anonymous claims = %d entries, want 1 shared key", len(p.sizeClaims))
@@ -186,9 +186,9 @@ func TestAnonymousClaimsShareOneKey(t *testing.T) {
 // out, a collapsed window) must not clamp the PTY to zero.
 func TestInvalidClaimsIgnored(t *testing.T) {
 	p := newSizeTestPane(t)
-	p.claimPaneSize("web:1", 40, 120)
-	p.claimPaneSize("web:2", 0, 0)
-	p.claimPaneSize("web:3", -1, 50)
+	p.claimPaneSize("web:1", 40, 120, false)
+	p.claimPaneSize("web:2", 0, 0, false)
+	p.claimPaneSize("web:3", -1, 50, false)
 
 	if rows, cols := p.size(); rows != 40 || cols != 120 {
 		t.Errorf("size = %dx%d, want the one valid claim 40x120", rows, cols)
@@ -204,8 +204,8 @@ func TestInvalidClaimsIgnored(t *testing.T) {
 // pane for no viewport at all).
 func TestReapStaleSizeClaimsIsRateLimited(t *testing.T) {
 	p := newSizeTestPane(t)
-	p.claimPaneSize("tui:2147483646", 24, 80) // pruned on arrival
-	p.claimPaneSize("web:1", 60, 200)
+	p.claimPaneSize("tui:2147483646", 24, 80, false) // pruned on arrival
+	p.claimPaneSize("web:1", 60, 200, false)
 
 	// Re-introduce a dead claim WITHOUT going through claimPaneSize (which
 	// prunes eagerly), to model a viewport that died after claiming.
@@ -267,13 +267,13 @@ func TestTransientNarrowClaimNeverReachesPTY(t *testing.T) {
 	p := newSizeTestPane(t)
 	fired := settleHandshake(p)
 
-	p.claimPaneSize("web:1", 50, 200) // grows — immediate
+	p.claimPaneSize("web:1", 50, 200, false) // grows — immediate
 	if rows, cols := p.size(); rows != 50 || cols != 200 {
 		t.Fatalf("after growing claim = %dx%d, want 50x200", rows, cols)
 	}
 
 	// A transient viewport appears and claims something much smaller.
-	p.claimPaneSize(liveClientID(), 24, 70)
+	p.claimPaneSize(liveClientID(), 24, 70, false)
 	if rows, cols := p.size(); rows != 50 || cols != 200 {
 		t.Fatalf("shrink applied immediately = %dx%d, want it held at 50x200", rows, cols)
 	}
@@ -304,8 +304,8 @@ func TestGenuineNarrowLandsAfterSettle(t *testing.T) {
 	p := newSizeTestPane(t)
 	fired := settleHandshake(p)
 
-	p.claimPaneSize("web:1", 50, 200)
-	p.claimPaneSize(liveClientID(), 24, 70)
+	p.claimPaneSize("web:1", 50, 200, false)
+	p.claimPaneSize(liveClientID(), 24, 70, false)
 
 	select {
 	case <-fired:
@@ -327,16 +327,16 @@ func TestShrinkBurstCoalescesToOneResize(t *testing.T) {
 	p := newSizeTestPane(t)
 	fired := settleHandshake(p)
 
-	p.claimPaneSize("web:1", 50, 200)
-	p.claimPaneSize(liveClientID(), 24, 70)
+	p.claimPaneSize("web:1", 50, 200, false)
+	p.claimPaneSize(liveClientID(), 24, 70, false)
 	armed := p.sizeSettleTimer
 	if armed == nil {
 		t.Fatal("no settle armed")
 	}
 
 	// More claims land inside the window, each smaller than the last.
-	p.claimPaneSize("web:1", 40, 90)
-	p.claimPaneSize("web:1", 30, 80)
+	p.claimPaneSize("web:1", 40, 90, false)
+	p.claimPaneSize("web:1", 30, 80, false)
 	if p.sizeSettleTimer != armed {
 		t.Error("a claim inside the window re-armed the timer; shrinks must coalesce, " +
 			"or a fast re-claiming front-end defers the resize indefinitely")
@@ -360,7 +360,7 @@ func TestGrowIsNotDeferred(t *testing.T) {
 	p := newSizeTestPane(t)
 	settleHandshake(p)
 
-	p.claimPaneSize("web:1", 100, 300)
+	p.claimPaneSize("web:1", 100, 300, false)
 	if rows, cols := p.size(); rows != 100 || cols != 300 {
 		t.Fatalf("grow = %dx%d, want 100x300 applied immediately", rows, cols)
 	}
@@ -376,8 +376,8 @@ func TestGrowIsNotDeferred(t *testing.T) {
 func TestArbitrationStaysInlineWithoutMailbox(t *testing.T) {
 	p := newSizeTestPane(t) // sizeSettleSend left nil
 
-	p.claimPaneSize("web:1", 50, 200)
-	p.claimPaneSize(liveClientID(), 24, 70)
+	p.claimPaneSize("web:1", 50, 200, false)
+	p.claimPaneSize(liveClientID(), 24, 70, false)
 	if rows, cols := p.size(); rows != 24 || cols != 70 {
 		t.Fatalf("inline shrink = %dx%d, want 24x70", rows, cols)
 	}
@@ -422,8 +422,8 @@ func TestIdleTUIStopsClampingPane(t *testing.T) {
 	inputs[pidSmall] = now.Add(-20 * time.Minute)
 	inputs[pidBig] = now
 
-	p.claimPaneSize(small, 11, 46)
-	p.claimPaneSize(big, 54, 129)
+	p.claimPaneSize(small, 11, 46, false)
+	p.claimPaneSize(big, 54, 129, false)
 	if rows, cols := p.size(); rows != 54 || cols != 129 {
 		t.Fatalf("with the small window idle = %dx%d, want 54x129", rows, cols)
 	}
@@ -431,7 +431,7 @@ func TestIdleTUIStopsClampingPane(t *testing.T) {
 	// Someone types in the small window: both are in use, so the pane goes back
 	// to a grid both can render.
 	inputs[pidSmall] = now.Add(time.Second)
-	p.claimPaneSize(big, 54, 129)
+	p.claimPaneSize(big, 54, 129, false)
 	if rows, cols := p.size(); rows != 11 || cols != 46 {
 		t.Fatalf("with both windows in use = %dx%d, want 11x46", rows, cols)
 	}
@@ -447,8 +447,8 @@ func TestRecentInputOnBothKeepsSmallest(t *testing.T) {
 	inputs[pidA] = now.Add(-viewportIdleWindow / 2)
 	inputs[pidB] = now
 
-	p.claimPaneSize(a, 20, 60)
-	p.claimPaneSize(b, 50, 200)
+	p.claimPaneSize(a, 20, 60, false)
+	p.claimPaneSize(b, 50, 200, false)
 	if rows, cols := p.size(); rows != 20 || cols != 60 {
 		t.Errorf("= %dx%d, want 20x60 (both in use)", rows, cols)
 	}
@@ -465,8 +465,8 @@ func TestMostRecentTUICountsHoweverOld(t *testing.T) {
 	inputs[pidSmall] = now.Add(-3 * time.Hour)
 	inputs[pidBig] = now.Add(-time.Hour)
 
-	p.claimPaneSize(small, 11, 46)
-	p.claimPaneSize(big, 54, 129)
+	p.claimPaneSize(small, 11, 46, false)
+	p.claimPaneSize(big, 54, 129, false)
 	if rows, cols := p.size(); rows != 54 || cols != 129 {
 		t.Errorf("= %dx%d, want 54x129 (the terminal typed into last)", rows, cols)
 	}
@@ -480,16 +480,16 @@ func TestUnknownInputCountsAsInUse(t *testing.T) {
 	small, big, _, pidBig := twoTUIClaimIDs()
 	inputs[pidBig] = time.Now()
 	// small has no entry: its input time is unknown.
-	p.claimPaneSize(small, 11, 46)
-	p.claimPaneSize(big, 54, 129)
+	p.claimPaneSize(small, 11, 46, false)
+	p.claimPaneSize(big, 54, 129, false)
 	if rows, cols := p.size(); rows != 11 || cols != 46 {
 		t.Errorf("unknown tty = %dx%d, want 11x46", rows, cols)
 	}
 
 	w := newSizeTestPane(t)
 	stubLastInput(w)[os.Getpid()] = time.Now()
-	w.claimPaneSize("web:1", 30, 90)
-	w.claimPaneSize(liveClientID(), 54, 129)
+	w.claimPaneSize("web:1", 30, 90, false)
+	w.claimPaneSize(liveClientID(), 54, 129, false)
 	if rows, cols := w.size(); rows != 30 || cols != 90 {
 		t.Errorf("web claim = %dx%d, want 30x90 (web is never idle)", rows, cols)
 	}
@@ -504,8 +504,8 @@ func TestReapLiftsClampWhenTUIGoesIdle(t *testing.T) {
 	now := time.Now()
 	inputs[pidSmall] = now
 	inputs[pidBig] = now
-	p.claimPaneSize(small, 11, 46)
-	p.claimPaneSize(big, 54, 129)
+	p.claimPaneSize(small, 11, 46, false)
+	p.claimPaneSize(big, 54, 129, false)
 	if rows, cols := p.size(); rows != 11 || cols != 46 {
 		t.Fatalf("both in use = %dx%d, want 11x46", rows, cols)
 	}
@@ -527,13 +527,49 @@ func TestReapLeavesOverrideAlone(t *testing.T) {
 	a, b, pidA, pidB := twoTUIClaimIDs()
 	inputs[pidA] = time.Now()
 	inputs[pidB] = time.Now()
-	p.claimPaneSize(a, 20, 60)
-	p.claimPaneSize(b, 50, 200)
+	p.claimPaneSize(a, 20, 60, false)
+	p.claimPaneSize(b, 50, 200, false)
 
 	p.handleResize(70, 250) // Override
 	p.lastSizeClaimReap = time.Now().Add(-2 * sizeClaimReapInterval)
 	p.reapStaleSizeClaims()
 	if rows, cols := p.size(); rows != 70 || cols != 250 {
 		t.Errorf("sweep undid the override: %dx%d, want 70x250", rows, cols)
+	}
+}
+
+// TestPassiveClaimDoesNotShrinkActiveViewport is the phone-over-tunnel bug: the
+// mobile UI joining a pane a desktop window is showing must not clamp the PTY to
+// the phone's ~45 columns. A passive claim only counts when no active claim is
+// left, and the desktop's size returns the moment the phone is the only viewer
+// it isn't.
+func TestPassiveClaimDoesNotShrinkActiveViewport(t *testing.T) {
+	p := newSizeTestPane(t)
+	p.claimPaneSize("web:1", 50, 200, false)
+
+	p.claimPaneSize("web:2", 30, 45, true) // phone connects
+	if rows, cols := p.size(); rows != 50 || cols != 200 {
+		t.Fatalf("after passive claim = %dx%d, want 50x200 — a phone must not "+
+			"shrink a pane a desktop viewport is showing", rows, cols)
+	}
+
+	// Desktop window closes: the phone is all that is left, so it sizes the pane.
+	p.releasePaneSize("web:1")
+	if rows, cols := p.size(); rows != 30 || cols != 45 {
+		t.Fatalf("passive claim alone = %dx%d, want 30x45", rows, cols)
+	}
+
+	// A desktop viewport returns and takes the pane back.
+	p.claimPaneSize("web:3", 50, 200, false)
+	if rows, cols := p.size(); rows != 50 || cols != 200 {
+		t.Fatalf("active claim over passive = %dx%d, want 50x200", rows, cols)
+	}
+
+	// Two passive claims with nothing active still take the minimum.
+	p2 := newSizeTestPane(t)
+	p2.claimPaneSize("web:1", 30, 45, true)
+	p2.claimPaneSize("web:2", 40, 40, true)
+	if rows, cols := p2.size(); rows != 30 || cols != 40 {
+		t.Errorf("passive-only claims = %dx%d, want 30x40", rows, cols)
 	}
 }

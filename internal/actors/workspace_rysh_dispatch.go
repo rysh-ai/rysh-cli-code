@@ -283,7 +283,7 @@ func init() {
 				"  ##pane list --all            list panes of every tab; --json prints {\"panes\":[...]}\n",
 				"  ##pane name <name>           set a given-name for the active pane (unique per lane)\n",
 				"  ##pane name <pane-id> <name> set a given-name for the pane with that id (see ##pane list)\n",
-				"  ##pane listen <id|alias>     listen to another pane's shared output\n",
+				"  ##pane listen <id|alias> [--allow-sh] listen to another pane's shared output; --allow-sh lets its sh:softdev events run here (a listener restored after a restart comes back without it)\n",
 				"  ##pane unlisten              stop listening\n",
 				"  ##pane provider [name [model]] show or override the active pane's LLM provider (persisted; \\\"default\\\" clears)\n",
 				"  ##pane model [<p>/<name>]     show or switch the active pane's model via .rysh/llms (also: list, scopes, default)\n",

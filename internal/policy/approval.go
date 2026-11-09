@@ -29,6 +29,14 @@ const (
 	ApprovalGate
 )
 
+// builtinAlwaysGate are tools that always stop for a human, whatever the
+// policy files say: the company write tools (CD5; security-lead C-C2), whose
+// input is shaped by customer-written enquiry text.
+var builtinAlwaysGate = map[string]bool{
+	"company_enquiry_update": true,
+	"company_order_status":   true,
+}
+
 // EvaluateToolApproval matches a tool call against the four rule classes and
 // returns the verdict plus the matched rule ID (e.g. "bash.deny[1]"; org rules
 // cite an "org." prefix, e.g. "org.bash.deny[0]", so the audit line names the
@@ -47,6 +55,11 @@ const (
 // "*x*" for a substring match (so a deny survives compound commands like
 // `cd /t && rm -rf x`).
 func (p *Policy) EvaluateToolApproval(toolName string, input json.RawMessage) (ApprovalAction, string) {
+	// Built-in gates come before any file: no rule, flag or missing policy
+	// can un-gate them.
+	if builtinAlwaysGate[toolName] {
+		return ApprovalGate, "builtin.always_gate[" + toolName + "]"
+	}
 	if p == nil {
 		return ApprovalDefault, ""
 	}

@@ -200,14 +200,27 @@ func (w *WorkspaceActor) registerCompanyTools(paneID, cfgFile string) string {
 	if err != nil {
 		return "no tools — " + err.Error()
 	}
-	_ = w.agSetup.MCP.RemoveServer(companyMCPServerName)
 	var sink strings.Builder
-	w.handleMCPSubcommand(&sink, paneID, []string{
-		"add", companyMCPServerName, "stdio", exe, "company", "mcp",
-		"--env", "RYSH_COMPANY_CONFIG=" + cfgFile,
-		"--prefix", "",
-	})
-	return "company_status, company_orders, company_enquiries, company_activity, company_services, company_deadlines, company_ledger (MCP server \"company\", connecting…)"
+	for _, add := range companyMCPAddArgs(exe, cfgFile) {
+		_ = w.agSetup.MCP.RemoveServer(add[1])
+		w.handleMCPSubcommand(&sink, paneID, add)
+	}
+	return "company_status, company_orders, company_enquiries, company_activity, company_services, company_deadlines, company_ledger, company_ledger_summary (MCP server \"company\"); " +
+		"company_enquiry_update, company_order_status (MCP server \"" + companyWriteMCPServerName + "\", every call approved; each needs the owner's tick), connecting…"
+}
+
+// companyWriteMCPServerName is the CD5 write server, kept apart from the
+// read-only "company" server so approval is on for every one of its calls.
+const companyWriteMCPServerName = "company-write"
+
+// companyMCPAddArgs are the `##mcp add` arguments for the company servers: the
+// read-only one as before, and the write one with --approve (CD5, C-C2).
+func companyMCPAddArgs(exe, cfgFile string) [][]string {
+	env := "RYSH_COMPANY_CONFIG=" + cfgFile
+	return [][]string{
+		{"add", companyMCPServerName, "stdio", exe, "company", "mcp", "--env", env, "--prefix", ""},
+		{"add", companyWriteMCPServerName, "stdio", exe, "company", "mcp", "--write", "--env", env, "--prefix", "", "--approve"},
+	}
 }
 
 func (w *WorkspaceActor) printConfigBinding(o ryshOut) {

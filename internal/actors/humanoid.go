@@ -127,8 +127,10 @@ type HumanoidActor struct {
 	// to with /use (E33 slice E2, design 086). In memory only.
 	panePins map[string]panePin
 	// turnPin is the pane the running turn is pinned to ("" for none),
-	// read by the humanoid's pane_send (ledger 193 c).
+	// read by the humanoid's pane_send (ledger 193 c). pinLife ends it with
+	// its turn (N1).
 	turnPin atomic.Value
+	pinLife turnPinLife
 	// listPanes stands in for the workspace snapshot in tests.
 	listPanes func() ([]paneRef, error)
 	// uiFocus tracks which email the desktop email client currently has open (or
@@ -704,6 +706,7 @@ func (h *HumanoidActor) Receive(ctx actor.Context) {
 		slog.Debug("humanoid: forwarding prompt to LLM", "name", h.name,
 			"inbox", h.llmPromptExecInbox,
 			"enriched", enriched != m)
+		h.pinTurn("")
 		_ = h.pub.Send(h.llmPromptExecInbox, enriched)
 
 	case *msg.MsgHumanoidRegisterPane:
@@ -745,6 +748,7 @@ func (h *HumanoidActor) Receive(ctx actor.Context) {
 		if policyGateBlocked(h.pub, h.activeChatPaneID, "humanoid."+h.name+".continue") {
 			return
 		}
+		h.pinLife.resumed()
 		_ = h.pub.Send(h.llmPromptExecInbox, &msg.MsgAgenticContinue{})
 		slog.Info("humanoid: continue requested", "name", h.name)
 
@@ -945,6 +949,9 @@ func (h *HumanoidActor) Receive(ctx actor.Context) {
 			"human_prompt_pending", h.humanPromptPending,
 			"approvals_pending", len(h.pendingApprovals),
 			"buffer_len", h.outboundBuffer.Len())
+		if h.pinLife.status(m.OrchestratorID, m.Phase) {
+			h.turnPin.Store("")
+		}
 		// Clear stale approval state on orchestrator completion — but only for
 		// the run that finished (X5). OrchestratorID is a per-run UUID, so an
 		// orphaned run timing out clears its own held approval and never another
@@ -1047,6 +1054,7 @@ func (h *HumanoidActor) Receive(ctx actor.Context) {
 			if policyGateBlocked(h.pub, h.activeChatPaneID, "humanoid."+h.name+".prompt.request") {
 				return
 			}
+			h.pinTurn("")
 			_ = h.pub.Send(h.llmPromptExecInbox, m.Inner)
 		case *msg.MsgChannelPairList:
 			// Synchronous listing for the ##humanoid pair list command.
@@ -2040,11 +2048,10 @@ func (h *HumanoidActor) processInbound(m *msg.MsgHumanoidInboundMessage) {
 
 	// Build contextual prompt for the LLMPromptExecutionActor.
 	prompt := h.buildContextualPrompt(m, conv)
+	pinPane := ""
 	if pin, ok := h.panePins[convKey]; ok {
 		prompt = pinnedPrompt(pin, prompt)
-		h.turnPin.Store(pin.ID)
-	} else {
-		h.turnPin.Store("")
+		pinPane = pin.ID
 	}
 	// Human-governed Slack: replace the auto-reply prompt with a draft-only
 	// instruction — the AI prepares the reply via slack_draft and shows it; the
@@ -2095,6 +2102,7 @@ func (h *HumanoidActor) processInbound(m *msg.MsgHumanoidInboundMessage) {
 	// Send to LLMPromptExecutionActor.
 	slog.Debug("humanoid: sending prompt to LLM", "name", h.name,
 		"inbox", h.llmPromptExecInbox)
+	h.pinTurn(pinPane)
 	_ = h.pub.Send(h.llmPromptExecInbox, &msg.MsgAgenticPrompt{
 		Prompt: prompt,
 	})

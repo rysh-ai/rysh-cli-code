@@ -752,6 +752,7 @@
       "params": [
         "cols",
         "pane_id",
+        "passive",
         "rows"
       ]
     },

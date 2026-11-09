@@ -32,7 +32,7 @@ func (w *WorkspaceActor) autoOpenCompanyPane() {
 // openCompanyPane enables and activates the company mode on one pane — the
 // same two pushes a humanoid uses to surface its email client (design 020).
 func (w *WorkspaceActor) openCompanyPane(paneID string) {
-	_ = w.pub.Send(msg.T("pane", paneID, "inbox"), &msg.MsgPaneEnableMode{PaneID: paneID, Mode: "company"})
+	_ = w.pub.Send(msg.T("pane", paneID, "inbox"), &msg.MsgPaneEnableMode{PaneID: paneID, Mode: "company", Activate: true})
 	_ = w.pub.Send(msg.T("pane", paneID, "activateMode"), &msg.MsgPaneActivateMode{PaneID: paneID, Mode: "company"})
 }
 

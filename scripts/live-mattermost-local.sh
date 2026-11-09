@@ -38,7 +38,10 @@ NAME=""; CHILD=""
 cleanup() {
   if [ -n "$CHILD" ]; then kill -TERM "$CHILD" 2>/dev/null; wait "$CHILD" 2>/dev/null; CHILD=""; fi
   if [ -n "$NAME" ]; then
-    ctr stop "$NAME" >/dev/null 2>&1; ctr rm -f "$NAME" >/dev/null 2>&1
+    # -v: the image declares two volumes (Mattermost data, Postgres) holding this run's throwaway
+    # accounts and tokens; without it every run left both behind in the VM. No stop first: the
+    # server ignores SIGTERM, so a stop waited out the 10 s grace; rm -f kills it at once.
+    ctr rm -f -v "$NAME" >/dev/null 2>&1
     step "container $NAME removed; ours left: $(ctr ps -a --filter "label=$LABEL" --format '{{.Names}}' 2>/dev/null | grep -c .)"
     NAME=""
   fi
@@ -50,7 +53,7 @@ ctr info >/dev/null 2>&1 || { step "SKIP: container runtime (context $CONTEXT) i
 
 # A run killed with SIGKILL leaves its container behind; remove ours only, by label.
 for old in $(ctr ps -a --filter "label=$LABEL" --format '{{.Names}}' 2>/dev/null); do
-  ctr rm -f "$old" >/dev/null 2>&1 && step "removed a leftover container of ours: $old"
+  ctr rm -f -v "$old" >/dev/null 2>&1 && step "removed a leftover container of ours: $old"
 done
 
 ctr image inspect "$IMAGE" >/dev/null 2>&1 || { step "INFRA: image not present (never pulled at night): pull once by day, by digest: $IMAGE"; exit 3; }

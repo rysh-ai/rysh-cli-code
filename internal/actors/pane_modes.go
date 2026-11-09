@@ -5,6 +5,7 @@ package actors
 import (
 	"fmt"
 	"regexp"
+	"slices"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
 )
@@ -208,6 +209,9 @@ func (p *PaneActor) releaseHumanoid(m *msg.MsgPaneReleaseHumanoid) {
 }
 
 func (p *PaneActor) handleDisableMode(mode string, humanoid bool) {
+	if mode != "shell" && p.preferredMode == mode {
+		p.preferredMode = ""
+	}
 	if mode == "shell" {
 		_ = p.pub.SendPaneRyshOutput(p.id, "[rysh] error: shell mode cannot be disabled\n")
 		return
@@ -255,4 +259,24 @@ func (p *PaneActor) handleDisableMode(mode string, humanoid bool) {
 	p.kvDirty = true
 	p.notifyLayoutDirty()
 	_ = p.pub.SendPaneRyshOutput(p.id, fmt.Sprintf("[rysh] disabled mode %q\n", mode))
+}
+
+// handleEnableModeMsg applies a MsgPaneEnableMode; with Activate it also
+// records the mode as preferred, once it is really enabled.
+func (p *PaneActor) handleEnableModeMsg(m *msg.MsgPaneEnableMode) {
+	p.handleEnableMode(m.Mode, m.WebProfile, m.WebURL, m.Humanoid)
+	if m.Activate && slices.Contains(p.enabledModes, m.Mode) {
+		p.preferredMode = m.Mode
+		p.kvDirty = true
+	}
+}
+
+// setInputMode is the pane's mode following the user's input; picking a mode
+// other than the preferred one ends the preference.
+func (p *PaneActor) setInputMode(mode string) {
+	p.mode = mode
+	if p.preferredMode != "" && p.preferredMode != mode {
+		p.preferredMode = ""
+		p.kvDirty = true
+	}
 }

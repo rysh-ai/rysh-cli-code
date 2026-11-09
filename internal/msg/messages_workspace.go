@@ -325,6 +325,14 @@ type MsgCLIRyshCommand struct {
 	TabID   string `json:"tab_id"`  // empty = active tab
 	PaneID  string `json:"pane_id"` // empty = active (or TabID's active) pane
 	Command string `json:"command"` // rysh command body WITHOUT leading "##"
+	// Quiet: run the command without echoing its line into the pane's buffers
+	// or recording it in the pane's histories. Set by `rysh exec` when it ran
+	// inside a pane and targeted that pane by default ($RYSH_PANE): the shell
+	// there already shows the command, and each history append forces a
+	// layout refresh of every pane — with dozens of agents calling rysh exec,
+	// that refresh traffic is what pushed panes past their snapshot deadline.
+	// Older daemons ignore the field and echo as before.
+	Quiet bool `json:"quiet,omitempty"`
 }
 
 // MsgCLICronApply carries an edited cron job Input back from `rysh cron apply

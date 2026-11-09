@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
@@ -37,19 +38,35 @@ import (
 // same pane inbox as the actor's transport.
 type workspaceAnsaTransport struct {
 	w *WorkspaceActor
+	// tabIDs, when non-nil, is the session's tab list copied on the actor's
+	// goroutine (ansaRouterDetached). Panes reads it instead of w.tabs, which
+	// only the actor may touch — that is what lets a route run on a worker.
+	// Every other method uses only w.pub, which is safe from any goroutine.
+	tabIDs []string
+}
+
+func (t *workspaceAnsaTransport) tabIDList() []string {
+	if t.tabIDs != nil {
+		return t.tabIDs
+	}
+	ids := make([]string, 0, len(t.w.tabs))
+	for _, info := range t.w.tabs {
+		ids = append(ids, info.id)
+	}
+	return ids
 }
 
 func (t *workspaceAnsaTransport) Panes() ([]ansaPane, error) {
 	var out []ansaPane
-	for _, info := range t.w.tabs {
-		tabSnap := t.w.queryTabSnapshot(info.id)
+	for _, tabID := range t.tabIDList() {
+		tabSnap := t.w.queryTabSnapshot(tabID)
 		if tabSnap == nil {
 			// A tab that cannot answer is NOT an empty tab. Reporting it as one
 			// would turn "I could not look" into "it is not there", and the
 			// caller would be told its target does not exist when the truth is
 			// that the session is under load. That distinction is the whole
 			// reason AnsaErrDirectory is a separate code.
-			return nil, fmt.Errorf("tab %s did not answer a snapshot request", info.id)
+			return nil, fmt.Errorf("tab %s did not answer a snapshot request", tabID)
 		}
 		for p := range domain.PanesInTab(tabSnap) {
 			// Meta is COPIED, not aliased — see ansaPane.Meta. This transport
@@ -153,29 +170,54 @@ func (t *workspaceAnsaTransport) Screen(paneID string) ([]string, error) {
 	return vt.Screen, nil
 }
 
-// ansaRouterFor builds the workspace-local router.
+// ansaRouterFor builds the workspace-local router. Its transport reads w.tabs,
+// so it is for the actor's own goroutine only; a worker uses
+// ansaRouterDetached.
 func (w *WorkspaceActor) ansaRouterFor() *ansaRouter {
-	return &ansaRouter{tr: &workspaceAnsaTransport{w: w}}
+	return &ansaRouter{tr: &workspaceAnsaTransport{w: w}, lanes: w.ansaDispatch()}
 }
 
-// routeThroughAnsa is the shared body of both doors: resolve the target at the
-// edge, then route BY ID.
+// ansaRouterDetached builds a router a worker goroutine may use: the tab list
+// is copied here, on the actor's goroutine, so the worker never reads w.tabs.
+// Call it from the actor.
+func (w *WorkspaceActor) ansaRouterDetached() *ansaRouter {
+	t := &workspaceAnsaTransport{w: w}
+	t.tabIDs = t.tabIDList()
+	return &ansaRouter{tr: t, lanes: w.ansaDispatch()}
+}
+
+// ansaDispatch is the session's ANSA dispatcher (ansa_dispatch.go).
+func (w *WorkspaceActor) ansaDispatch() *ansaDispatcher {
+	w.ansaDispOnce.Do(func() { w.ansaDisp = newAnsaDispatcher(ansaRouteSlots) })
+	return w.ansaDisp
+}
+
+// routeThroughAnsa is the shared body of every door: resolve the target at the
+// edge, then route BY ID, holding the target's lane. Synchronous — the
+// caller's goroutine waits — and for the actor's goroutine only (it reads
+// w.tabs). The agent door and the board prompt do not use it; they dispatch to
+// a worker instead (dispatchCLIAnsaSend, dispatchBoardAgentPrompt). The human
+// ##ansa send still does, because its answer is written into the ## command's
+// output; it takes the same lane, so it cannot interleave with a worker's
+// delivery to the same pane.
 func (w *WorkspaceActor) routeThroughAnsa(from, to, mode, text string) *msg.MsgAnsaRouteResult {
-	r := w.ansaRouterFor()
+	return w.ansaDispatch().route(w.ansaRouterFor(), time.Time{}, from, to, mode, text)
+}
 
-	panes, err := r.tr.Panes()
-	if err != nil {
-		return msg.AnsaRefusal(msg.AnsaErrDirectory,
-			"cannot enumerate the session's panes, so %q can be neither found nor ruled out: %v", to, err)
+// dispatchCLIAnsaSend answers `rysh ansa send` from a worker. Called on the
+// actor's goroutine; returns at once.
+func (w *WorkspaceActor) dispatchCLIAnsaSend(req *msg.RequestEnvelope, m *msg.MsgCLIAnsaSend) {
+	if m == nil {
+		_ = req.Reply(w.handleCLIAnsaSend(nil))
+		return
 	}
-
-	// THE EDGE. @name becomes a pane uuid here and nowhere deeper.
-	target, refusal := ansaResolveTarget(panes, to)
-	if refusal != nil {
-		return refusal
-	}
-
-	return r.Route(msg.NewAnsaRoute(from, target.ID, mode, text))
+	r := w.ansaRouterDetached()
+	d := w.ansaDispatch()
+	accepted := d.now()
+	d.spawn(func() {
+		res := d.route(r, accepted, strings.TrimSpace(m.AsPaneID), m.To, m.Mode, m.Text)
+		_ = req.Reply(ansaSendResponse(res))
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -197,7 +239,11 @@ func (w *WorkspaceActor) handleCLIAnsaSend(m *msg.MsgCLIAnsaSend) *msg.MsgCLIRes
 	// pane (cron, a script, a test) is legitimate.
 	from := strings.TrimSpace(m.AsPaneID)
 
-	res := w.routeThroughAnsa(from, m.To, m.Mode, m.Text)
+	return ansaSendResponse(w.routeThroughAnsa(from, m.To, m.Mode, m.Text))
+}
+
+// ansaSendResponse is the agent door's answer for a route result.
+func ansaSendResponse(res *msg.MsgAnsaRouteResult) *msg.MsgCLIResponse {
 	if !res.OK {
 		return &msg.MsgCLIResponse{OK: false, Error: ansaRefusalLine(res)}
 	}

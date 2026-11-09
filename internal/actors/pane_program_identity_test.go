@@ -23,7 +23,8 @@ import (
 
 // startProgramAs runs a stand-in binary at path, exec'd through link with
 // argv[0] = arg0, preferably in its own process group, and waits until the
-// kernel names it wantComm. It returns the pid. The child is started and
+// kernel names it as it does on this OS (wantComm is darwin's name; see
+// kernelName). It returns the pid. The child is started and
 // stopped by startOwnChild (pane_identity_realexe_test.go).
 func startProgramAs(t *testing.T, path, link, arg0, wantComm string) int {
 	t.Helper()
@@ -36,6 +37,7 @@ func startProgramAs(t *testing.T, path, link, arg0, wantComm string) int {
 		exe = link
 	}
 	pid := startOwnChild(t, exe, []string{arg0, "60"})
+	wantComm = kernelName(exe, wantComm)
 	var comm string
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {

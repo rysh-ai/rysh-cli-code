@@ -31,7 +31,8 @@ type Record struct {
 	// PIDStart is the daemon process's start time as ProcessStart reports it,
 	// stamped by the daemon itself. With PID it identifies the process: a
 	// different start time under the same PID is a recycled PID, which is
-	// never signalled (TerminateDaemon). 0 in records from older daemons.
+	// never signalled (TerminateDaemon). 0 in records from daemons older than
+	// v0.2.14, which are never signalled either.
 	PIDStart int64 `json:"pid_start,omitempty"`
 	TUIPIDs  []int `json:"tui_pids,omitempty"` // all attached TUI process PIDs
 	// AppClients is the number of desktop-app (WebSocket) clients currently
@@ -731,8 +732,7 @@ func terminate(pid int, grace time.Duration, stillOurs func() bool) error {
 }
 
 // ErrNotOurDaemon means the process now holding a record's PID is provably not
-// the daemon that wrote the record (a different start time, or for an older
-// record a different argv): the PID was recycled and the session's daemon is
+// the daemon that wrote the record (a different start time): the PID was recycled and the session's daemon is
 // gone. Nothing was signalled.
 var ErrNotOurDaemon = errors.New("the process holding this PID is not the session's daemon (PID recycled)")
 
@@ -740,30 +740,28 @@ var ErrNotOurDaemon = errors.New("the process holding this PID is not the sessio
 // was not signalled. Unlike ErrNotOurDaemon it proves nothing about the daemon.
 var ErrDaemonIdentityUnknown = errors.New("cannot verify that this PID is the session's daemon")
 
+// ErrLegacyDaemonRecord is ErrDaemonIdentityUnknown for a record written by a
+// daemon older than v0.2.14, which carries no PIDStart: its PID is never
+// signalled.
+var ErrLegacyDaemonRecord = fmt.Errorf("%w: the session's daemon was started by rysh older than v0.2.14, which did not record its start time; "+
+	"check the PID with ps and stop it with kill, then retry", ErrDaemonIdentityUnknown)
+
 // daemonIdentity checks that rec.PID is still the daemon that wrote rec: the
-// same start time when the record has one (security-lead N1, ledger 97), else,
-// for a record from an older daemon, an argv of "... daemon <session> ...".
+// same start time (security-lead N1, ledger 97). A record without one, from a
+// daemon older than v0.2.14, is never matched: the argv fallback it once used
+// is retired.
 func daemonIdentity(rec Record) error {
-	if rec.PIDStart != 0 {
-		cur, ok := ProcessStart(rec.PID)
-		if !ok {
-			return ErrDaemonIdentityUnknown
-		}
-		if cur != rec.PIDStart {
-			return ErrNotOurDaemon
-		}
-		return nil
-	}
-	argv, ok := processArgs(rec.PID)
+	cur, ok := ProcessStart(rec.PID)
 	if !ok {
 		return ErrDaemonIdentityUnknown
 	}
-	for i := 0; i+1 < len(argv); i++ {
-		if argv[i] == "daemon" && argv[i+1] == rec.Name {
-			return nil
-		}
+	if rec.PIDStart == 0 {
+		return ErrLegacyDaemonRecord
 	}
-	return ErrNotOurDaemon
+	if cur != rec.PIDStart {
+		return ErrNotOurDaemon
+	}
+	return nil
 }
 
 // TerminateDaemon is Terminate for a session's daemon: it signals rec.PID only

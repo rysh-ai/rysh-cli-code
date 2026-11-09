@@ -97,6 +97,8 @@ type PaneActor struct {
 	// the supervisor and the daemon.
 	meta map[string]string
 	mode string
+	// preferredMode: see domain.PaneSnapshot.PreferredMode.
+	preferredMode string
 	// paneType marks a special pane variant — see the domain.PaneType*
 	// constants. "" is a regular shell pane; "replay" (design 006 v2) and
 	// "agents-board" (design 025) never start a shell/PTY, their content being
@@ -778,7 +780,7 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 			// leave the claim set alone.
 			p.handleResize(m.Rows, m.Cols)
 		} else {
-			p.claimPaneSize(m.ClientID, m.Rows, m.Cols)
+			p.claimPaneSize(m.ClientID, m.Rows, m.Cols, m.Passive)
 		}
 
 	case *msg.MsgPaneReleaseSize:
@@ -852,10 +854,15 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 			ctx.Stop(p.listenerPID)
 		}
 		listener := NewPaneSharedOutputListenerActor(p.id, m.TargetPaneID, m.TargetAlias, p.pub, p.nc)
+		listener.allowShell = m.AllowShell
 		p.listenerPID = ctx.Spawn(actor.PropsFromProducer(func() actor.Actor { return listener }))
 		p.listeningTo = m.TargetAlias
 		p.listeningToID = m.TargetPaneID
-		p.appendOutput(fmt.Sprintf("\n[rysh] listening to pane %s\n", m.TargetAlias))
+		if m.AllowShell {
+			p.appendOutput(fmt.Sprintf("\n[rysh] listening to pane %s (shell events allowed)\n", m.TargetAlias))
+		} else {
+			p.appendOutput(fmt.Sprintf("\n[rysh] listening to pane %s\n", m.TargetAlias))
+		}
 
 	case *msg.MsgStopPaneListener:
 		if p.listenerPID != nil {
@@ -991,7 +998,7 @@ func (p *PaneActor) Receive(ctx actor.Context) {
 	// --- Per-pane mode enable/disable handlers ---
 
 	case *msg.MsgPaneEnableMode:
-		p.handleEnableMode(m.Mode, m.WebProfile, m.WebURL, m.Humanoid)
+		p.handleEnableModeMsg(m)
 
 	case *msg.MsgPaneDisableMode:
 		// Disabling web mode also retires the headless executor, if any.

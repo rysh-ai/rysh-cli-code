@@ -238,11 +238,25 @@ func (w *WorkspaceActor) runRyshCommand(ctx actor.Context, paneID, mode, fullTex
 	default: // "shell" and non-interactive callers (CLI / #### relay)
 		_ = w.pub.SendPaneShellHistory(paneID, echoText)
 	}
-	cmdEcho := echoText + "\n"
-	_ = w.pub.SendPaneOutput(paneID, cmdEcho)
-	_ = w.pub.SendPaneRyshOutput(paneID, cmdEcho)
+	w.ryshOutputSink(paneID, mode, true)(echoText + "\n")
 	kind, body := splitRyshPrefix(fullText)
-	return w.handleRyshCommand(ctx, paneID, "", body, true, kind)
+	return w.handleRyshCommand(ctx, paneID, mode, body, true, kind)
+}
+
+// runRyshCommandQuiet is runRyshCommand without the echo and the history
+// entries: for a program running a ## command on its own pane (rysh exec from
+// inside a pane, see MsgCLIRyshCommand.Quiet), where the shell already shows
+// the line and every history append would force a layout refresh of the whole
+// session.
+//
+// The command's output still lands in the pane's rysh buffer (its record of ##
+// commands, a double-Esc away) but never in the merged shell view, which is
+// what the live view falls back to; the caller gets it in the reply anyway.
+func (w *WorkspaceActor) runRyshCommandQuiet(ctx actor.Context, paneID, fullText string) (string, error) {
+	kind, body := splitRyshPrefix(fullText)
+	pub := w.pub
+	sink := func(s string) { _ = pub.SendPaneRyshOutput(paneID, s) }
+	return w.handleRyshCommandTo(ctx, paneID, "", body, kind, sink)
 }
 
 // runRyshCommandOut is runRyshCommand for callers that only want the text.
@@ -398,6 +412,12 @@ func (w *WorkspaceActor) handleRemoteRyshCommand(paneID, body string) {
 // `.rysh/commands/`. See workspace_user_commands.go for why that separation is
 // the point rather than a convenience.
 func (w *WorkspaceActor) handleRyshCommand(ctx actor.Context, paneID, inputMode, cmdText string, mirrorToRysh bool, kind ryshCmdKind) (string, error) {
+	return w.handleRyshCommandTo(ctx, paneID, inputMode, cmdText, kind, w.ryshOutputSink(paneID, inputMode, mirrorToRysh))
+}
+
+// handleRyshCommandTo is handleRyshCommand with the output sink chosen by the
+// caller (runRyshCommandQuiet keeps output out of the pane's shell view).
+func (w *WorkspaceActor) handleRyshCommandTo(ctx actor.Context, paneID, inputMode, cmdText string, kind ryshCmdKind, sink func(string)) (string, error) {
 	parts := strings.Fields(strings.TrimSpace(cmdText))
 
 	var out strings.Builder
@@ -415,8 +435,6 @@ func (w *WorkspaceActor) handleRyshCommand(ctx actor.Context, paneID, inputMode,
 	// a create can put focus back there rather than on whoever issued the
 	// command (restoreFocusAfterCreate).
 	defer w.captureHumanFocus()()
-
-	sink := w.ryshOutputSink(paneID, inputMode, mirrorToRysh)
 
 	switch {
 	case len(parts) == 0:
@@ -480,15 +498,32 @@ func (w *WorkspaceActor) handleRyshCommand(ctx actor.Context, paneID, inputMode,
 //
 // mirrorToRysh means the command was entered with an explicit ## prefix: the
 // result is published to BOTH the merged/shell output buffer and the rysh
-// output buffer, so it is visible in either mode. An implicit command (typed
-// while already in rysh mode) goes to the buffer matching inputMode.
+// output buffer, so it is visible in either mode. Typed in prompt or chat mode
+// it is also shown in that mode's view (QA-33), through the display-only
+// append: never as a conversation turn, which on the AI buffer would feed the
+// pane's memory summaries. An implicit command (typed while already in rysh
+// mode) goes to the buffer matching inputMode.
 func (w *WorkspaceActor) ryshOutputSink(paneID, inputMode string, mirrorToRysh bool) func(string) {
 	pub := w.pub
 	switch {
 	case mirrorToRysh:
+		var shown func(string)
+		switch inputMode {
+		case "prompt":
+			shown = func(s string) {
+				_ = pub.Send(msg.T("pane", paneID, "output", "ai"), &msg.MsgPaneAIOutputAppend{Text: s})
+			}
+		case "chat":
+			shown = func(s string) {
+				_ = pub.Send(msg.T("pane", paneID, "output", "chat"), &msg.MsgPaneChatOutputAppend{Text: s})
+			}
+		}
 		return func(s string) {
 			_ = pub.SendPaneOutput(paneID, s)
 			_ = pub.SendPaneRyshOutput(paneID, s)
+			if shown != nil {
+				shown(s)
+			}
 		}
 	case inputMode == "rysh":
 		return func(s string) { _ = pub.SendPaneRyshOutput(paneID, s) }
@@ -578,7 +613,13 @@ func (w *WorkspaceActor) handleCLIRyshCommand(ctx actor.Context, m *msg.MsgCLIRy
 		return &msg.MsgCLIResponse{OK: false, Error: "no target pane (specify --pane-id or --tab-id)"}
 	}
 
-	out, cmdErr := w.runRyshCommand(ctx, paneID, "", ryshCommandLine(cmd))
+	var out string
+	var cmdErr error
+	if m.Quiet {
+		out, cmdErr = w.runRyshCommandQuiet(ctx, paneID, ryshCommandLine(cmd))
+	} else {
+		out, cmdErr = w.runRyshCommand(ctx, paneID, "", ryshCommandLine(cmd))
+	}
 	w.persistToKV()
 	if cmdErr != nil {
 		return &msg.MsgCLIResponse{OK: false, Output: out, Error: cmdErr.Error()}

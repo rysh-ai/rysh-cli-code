@@ -43,10 +43,12 @@ func installedClaude(t *testing.T, version string) (home, real string) {
 }
 
 // startExe execs exe with argv (see startOwnChild) and waits until the kernel
-// names it wantComm. It returns the pid.
+// names it as it does on this OS (wantComm is darwin's name; see kernelName).
+// It returns the pid.
 func startExe(t *testing.T, exe string, argv []string, wantComm string) int {
 	t.Helper()
 	pid := startOwnChild(t, exe, argv)
+	wantComm = kernelName(exe, wantComm)
 	var comm string
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -178,6 +180,19 @@ func TestIdentityCLINamedSymlinkToAnotherBinaryIsNotIdentified(t *testing.T) {
 	if got := foregroundCLI(pid); isKnownCLI(got) {
 		t.Fatalf("foregroundCLI = %q for a %s binary reached through a symlink "+
 			"named claude: the as-invoked path decided the identity", got, name)
+	}
+}
+
+// A binary FILE named like an allowed CLI, outside its install locations. Not
+// identified: the kernel names it "claude" on every OS, and that name is the
+// launcher's choice. Linux gives a symlink's name the same way, which is how
+// the dev-host runner found it (infra-ops 11-06).
+func TestIdentityBinaryNamedLikeACLIIsNotIdentified(t *testing.T) {
+	pid := startProgramAs(t, filepath.Join(t.TempDir(), "claude"), "", "claude", "claude")
+
+	if got := foregroundCLI(pid); isKnownCLI(got) {
+		t.Fatalf("foregroundCLI = %q for a binary named claude outside its install "+
+			"locations: the kernel's name decided the identity", got)
 	}
 }
 

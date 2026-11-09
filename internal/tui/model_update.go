@@ -1038,7 +1038,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			slog.Debug("tui: workspace snapshot applied",
 				"activePane", msg.snapshot.ActivePaneID, "hash", msg.hash, "mode", string(m.mode))
 			m.lastWorkspaceHash = msg.hash
-			m.snapshot = msg.snapshot
+			// A pane that missed the daemon's deadline keeps the state it had
+			// here, rather than the placeholder's RawMode=false (see
+			// carryStalePanes) — the busy-session claude→shell flip.
+			m.snapshot = carryStalePanes(m.snapshot, msg.snapshot)
 			// Clear attention for the newly active pane.
 			if m.attentionState != nil && m.snapshot.ActivePaneID != "" {
 				delete(m.attentionState, m.snapshot.ActivePaneID)
@@ -1049,6 +1052,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.fullscreenPaneID = ""
 			}
 			m.recomputePaneRects()
+			m.sendPaneResizesIfLayoutChanged()
 			// Sync pipeline output from snapshot (authoritative).
 			for _, tab := range m.snapshot.Tabs {
 				if tab.PipelineOutput != "" {

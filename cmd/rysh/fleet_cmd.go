@@ -193,7 +193,7 @@ func runFleetMember(store *session.Store, sess string, rest []string, jsonOut bo
 // stampFleetAgent records what runs in a member's pane (pane meta
 // fleet.agent). A variable so tests can see the call without a daemon.
 var stampFleetAgent = func(store *session.Store, sess, paneID, agent string) error {
-	resp, err := cli.RyshCommandResult(store, sess, "", "", "##pane meta set fleet.agent "+agent+" --pane "+paneID)
+	resp, err := cli.RyshCommandQuiet(store, sess, "", "", "##pane meta set fleet.agent "+agent+" --pane "+paneID)
 	if err != nil {
 		return fmt.Errorf("rysh fleet member: member recorded, but fleet.agent was not stamped: %w", err)
 	}

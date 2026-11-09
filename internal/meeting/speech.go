@@ -333,7 +333,7 @@ func elevenLabsTranscribe(ctx context.Context, key, endpoint string, audio <-cha
 			// ~100 ms chunks (16 kHz × 2 bytes): fewer, larger messages.
 			if len(buf) >= 3200 {
 				if send(buf, false) != nil {
-					return errors.New("elevenlabs send failed")
+					return elevenLabsSendFailed(ctx, readErr)
 				}
 				buf, pending = nil, true
 			}
@@ -344,6 +344,21 @@ func elevenLabsTranscribe(ctx context.Context, key, endpoint string, audio <-cha
 				buf, pending = nil, false
 			}
 		}
+	}
+}
+
+// elevenLabsSendFailed is the error for a failed send. The server closes the
+// stream right after it says why (auth_error, quota_exceeded, …), so a send
+// can fail before the reader has passed that on; the reader's reason, if it
+// comes within a second, is the answer.
+func elevenLabsSendFailed(ctx context.Context, readErr <-chan error) error {
+	select {
+	case err := <-readErr:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(time.Second):
+		return errors.New("elevenlabs send failed")
 	}
 }
 

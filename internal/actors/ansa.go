@@ -206,6 +206,23 @@ type ansaTransport interface {
 // an id belongs, that is the bug — not the absence of uniqueness enforcement.
 type ansaRouter struct {
 	tr ansaTransport
+	// lanes, when set, is the workspace's ANSA dispatcher: Keys takes the
+	// target pane's lane so its presses cannot land in the middle of a message
+	// being typed into the same composer by a worker (ansa_dispatch.go). Route
+	// does not take it itself — ansaDispatcher.route already holds it around
+	// the call. Interrupt and kill deliberately do not wait for it: they exist
+	// to cut in on a busy agent, type no text, and must not queue behind the
+	// very messages they may be stopping.
+	lanes *ansaDispatcher
+}
+
+// lockLane takes paneID's lane when the router has a dispatcher; otherwise it
+// is a no-op.
+func (r *ansaRouter) lockLane(paneID string) (unlock func()) {
+	if r.lanes == nil {
+		return func() {}
+	}
+	return r.lanes.lock(paneID)
 }
 
 // Route delivers to a pane addressed BY ID, checks it is alive first, and

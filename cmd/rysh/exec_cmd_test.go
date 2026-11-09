@@ -111,3 +111,34 @@ func TestDetectRyshCmd_ExcludedFlags(t *testing.T) {
 		t.Error("--session must stay a targeting flag")
 	}
 }
+
+// execTarget: inside a pane, an untargeted exec runs on the CALLER's pane and
+// quietly — not on the human's active pane with an echo (the busy-session
+// claude→shell flip). Outside a pane, or aimed elsewhere, nothing changes.
+func TestExecTarget(t *testing.T) {
+	cases := []struct {
+		name                      string
+		tab, pane                 string
+		active                    bool
+		sess, envPane, envSession string
+		wantPane                  string
+		wantQuiet                 bool
+	}{
+		{"outside a pane: active pane, loud", "", "", false, "s", "", "", "", false},
+		{"in a pane, untargeted: own pane, quiet", "", "", false, "s", "pA", "s", "pA", true},
+		{"in a pane, no RYSH_SESSION: own pane, quiet", "", "", false, "s", "pA", "", "pA", true},
+		{"explicit own pane: quiet", "", "pA", false, "s", "pA", "s", "pA", true},
+		{"explicit other pane: loud", "", "pB", false, "s", "pA", "s", "pB", false},
+		{"--active: human's pane, loud", "", "", true, "s", "pA", "s", "", false},
+		{"--tab-id: tab's active pane, loud", "t2", "", false, "s", "pA", "s", "", false},
+		{"other session: unchanged", "", "", false, "other", "pA", "s", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pane, quiet := execTarget(c.tab, c.pane, c.active, c.sess, c.envPane, c.envSession)
+			if pane != c.wantPane || quiet != c.wantQuiet {
+				t.Errorf("execTarget = (%q, %v), want (%q, %v)", pane, quiet, c.wantPane, c.wantQuiet)
+			}
+		})
+	}
+}

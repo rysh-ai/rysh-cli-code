@@ -35,6 +35,7 @@ func (p *PaneActor) buildSnapshot(includeContent, includeConversations, includeH
 		Title:                 p.title,
 		PaneType:              p.paneType,
 		Mode:                  p.mode,
+		PreferredMode:         p.preferredMode,
 		EnabledModes:          p.enabledModes,
 		WebURL:                p.webURL,
 		WebProfile:            p.webProfile,
@@ -485,6 +486,7 @@ func (p *PaneActor) deleteKVKeys() {
 func (p *PaneActor) RestoreState(snap domain.PaneSnapshot) {
 	p.output.Set(snap.Output)
 	p.mode = snap.Mode
+	p.preferredMode = snap.PreferredMode
 	// Pane variant survives a restart: a restored replay pane must stay
 	// shell-less. Only set when the snapshot carries one — normal panes keep
 	// whatever the group assigned.

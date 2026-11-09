@@ -111,6 +111,9 @@ func writeClaudeMCPConfig(sessionDir, exe, cfgFile string) (string, error) {
 		"args":    []string{"company", "mcp"},
 		"env":     map[string]string{"RYSH_COMPANY_CONFIG": cfgFile},
 	}
+	// Never company-write: rysh's approval gate does not run inside Claude
+	// Code, where bypass mode or "always allow" would let writes through
+	// unasked (security-lead K1). Claude Code gets the read-only server only.
 	doc["mcpServers"] = servers
 	out, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {

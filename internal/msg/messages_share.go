@@ -437,7 +437,10 @@ type MsgShareEnableMode struct {
 // For Mode=="web", WebProfile/WebURL carry the browser binding and are refreshed
 // on re-enable. Routed: WorkspaceActor → PaneActor (direct, pass-through).
 type MsgPaneEnableMode struct {
-	PaneID     string `json:"pane_id"`
+	PaneID string `json:"pane_id"`
+	// Activate also records Mode as the pane's preferred mode: a front-end
+	// attaching later opens it (the company view, desktop CD3 N1).
+	Activate   bool   `json:"activate,omitempty"`
 	Mode       string `json:"mode"` // canonical: shell|prompt|rysh|chat|external|web
 	WebProfile string `json:"web_profile,omitempty"`
 	WebURL     string `json:"web_url,omitempty"`

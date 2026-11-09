@@ -51,6 +51,14 @@ type LaneActor struct {
 	groupActors   map[string]*PaneGroupActor
 	paneToGroup   map[string]string // paneID -> groupID
 
+	// lastAnsweredGroup is each pane group's most recent snapshot that the
+	// group itself supplied, content stripped and every pane marked Stale. It
+	// is served when the group misses the deadline, in place of a one-pane
+	// placeholder whose zero-valued fields (RawMode=false, no stack siblings)
+	// clients read as "the program exited". Actor goroutine only; lazily
+	// allocated, pruned to live groups on every collect.
+	lastAnsweredGroup map[string]domain.PaneGroupSnapshot
+
 	// Initial pane info -- set at creation, consumed on *actor.Started.
 	initialPaneID string
 	initialTitle  string
@@ -694,6 +702,7 @@ func (l *LaneActor) collectSnapshot(layoutOnly, noHistories bool, historyPane st
 	// group). Each goroutine writes a distinct results[i]; the parent appends in
 	// order after all complete.
 	results := make([]domain.PaneGroupSnapshot, len(l.groupRefs))
+	answered := make([]bool, len(l.groupRefs))
 	fetch := func(i int, id, activePaneID string, rowFlex int) {
 		reply, err := l.pub.Request(
 			msg.T("pane-group", id, "snapshot"),
@@ -714,6 +723,7 @@ func (l *LaneActor) collectSnapshot(layoutOnly, noHistories bool, historyPane st
 					Title:  "unreachable",
 					Status: "unreachable",
 					Output: fmt.Sprintf("group snapshot error: %v", err),
+					Stale:  true,
 				}},
 			}
 			return
@@ -728,6 +738,7 @@ func (l *LaneActor) collectSnapshot(layoutOnly, noHistories bool, historyPane st
 					Title:  "unreachable",
 					Status: "unreachable",
 					Output: "unexpected reply type",
+					Stale:  true,
 				}},
 			}
 			return
@@ -735,6 +746,7 @@ func (l *LaneActor) collectSnapshot(layoutOnly, noHistories bool, historyPane st
 		gs := gReply.Snapshot
 		gs.RowFlex = rowFlex
 		results[i] = gs
+		answered[i] = true
 	}
 	// Concurrent only with more than one group (cascade is depth-sequential).
 	if len(l.groupRefs) > 1 {
@@ -752,9 +764,44 @@ func (l *LaneActor) collectSnapshot(layoutOnly, noHistories bool, historyPane st
 			fetch(i, gr.id, gr.activePaneID, gr.rowFlex)
 		}
 	}
+	results = l.substituteStaleGroups(results, answered)
 	snap.PaneGroups = append(snap.PaneGroups, results...)
 
 	return snap
+}
+
+// substituteStaleGroups is PaneGroupActor.substituteStale one level up: it
+// records each answered group snapshot and serves the last one, its panes
+// marked Stale, for a group that missed the deadline. The group's ActivePaneID
+// and RowFlex stay the lane's own current bookkeeping, as the placeholder kept.
+func (l *LaneActor) substituteStaleGroups(results []domain.PaneGroupSnapshot, answered []bool) []domain.PaneGroupSnapshot {
+	if l.lastAnsweredGroup == nil {
+		l.lastAnsweredGroup = make(map[string]domain.PaneGroupSnapshot)
+	}
+	live := make(map[string]struct{}, len(l.groupRefs))
+	for i, gr := range l.groupRefs {
+		live[gr.id] = struct{}{}
+		if answered[i] {
+			kept := results[i]
+			kept.Panes = make([]domain.PaneSnapshot, len(results[i].Panes))
+			for j, p := range results[i].Panes {
+				kept.Panes[j] = staleSnapshotFrom(p)
+			}
+			l.lastAnsweredGroup[gr.id] = kept
+			continue
+		}
+		if last, ok := l.lastAnsweredGroup[gr.id]; ok {
+			last.ActivePaneID = results[i].ActivePaneID
+			last.RowFlex = gr.rowFlex
+			results[i] = last
+		}
+	}
+	for id := range l.lastAnsweredGroup {
+		if _, ok := live[id]; !ok {
+			delete(l.lastAnsweredGroup, id)
+		}
+	}
+	return results
 }
 
 // ---------------------------------------------------------------------------

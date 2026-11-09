@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	sharedagentic "github.com/rysh-ai/rysh-cli-shared/agentic"
 
@@ -230,6 +231,7 @@ func (w *WorkspaceActor) afterSecretMutation() {
 // the verdict is injected. Called on initial load and every ##policy reload.
 func (w *WorkspaceActor) installApprovalPolicy() {
 	f := w.approvalPolicyFunc()
+	setInstalledApprovalPolicy(f)
 	if f == nil {
 		sharedagentic.SetApprovalPolicy(nil)
 		return
@@ -237,35 +239,53 @@ func (w *WorkspaceActor) installApprovalPolicy() {
 	sharedagentic.SetApprovalPolicy(f)
 }
 
+// installedApproval keeps the approval decision the workspace last installed,
+// so paths outside the orchestrator (a listener's shell events) apply the same
+// restrictive rules.
+var installedApproval struct {
+	sync.RWMutex
+	f sharedagentic.ApprovalPolicyFunc
+}
+
+func setInstalledApprovalPolicy(f sharedagentic.ApprovalPolicyFunc) {
+	installedApproval.Lock()
+	installedApproval.f = f
+	installedApproval.Unlock()
+}
+
+func installedApprovalPolicy() sharedagentic.ApprovalPolicyFunc {
+	installedApproval.RLock()
+	defer installedApproval.RUnlock()
+	return installedApproval.f
+}
+
 // approvalPolicyFunc composes the approval decision: the workspace's pre-tool
 // hooks (gap G8) first, then policy.yaml. A pre-tool hook that blocks — or a
 // hooks.yaml that does not parse — forces the call to the approval gate, which
 // nothing auto-approves past (decideApproval's forceGate): restrictive wins.
-// nil when neither has anything to say.
 func (w *WorkspaceActor) approvalPolicyFunc() sharedagentic.ApprovalPolicyFunc {
-	var base sharedagentic.ApprovalPolicyFunc
+	// Always installed: with no policy file loaded, pol is nil and
+	// EvaluateToolApproval still applies its built-in gates (the company write
+	// tools, CD5 C-C2) and otherwise answers the default, which is what no
+	// hook at all would do.
+	var pol *policy.Policy
 	if w.policy != nil && w.policy.Loaded {
-		pol := w.policy
-		base = func(toolName string, input json.RawMessage) (sharedagentic.PolicyDecision, string) {
-			act, id := pol.EvaluateToolApproval(toolName, input)
-			switch act {
-			case policy.ApprovalAuto:
-				return sharedagentic.PolicyAutoApprove, id
-			case policy.ApprovalGate:
-				return sharedagentic.PolicyGate, id
-			default:
-				return sharedagentic.PolicyDefault, ""
-			}
-		}
+		pol = w.policy
 	}
-	gate := w.preToolHookGate()
-	switch {
-	case gate == nil:
-		return base
-	case base == nil:
-		base = func(string, json.RawMessage) (sharedagentic.PolicyDecision, string) {
+	base := sharedagentic.ApprovalPolicyFunc(func(toolName string, input json.RawMessage) (sharedagentic.PolicyDecision, string) {
+		act, id := pol.EvaluateToolApproval(toolName, input)
+		switch act {
+		case policy.ApprovalAuto:
+			return sharedagentic.PolicyAutoApprove, id
+		case policy.ApprovalGate:
+			return sharedagentic.PolicyGate, id
+		default:
 			return sharedagentic.PolicyDefault, ""
 		}
+	})
+	gate := w.preToolHookGate()
+	if gate == nil {
+		return base
 	}
 	return func(toolName string, input json.RawMessage) (sharedagentic.PolicyDecision, string) {
 		if gate(toolName, input) {

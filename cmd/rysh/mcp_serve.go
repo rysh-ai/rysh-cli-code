@@ -794,6 +794,8 @@ func (t *sessionTools) startPane(ctx context.Context, raw json.RawMessage, a ses
 type liveSession struct {
 	store *session.Store
 	name  string
+	// self is the pane this server's agent runs in (mcpSelfPane), or "".
+	self string
 }
 
 func (s liveSession) Snapshot(context.Context) (*domain.WorkspaceSnapshot, error) {
@@ -826,8 +828,37 @@ func (s liveSession) BoardPost(_ context.Context, as, text, thread, boardID stri
 func (s liveSession) ChannelSend(_ context.Context, humanoid string, req *msg.MsgHumanoidMCPSend) (*msg.MsgHumanoidMCPSendReply, error) {
 	return cli.HumanoidMCPSend(s.store, s.name, humanoid, req)
 }
+
+// RyshCommand runs an agent's ## command. It is quiet (no echo into the
+// pane's shell view, no history) only on the agent's own pane; on any other
+// pane, or with no pane named, it is echoed and recorded in that pane's
+// histories as if typed, so that pane's owner sees what the agent did
+// (security-lead, v0.2.16 landing read).
 func (s liveSession) RyshCommand(_ context.Context, id, command string) (*msg.MsgCLIResponse, error) {
-	return cli.RyshCommandResult(s.store, s.name, "", id, command)
+	if s.self != "" && id == s.self {
+		return mcpRyshQuiet(s, id, command)
+	}
+	return mcpRyshLoud(s, id, command)
+}
+
+// The two daemon calls RyshCommand chooses between (a test seam).
+var (
+	mcpRyshQuiet = func(s liveSession, id, command string) (*msg.MsgCLIResponse, error) {
+		return cli.RyshCommandQuiet(s.store, s.name, "", id, command)
+	}
+	mcpRyshLoud = func(s liveSession, id, command string) (*msg.MsgCLIResponse, error) {
+		return cli.RyshCommandResult(s.store, s.name, "", id, command)
+	}
+)
+
+// mcpSelfPane is the pane the MCP server was started from: $RYSH_PANE, when
+// $RYSH_SESSION is unset or names the session it serves (as execTarget).
+func mcpSelfPane(envPane, envSession, sess string) string {
+	envPane, envSession = strings.TrimSpace(envPane), strings.TrimSpace(envSession)
+	if envPane == "" || (envSession != "" && envSession != sess) {
+		return ""
+	}
+	return envPane
 }
 
 // runMCPCmd implements `rysh mcp serve [--session <name>] [--allow-write]`.
@@ -851,7 +882,8 @@ func runMCPCmd(cfg config.Config, args []string) error {
 	if err != nil {
 		return err
 	}
-	tools := newSessionTools(liveSession{store: store, name: sess}, allowWrite)
+	self := mcpSelfPane(os.Getenv("RYSH_PANE"), os.Getenv("RYSH_SESSION"), sess)
+	tools := newSessionTools(liveSession{store: store, name: sess, self: self}, allowWrite)
 	return serveStdioMCP(os.Stdin, os.Stdout, stdioMCPServer{
 		name:        "rysh",
 		tools:       func() any { return tools.specs() },

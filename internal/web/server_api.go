@@ -367,6 +367,8 @@ func (s *Server) handlePaneResize(c *wsClient, data json.RawMessage) {
 		PaneID string `json:"pane_id"`
 		Rows   int    `json:"rows"`
 		Cols   int    `json:"cols"`
+		// Passive: the phone UI — see msg.MsgPaneResize.Passive.
+		Passive bool `json:"passive"`
 	}
 	if json.Unmarshal(data, &cmd) != nil || cmd.PaneID == "" || cmd.Rows <= 0 || cmd.Cols <= 0 {
 		return
@@ -383,6 +385,7 @@ func (s *Server) handlePaneResize(c *wsClient, data json.RawMessage) {
 		Rows:     cmd.Rows,
 		Cols:     cmd.Cols,
 		ClientID: clientID,
+		Passive:  cmd.Passive,
 	})
 }
 

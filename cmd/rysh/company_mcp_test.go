@@ -93,7 +93,7 @@ func TestCompanyMCPHandshakeAndTools(t *testing.T) {
 	for _, tool := range tools {
 		names = append(names, tool.(map[string]any)["name"].(string))
 	}
-	want := "company_status company_orders company_enquiries company_activity company_services company_deadlines company_ledger"
+	want := "company_status company_orders company_enquiries company_activity company_services company_deadlines company_ledger company_ledger_summary"
 	if strings.Join(names, " ") != want {
 		t.Fatalf("tools: %v", names)
 	}

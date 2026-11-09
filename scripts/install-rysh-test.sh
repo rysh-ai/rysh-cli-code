@@ -210,7 +210,11 @@ run "$DA" "$REL"; refused "an archive listed only under a longer or prefixed nam
 
 # 12. a duplicate line for the archive
 REL="$(mkrelease duplicate none)"
-grep -F "  $ARCHIVE" "$REL/$TAG/checksums.txt" >>"$REL/$TAG/checksums.txt"; resign "$REL" "$A"
+# Read first, then append: GNU grep refuses an input that is also its output
+# (BSD grep allows it), which on Linux left one line and tested nothing.
+line="$(grep -F "  $ARCHIVE" "$REL/$TAG/checksums.txt")"; printf '%s\n' "$line" >>"$REL/$TAG/checksums.txt"
+[[ "$(grep -c -F "  $ARCHIVE" "$REL/$TAG/checksums.txt")" -eq 2 ]] || bad "duplicate fixture: checksums.txt does not list the archive twice" "$(cat "$REL/$TAG/checksums.txt")"
+resign "$REL" "$A"
 run "$DA" "$REL"; refused "two checksums.txt lines for the archive are refused" 'listed [0-9]+ times|more than once'
 
 # 13. the opt-out: banner before and after, the checksum still enforced

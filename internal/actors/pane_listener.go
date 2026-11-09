@@ -4,15 +4,18 @@ package actors
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
 
 	"github.com/asynkron/protoactor-go/actor"
 	"github.com/nats-io/nats.go"
+	sharedagentic "github.com/rysh-ai/rysh-cli-shared/agentic"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/bridge"
 	"github.com/rysh-ai/rysh-cli-code/internal/msg"
+	"github.com/rysh-ai/rysh-cli-code/internal/policy"
 	"github.com/rysh-ai/rysh-cli-code/internal/vterm"
 )
 
@@ -37,6 +40,10 @@ type PaneSharedOutputListenerActor struct {
 	// lastForwardedEvicted tracks how many of remoteVTerm's evicted scrollback
 	// lines have been forwarded to the owner pane (so each is sent once).
 	lastForwardedEvicted int64
+	// allowShell: this listen was started with --allow-sh, so a shell event in
+	// the listened output may run its fixed command here. Off by default: the
+	// output can carry any text (a viewed file, a log, a remote party).
+	allowShell bool
 }
 
 // NewPaneSharedOutputListenerActor creates a PaneSharedOutputListenerActor.
@@ -109,8 +116,10 @@ func (l *PaneSharedOutputListenerActor) Receive(ctx actor.Context) {
 		_ = l.pub.SendPaneShellOutput(l.ownerPaneID, m.Text)
 
 	case *msg.MsgPaneAIOutputAppend:
-		// Forward AI-specific output to owner's AI topic.
-		_ = l.pub.SendPaneAIOutput(l.ownerPaneID, m.Text)
+		// Display-only prompt-view text (a ## command typed in prompt mode,
+		// QA-33): forward it display-only too, never as an AI conversation turn,
+		// which would feed the owner pane's memory summaries.
+		_ = l.pub.Send(msg.T("pane", l.ownerPaneID, "output", "ai"), m)
 
 	case *msg.MsgPaneChatOutputAppend:
 		// Forward to owner's chat buffer (visible when owner is in chat mode).
@@ -222,6 +231,16 @@ func (l *PaneSharedOutputListenerActor) handleOutput(text string) {
 					fmt.Sprintf("[%s] no command for sh:softdev event %s:%s\n", l.targetAlias, language, phase))
 				break
 			}
+			if !l.allowShell {
+				_ = l.pub.SendPaneOutput(l.ownerPaneID,
+					fmt.Sprintf("\n[%s] sh:softdev event %s:%s ignored: this listen does not run shell commands (##pane listen %s --allow-sh)\n", l.targetAlias, language, phase, l.targetAlias))
+				break
+			}
+			if why := shellEventGate(command); why != "" {
+				_ = l.pub.SendPaneOutput(l.ownerPaneID,
+					fmt.Sprintf("\n[%s] sh:softdev event %s:%s not run: %s\n", l.targetAlias, language, phase, why))
+				break
+			}
 			_ = l.pub.SendPaneOutput(l.ownerPaneID,
 				fmt.Sprintf("\n[%s] ⚙ sh:softdev event: %s:%s — running: %s\n", l.targetAlias, language, phase, command))
 			_ = l.pub.Send(
@@ -313,4 +332,21 @@ func (l *PaneSharedOutputListenerActor) resetForwardedScrollback() {
 	l.lastForwardedEvicted = 0
 	_ = l.pub.Send(msg.T("pane", l.ownerPaneID, "inbox"),
 		&msg.MsgRemoteScrollbackAppend{Reset: true})
+}
+
+// shellEventGate applies the session's restrictive rules to a shell event's
+// command: governed execution blocked, or the installed approval policy
+// gating it (always_gate / bash.deny, hooks). A listener has no human to ask,
+// so a gated command is refused, not prompted. "" means it may run.
+func shellEventGate(command string) string {
+	if why, blocked := policy.Blocked(); blocked {
+		return "governed execution is blocked: " + why
+	}
+	if f := installedApprovalPolicy(); f != nil {
+		in, _ := json.Marshal(map[string]string{"command": command})
+		if dec, id := f("bash", in); dec == sharedagentic.PolicyGate {
+			return "the approval policy gates it (" + id + ")"
+		}
+	}
+	return ""
 }

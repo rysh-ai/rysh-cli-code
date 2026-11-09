@@ -22,7 +22,7 @@ import (
 // shell, and the same data as an MCP server for agents.
 //
 //	rysh company status|orders|enquiries|activity|services [--json] [--config <file>]
-//	rysh company mcp [--config <file>]
+//	rysh company mcp [--write] [--config <file>]
 //
 // The binding comes from the directory's rysh.config.yaml (what `##config
 // load` wrote), from --config, or from RYSH_COMPANY_CONFIG — which is how the
@@ -30,6 +30,7 @@ import (
 func runCompanyCLI(cfg config.Config, args []string) error {
 	args, cfgFlag := extractStringFlag(args, "--config")
 	args, asJSON := extractBoolFlag(args, "--json")
+	args, writeServer := extractBoolFlag(args, "--write")
 	if cfgFlag == "" {
 		cfgFlag = strings.TrimSpace(os.Getenv("RYSH_COMPANY_CONFIG"))
 	}
@@ -59,6 +60,11 @@ func runCompanyCLI(cfg config.Config, args []string) error {
 
 	switch sub {
 	case "mcp":
+		if writeServer {
+			// The company-write server (CD5): its own process, registered
+			// with --approve; the read tools are not on it.
+			return serveCompanyWriteMCP(os.Stdin, os.Stdout, newCompanyWriteTools(clientWriter{client: client, companyID: companyID}, companyID))
+		}
 		return serveCompanyMCP(os.Stdin, os.Stdout, tools)
 	case "status", "orders", "enquiries", "activity", "services":
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -176,4 +182,8 @@ func (b clientBooks) Deadlines(ctx context.Context) (json.RawMessage, error) {
 
 func (b clientBooks) Ledger(ctx context.Context, q url.Values) (json.RawMessage, error) {
 	return b.client.Ledger(ctx, b.companyID, q)
+}
+
+func (b clientBooks) Summary(ctx context.Context, months int) (json.RawMessage, error) {
+	return b.client.Summary(ctx, b.companyID, months)
 }

@@ -298,7 +298,7 @@ the reply to `company_query`. A session that is not bound to a company never sen
 
 | field | type |
 |---|---|
-| `snapshot` | object — the Go `msg.CompanySnapshot` (rysh-cli `internal/msg/company_messages.go`): `company`, `orders`, `enquiries`, `email`, `phone`, `services`, `channels`, `activity` (newest first), `link` (`connected`, `live`, `auth_failed`, `last_error`, `last_fetch`), `fetched_at` |
+| `snapshot` | object — the Go `msg.CompanySnapshot` (rysh-cli `internal/msg/company_messages.go`): `company`, `orders`, `enquiries`, `email`, `phone`, `services`, `channels`, `activity` (newest first), `link` (`connected`, `live`, `auth_failed`, `last_error`, `last_fetch`), `fetched_at`; optional `permissions`, `permissions_expire_at` (CD5) and `books` (S2.4: `enabled`, and the server's JSON passed through as `deadlines`, `summary` (6 months), `ledger` (first 20 entries); absent on a server without the Books routes) |
 
 The interior fields are governed by the Go type, not by this document.
 
@@ -371,6 +371,10 @@ single PTY to the smallest claim. The server tags the claim with a per-connectio
 id and withdraws every claim when the socket closes — without that, a closed browser
 window would clamp its panes for the life of the daemon. Send it, or the PTY stays at
 80x24 and `vim` fills 24 rows regardless of the pane's real height.
+`passive` (bool, optional) marks a viewport that should not constrain the pane while any
+non-passive viewport shows it — the phone UI sends it, so a phone joining over a web
+tunnel no longer shrinks the pane on the desktop to ~45 columns. A passive claim sizes the
+PTY only when every claim on the pane is passive; otherwise the client pans the larger grid.
 
 **`visible_panes`** — `pane_ids` (array of string). The panes this window is showing.
 From the first one a stream client sends, it receives `pane_vt` frames **only** for

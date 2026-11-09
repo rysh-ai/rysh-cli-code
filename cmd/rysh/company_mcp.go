@@ -112,6 +112,11 @@ var companyToolSpecs = []companyToolSpec{
 		Description: "The owner's bookkeeping ledger, newest first: entries (entry_date, direction in/out, amount_pence, currency, category, note) and totals over the whole filtered range, all amounts in integer pence. Read-only. Optional from/to dates (YYYY-MM-DD, inclusive), category, direction and limit; for the next page pass before = the previous page's next_before.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"from":{"type":"string","description":"first date, YYYY-MM-DD"},"to":{"type":"string","description":"last date, YYYY-MM-DD"},"category":{"type":"string","description":"only this category key"},"direction":{"type":"string","enum":["in","out"]},"limit":{"type":"integer","minimum":1,"maximum":200,"description":"at most this many entries (server default 100)"},"before":{"type":"string","description":"next_before from the previous page"}},"additionalProperties":false}`),
 	},
+	{
+		Name:        "company_ledger_summary",
+		Description: "Monthly totals of the owner's bookkeeping ledger for the last N calendar months (UTC), oldest first: in_pence, out_pence and net_pence per month (every month listed, empty ones as 0) and totals by category. Read-only. Optional months (1-24, default 12).",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"months":{"type":"integer","minimum":1,"maximum":24,"description":"how many calendar months, ending with this one (default 12)"}},"additionalProperties":false}`),
+	},
 }
 
 // companyBooks reads the accountant routes for the bound company (AC4).
@@ -186,7 +191,63 @@ func ledgerQuery(args json.RawMessage) (url.Values, error) {
 	return q, nil
 }
 
-// callBooks runs company_deadlines / company_ledger. They read the server on
+// companyBooksSummary is the optional monthly-summary read (AC7).
+type companyBooksSummary interface {
+	Summary(ctx context.Context, months int) (json.RawMessage, error)
+}
+
+const (
+	companySummaryDefaultMonths = 12
+	companySummaryMaxMonths     = 24 // the server's cap
+)
+
+// summaryMonths validates company_ledger_summary's arguments.
+func summaryMonths(args json.RawMessage) (int, error) {
+	var in struct {
+		Months *int `json:"months"`
+	}
+	if len(bytes.TrimSpace(args)) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(args))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&in); err != nil {
+			return 0, err
+		}
+	}
+	if in.Months == nil {
+		return companySummaryDefaultMonths, nil
+	}
+	if *in.Months < 1 || *in.Months > companySummaryMaxMonths {
+		return 0, fmt.Errorf("months must be between 1 and %d", companySummaryMaxMonths)
+	}
+	return *in.Months, nil
+}
+
+// labelImportedNotes wraps the note of every ledger entry whose source is
+// "csv" as {"untrusted_imported_text": "..."}: it is third-party text from a
+// bank export, and the model must read it as data, never as an instruction
+// (security-lead's AC8 pre-read P1). Manual notes stay plain strings; every
+// other field, numbers included, round-trips unchanged.
+func labelImportedNotes(raw json.RawMessage) (json.RawMessage, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var page map[string]any
+	if err := dec.Decode(&page); err != nil {
+		return nil, fmt.Errorf("the server answered with invalid JSON")
+	}
+	entries, _ := page["entries"].([]any)
+	for _, e := range entries {
+		entry, ok := e.(map[string]any)
+		if !ok || entry["source"] != "csv" {
+			continue
+		}
+		if note, ok := entry["note"].(string); ok && note != "" {
+			entry["note"] = map[string]any{"untrusted_imported_text": note}
+		}
+	}
+	return json.Marshal(page)
+}
+
+// callBooks runs company_deadlines / company_ledger / company_ledger_summary. They read the server on
 // every call (no snapshot) and pass its JSON through.
 func (t *companyTools) callBooks(ctx context.Context, name string, args json.RawMessage) (string, bool) {
 	if t.books == nil {
@@ -196,12 +257,25 @@ func (t *companyTools) callBooks(ctx context.Context, name string, args json.Raw
 	var err error
 	if name == "company_deadlines" {
 		raw, err = t.books.Deadlines(ctx)
+	} else if name == "company_ledger_summary" {
+		sb, ok := t.books.(companyBooksSummary)
+		if !ok {
+			return "the monthly summary is not available in this session", true
+		}
+		months, merr := summaryMonths(args)
+		if merr != nil {
+			return "invalid arguments: " + merr.Error(), true
+		}
+		raw, err = sb.Summary(ctx, months)
 	} else {
 		q, qerr := ledgerQuery(args)
 		if qerr != nil {
 			return "invalid arguments: " + qerr.Error(), true
 		}
 		raw, err = t.books.Ledger(ctx, q)
+		if err == nil {
+			raw, err = labelImportedNotes(raw)
+		}
 	}
 	switch {
 	case errors.Is(err, company.ErrBooksNotEnabled):
@@ -220,7 +294,7 @@ func (t *companyTools) callBooks(ctx context.Context, name string, args json.Raw
 // call runs one tool. The text is JSON; isErr marks a failure the model should
 // read as such (the server unreachable, the key revoked, an unknown tool).
 func (t *companyTools) call(ctx context.Context, name string, args json.RawMessage) (text string, isErr bool) {
-	if name == "company_deadlines" || name == "company_ledger" {
+	if name == "company_deadlines" || name == "company_ledger" || name == "company_ledger_summary" {
 		return t.callBooks(ctx, name, args)
 	}
 	var in struct {

@@ -676,6 +676,7 @@ func runDaemon(cfg config.Config, logger *slog.Logger, configPath string) error 
 	// (e.g. ./rysh daemon test4).
 
 	msg.InitMsgLog(cfg.LogMessages)
+	startPprof(logger)
 
 	sessionName := cfg.SessionName
 	if sessionName == "" {
@@ -1760,7 +1761,7 @@ func printUsage() {
 	usageLine("       rysh search [query]        find packages in the registry index")
 	usageLine("       rysh update [@ns/name]     reinstall packages the index has newer versions of")
 	usageLine("       rysh list-packages         show installed packages (.rysh/rysh.lock)")
-	usageLine("       rysh connect <server> <code> [--json] [--device <label>] [--dir <path>] [--no-open]")
+	usageLine("       rysh connect <server> <code> | --file <path> [--json] [--device <label>] [--vehicle desktop|terminal] [--dir <path>] [--no-open]")
 	usageLine("                    bind this machine to an AI-native company with the connect code from")
 	usageLine("                    the dashboard: writes ~/Rysh/<slug>/rysh.config.yaml (read-only key)")
 	usageLine("                    and opens the session on the company view. --json prints the")

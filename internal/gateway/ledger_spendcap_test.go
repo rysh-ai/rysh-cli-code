@@ -128,11 +128,24 @@ func TestSpendCap_ExhaustedScopeAsksAgainAfterTTL(t *testing.T) {
 // report the same money twice.
 func TestSpendCap_ReportsUSDSpendOnce(t *testing.T) {
 	stub := capStub(10_000_000, 0)
+	// The stub has the first call before the client has its reply (QA flake
+	// on 51b623bf): hold that window open so the test cannot race it.
+	stub.replyDelay = 150 * time.Millisecond
 	c := capClient(t, stub)
 	c.Record(msg.MsgUsageRecord{Tenant: "", InTokens: 10, OutTokens: 10, CostMicroUSD: 700, TS: stub.now})
 	c.Record(msg.MsgUsageRecord{Tenant: "acme", InTokens: 1, OutTokens: 1, CostMicroUSD: 50, TS: stub.now})
 	c.Allow("")
-	waitFor(t, "the first lease", func() bool { return len(stub.usdCalls()) == 1 })
+	// Wait for the client to have the first grant, not just for the stub to
+	// have the call: until the reply lands the lease is still renewing, and an
+	// Allow in that window starts no second renewal (ledger.go needsRenewLocked).
+	waitFor(t, "the first grant", func() bool {
+		for _, l := range c.Leases() {
+			if l.Scope == sharedmsg.TenantScope("") && l.Granted > 0 {
+				return len(stub.usdCalls()) == 1
+			}
+		}
+		return false
+	})
 	if got := stub.usdCalls()[0]; got != 750 {
 		t.Fatalf("first lease reported %d micro-USD, want 750 (every tenant)", got)
 	}

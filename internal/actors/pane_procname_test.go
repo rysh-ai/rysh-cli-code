@@ -132,19 +132,21 @@ func TestForegroundCLIResolvesAVersionNamedClaude(t *testing.T) {
 		_ = cmd.Wait()
 	})
 
-	// Precondition: the kernel really does call it by its version, or this
-	// test is not about F-15 at all.
+	// Precondition: the kernel names it as it does on this OS, or the fixture
+	// is not the native installer's layout. darwin calls it by its version
+	// (F-15); Linux keeps the symlink's name (kernelName).
+	want := kernelName(link, version)
 	var comm string
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if comm = processName(pid); comm == version {
+		if comm = processName(pid); comm == want {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if comm != version {
+	if comm != want {
 		t.Fatalf("processName(%d) = %q, want %q — the fixture does not reproduce "+
-			"the native installer's layout", pid, comm, version)
+			"the native installer's layout", pid, comm, want)
 	}
 
 	if got := foregroundCLI(pid); got != "claude" {

@@ -599,17 +599,28 @@ func RyshCommand(store *session.Store, sessionName, tabID, paneID, command strin
 // (resp.OK == false) distinct from "we could not ask" (a transport error) —
 // the two mean different things to a script and want different exit codes.
 func RyshCommandResult(store *session.Store, sessionName, tabID, paneID, command string) (*msg.MsgCLIResponse, error) {
+	return ryshCommandResult(store, sessionName, &msg.MsgCLIRyshCommand{TabID: tabID, PaneID: paneID, Command: command})
+}
+
+// RyshCommandQuiet is RyshCommandResult for a PROGRAM's ## command: the daemon
+// runs it without echoing the line into the target pane's shell view or
+// appending it to the pane's histories (MsgCLIRyshCommand.Quiet). Use it for
+// anything an agent or a polling loop issues — with no pane given the target
+// is the human's active pane, and with dozens of agents the echoes and the
+// layout refresh each history append forces are what made a busy session's
+// claude pane flip to its shell view.
+func RyshCommandQuiet(store *session.Store, sessionName, tabID, paneID, command string) (*msg.MsgCLIResponse, error) {
+	return ryshCommandResult(store, sessionName, &msg.MsgCLIRyshCommand{TabID: tabID, PaneID: paneID, Command: command, Quiet: true})
+}
+
+func ryshCommandResult(store *session.Store, sessionName string, req *msg.MsgCLIRyshCommand) (*msg.MsgCLIResponse, error) {
 	c, err := connect(store, sessionName)
 	if err != nil {
 		return nil, err
 	}
 	defer c.Close()
 
-	return cliRequest(c, &msg.MsgCLIRyshCommand{
-		TabID:   tabID,
-		PaneID:  paneID,
-		Command: command,
-	})
+	return cliRequest(c, req)
 }
 
 // CronApply sends an edited cron job Input to a running session — the

@@ -137,3 +137,22 @@ func TestClientEscapesTheCompanyID(t *testing.T) {
 		}
 	}
 }
+
+// AC7: the monthly summary (accountant summary route): months is passed as
+// given and the server's JSON comes back untouched.
+func TestClientSummary(t *testing.T) {
+	const id = "22222222-2222-2222-2222-222222222222"
+	var gotPath, gotMonths string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMonths = r.URL.Path, r.URL.Query().Get("months")
+		_, _ = w.Write([]byte(`{"from":"2026-06","to":"2026-11","months":[{"month":"2026-06","in_pence":0,"out_pence":1250,"net_pence":-1250}],"by_category":{}}`))
+	}))
+	defer srv.Close()
+	raw, err := NewClient(srv.URL, "rysh_key").Summary(context.Background(), id, 6)
+	if err != nil || !strings.Contains(string(raw), `"month":"2026-06"`) {
+		t.Fatalf("Summary: %s %v", raw, err)
+	}
+	if gotPath != "/api/ai-native-companies/"+id+"/accountant/summary" || gotMonths != "6" {
+		t.Fatalf("request %s months=%s", gotPath, gotMonths)
+	}
+}

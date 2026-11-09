@@ -3,8 +3,10 @@
 package session
 
 import (
+	"errors"
 	"os/exec"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -85,26 +87,34 @@ func TestTerminateDaemon_MatchingStartIsSignalled(t *testing.T) {
 	waitReaped(t, done)
 }
 
-// A record from an older daemon has no PIDStart: the process must then show
-// the daemon's argv ("daemon <session>"), else it is not signalled.
-func TestTerminateDaemon_LegacyRecordNeedsDaemonArgv(t *testing.T) {
+// A record from a daemon older than v0.2.14 has no PIDStart. Its PID is never
+// signalled, even by a daemon-shaped process: the argv match it once relied on
+// is retired (it read the process's argv, whose kernel buffer also holds the
+// environment). The error says why and what to do.
+func TestTerminateDaemon_LegacyRecordIsNeverSignalled(t *testing.T) {
 	requireIdentityPlatform(t)
-	other, otherDone := startChild(t, "sleep", "30")
-	err := TerminateDaemon(Record{Name: "legacy", PID: other}, time.Second)
-	if err == nil {
-		t.Fatal("a legacy record's PID held by an unrelated process was signalled")
-	}
-	select {
-	case <-otherDone:
-		t.Fatal("the unrelated process was terminated")
-	default:
-	}
 	// sh's own argv is: sh -c <script> daemon legacy
 	daemonLike, done := startChild(t, "sh", "-c", "sleep 30; :", "daemon", "legacy")
-	if err := TerminateDaemon(Record{Name: "legacy", PID: daemonLike}, time.Second); err != nil {
-		t.Fatalf("TerminateDaemon on a legacy daemon-shaped process: %v", err)
+	err := TerminateDaemon(Record{Name: "legacy", PID: daemonLike}, time.Second)
+	if err == nil {
+		t.Fatal("a record without PIDStart was signalled")
 	}
-	waitReaped(t, done)
+	if !errors.Is(err, ErrLegacyDaemonRecord) || !errors.Is(err, ErrDaemonIdentityUnknown) {
+		t.Fatalf("err = %v, want ErrLegacyDaemonRecord (an ErrDaemonIdentityUnknown)", err)
+	}
+	if errors.Is(err, ErrNotOurDaemon) {
+		t.Fatal("a legacy record proves nothing about the PID; it must not read as recycled")
+	}
+	for _, want := range []string{"v0.2.14", "kill"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+	select {
+	case <-done:
+		t.Fatal("the daemon-shaped process was terminated")
+	case <-time.After(300 * time.Millisecond):
+	}
 }
 
 func TestProcessStart_StableAndDistinct(t *testing.T) {

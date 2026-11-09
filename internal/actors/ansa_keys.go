@@ -165,7 +165,10 @@ func (r *ansaRouter) Keys(base ansaKeysAuditEntry, paneID string, specs []string
 		return out
 	}
 
-	if err := r.tr.SendKeys(target.ID, ansakeys.Writes(presses)); err != nil {
+	unlock := r.lockLane(target.ID)
+	err = r.tr.SendKeys(target.ID, ansakeys.Writes(presses))
+	unlock()
+	if err != nil {
 		out.Result = msg.AnsaRefusal(msg.AnsaErrPublishFailed,
 			"publishing keys to pane %s failed (some may have been sent): %v", target.ID, err)
 		return out

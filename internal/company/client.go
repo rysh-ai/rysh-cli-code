@@ -7,6 +7,7 @@
 package company
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -71,34 +72,71 @@ func (e *apiError) Is(target error) bool {
 }
 
 func (c *Client) get(ctx context.Context, path string, out any) error {
-	return c.getNamed(ctx, path, path, out)
+	return c.do(ctx, http.MethodGet, path, nil, out)
 }
 
 // getNamed is get with errors that call the resource name rather than its
 // path: a Books route's path says accountant, which is not product copy
 // (U-27 Q6), and the error reaches the owner in a tool result.
 func (c *Client) getNamed(ctx context.Context, path, name string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
+	return c.doNamed(ctx, http.MethodGet, path, name, nil, out)
+}
+
+// do sends one request with the connect key. body, when non-nil, is sent as
+// JSON. A 403 is told apart by its code: permission_required (CD5: the owner
+// has not ticked this write for the device) and read_only (a write the key
+// can never make) are their own errors; any other 401/403 means the key.
+func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
+	return c.doNamed(ctx, method, path, path, body, out)
+}
+
+// doNamed is do with name, not path, in its errors (see getNamed).
+func (c *Client) doNamed(ctx context.Context, method, path, name string, body, out any) error {
+	var rd io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		rd = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, rd)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return fmt.Errorf("could not reach %s: %w", c.BaseURL, err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	switch {
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+	case resp.StatusCode == http.StatusForbidden:
+		var e struct {
+			Code       string `json:"code"`
+			Permission string `json:"permission"`
+		}
+		_ = json.Unmarshal(respBody, &e)
+		switch e.Code {
+		case "permission_required":
+			return &PermissionError{Permission: e.Permission}
+		case "read_only":
+			return ErrReadOnly
+		}
+		return ErrUnauthorized
+	case resp.StatusCode == http.StatusUnauthorized:
 		return ErrUnauthorized
 	case resp.StatusCode >= 300:
 		var e struct {
 			Code   string            `json:"code"`
 			Fields map[string]string `json:"fields"`
 		}
-		_ = json.Unmarshal(body, &e)
+		_ = json.Unmarshal(respBody, &e)
 		switch {
 		case resp.StatusCode == http.StatusNotFound && e.Code == "not_enabled":
 			return ErrBooksNotEnabled
@@ -117,7 +155,7 @@ func (c *Client) getNamed(ctx context.Context, path, name string, out any) error
 	if out == nil {
 		return nil
 	}
-	if err := json.Unmarshal(body, out); err != nil {
+	if err := json.Unmarshal(respBody, out); err != nil {
 		return fmt.Errorf("%s: invalid JSON: %w", name, err)
 	}
 	return nil
@@ -143,6 +181,19 @@ func (c *Client) Ledger(ctx context.Context, companyID string, q url.Values) (js
 	}
 	var raw json.RawMessage
 	if err := c.getNamed(ctx, path, "the Books ledger", &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// Summary reads the company's monthly in/out totals for the last months UTC
+// calendar months, oldest first (accountant summary route). The server's JSON
+// is passed through; amounts are integer pence.
+func (c *Client) Summary(ctx context.Context, companyID string, months int) (json.RawMessage, error) {
+	path := "/api/ai-native-companies/" + url.PathEscape(companyID) + "/accountant/summary?" +
+		url.Values{"months": {fmt.Sprint(months)}}.Encode()
+	var raw json.RawMessage
+	if err := c.get(ctx, path, &raw); err != nil {
 		return nil, err
 	}
 	return raw, nil
@@ -253,12 +304,85 @@ func (c *Client) Fetch(ctx context.Context, companyID string) (*msg.CompanySnaps
 	}
 	snap.Channels = channels.Channels
 
+	// The key's own permissions (CD5). Best-effort like the resources above;
+	// a server without the route leaves them absent.
+	var perms Permissions
+	if err := c.get(ctx, "/api/ai-native-companies/"+url.PathEscape(companyID)+"/connect/permissions", &perms); err == nil {
+		list := perms.List
+		if list == nil {
+			list = []string{}
+		}
+		snap.Permissions = &list
+		snap.PermissionsExpireAt = perms.ExpireAt
+	} else if err := note(err); err != nil {
+		return nil, err
+	}
+
+	books, err := c.fetchBooks(ctx, companyID, note)
+	if err != nil {
+		return nil, err
+	}
+	snap.Books = books
+
 	snap.Link.Connected = true
 	snap.Link.LastFetch = snap.FetchedAt
 	if firstErr != nil {
 		snap.Link.LastError = firstErr.Error()
 	}
 	return snap, nil
+}
+
+// booksLedgerPage and booksSummaryMonths size the snapshot's Books read (S2.4).
+const (
+	booksLedgerPage    = 20
+	booksSummaryMonths = 6
+)
+
+// fetchBooks reads the Books tab's data for the snapshot, best-effort like the
+// other resources (note records a failure; only ErrUnauthorized is returned).
+// not_enabled is a state, not an error. Errors name the resource, never the
+// route's path (U-27 Q6). It returns nil when the server has none of the routes.
+func (c *Client) fetchBooks(ctx context.Context, companyID string, note func(error) error) (*msg.CompanyBooks, error) {
+	base := "/api/ai-native-companies/" + url.PathEscape(companyID) + "/accountant"
+	read := func(path, name string) (json.RawMessage, bool, error) {
+		var raw json.RawMessage
+		err := c.getNamed(ctx, base+path, name, &raw)
+		switch {
+		case err == nil:
+			return raw, false, nil
+		case errors.Is(err, ErrBooksNotEnabled):
+			return nil, true, nil
+		}
+		return nil, false, note(err)
+	}
+	books := &msg.CompanyBooks{}
+	found := false
+	deadlines, _, err := read("/deadlines", "the Books deadlines")
+	if err != nil {
+		return nil, err
+	}
+	if deadlines != nil {
+		books.Deadlines, found = deadlines, true
+	}
+	ledger, off, err := read("/ledger?"+url.Values{"limit": {fmt.Sprint(booksLedgerPage)}}.Encode(), "the Books ledger")
+	if err != nil {
+		return nil, err
+	}
+	if off {
+		found = true
+	}
+	if ledger != nil {
+		books.Enabled, books.Ledger, found = true, ledger, true
+		summary, _, err := read("/summary?"+url.Values{"months": {fmt.Sprint(booksSummaryMonths)}}.Encode(), "the Books summary")
+		if err != nil {
+			return nil, err
+		}
+		books.Summary = summary
+	}
+	if !found {
+		return nil, nil
+	}
+	return books, nil
 }
 
 // pickPhone reads the few fields the view shows out of the phone reply,

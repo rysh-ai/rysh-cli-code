@@ -92,7 +92,7 @@ case "$1" in
   port) echo "127.0.0.1:0" ;;
   stop) : ;;
   rm)
-    shift; [ "${1:-}" = -f ] && shift
+    shift; while [ "${1#-}" != "${1:-}" ]; do shift; done
     for n in "$@"; do grep -v -x -F "$n" "$S/containers" > "$S/c.tmp" 2>/dev/null; mv "$S/c.tmp" "$S/containers"; done
     [ -s "$S/mm-pid" ] && { kill "$(cat "$S/mm-pid")" 2>/dev/null; : > "$S/mm-pid"; } ;;
   *) exit 1 ;;
@@ -133,6 +133,13 @@ run_case() {
   echo $? > "$S/rc"
 }
 rc() { cat "$T/case-$1/rc"; }
+# vols_gone <case>: every rm of our container also removes its anonymous volumes (-v). The image
+# declares two (Mattermost data + Postgres), which hold the run's throwaway accounts and tokens;
+# without -v each run left both behind in the VM.
+# no_stop <case>: the throwaway container is removed with rm -f -v alone; a stop first waits out the
+# runtime's 10 s grace (the server ignores SIGTERM), a quarter of every run (2026-11-07 timing).
+no_stop() { ! grep -q '^stop ' "$T/case-$1/ctr-argv"; }
+vols_gone() { local S=$T/case-$1; grep -q '^rm ' "$S/ctr-argv" && ! grep '^rm ' "$S/ctr-argv" | grep -q -v -E '^rm -f -v '; }
 left() { grep -c . "$T/case-$1/containers"; }
 no_token_leak() { # no issued token in the runner's output, error stream or any argv
   local S=$T/case-$1 tok
@@ -159,6 +166,8 @@ grep '^run ' "$S/ctr-argv" | grep -q -- '-e MM_LOGSETTINGS_ENABLEDIAGNOSTICS=fal
   && ok "happy: diagnostics and update check off" || bad "happy: diagnostics or update check not turned off"
 grep -q '^pull' "$S/ctr-argv" && bad "happy: pulled although cached" || ok "happy: no pull when cached"
 [ "$(left happy)" = 0 ] && ok "happy: container removed" || bad "happy: $(left happy) container(s) left"
+vols_gone happy && ok "happy: container volumes removed (rm -v)" || bad "happy: rm without -v leaves the image volumes (db, data) behind"
+no_stop happy && ok "happy: no stop before rm (no 10 s grace wait)" || bad "happy: stop before rm waits out the 10 s grace"
 [ "$(grep -c . "$S/out")" = 2 ] && ! grep -q -v '^{' "$S/out" && ok "happy: stdout is go test JSON only" || bad "happy: stdout not JSON-only"
 [ "$(grep -c ' issued$' "$S/go-token-check")" = 2 ] && ok "happy: both tokens reach go by environment" || bad "happy: tokens not in go env"
 [ "$(cat "$S/go-url")" = loopback ] && ok "happy: server URL is http://127.0.0.1" || bad "happy: server URL not loopback"
@@ -182,8 +191,9 @@ mkdir -p "$S"; cp "$S/containers.seed" "$S/containers"
 ( S=$T/case-leftover; : > "$S/tokens"
   env -i PATH="/usr/bin:/bin:/usr/sbin:/sbin" HOME="$T" TMPDIR="$S" MM_LOCAL_TEST=1 MM_LOCAL_CTR="$FAKE_CTR" MM_LOCAL_READY_SECS=20 \
     FAKE_STATE="$S" FAKE_MM_PY="$FAKE_MM" bash "$RUNNER" "$FAKE_GO" > "$S/out" 2> "$S/err"; echo $? > "$S/rc" )
-grep -q -E '^ps .*label=rysh\.channels\.mm-local=1' "$S/ctr-argv" && grep -q '^rm -f rysh-channels-mm-local-old' "$S/ctr-argv" && [ "$(left leftover)" = 0 ] \
+grep -q -E '^ps .*label=rysh\.channels\.mm-local=1' "$S/ctr-argv" && grep -q -E '^rm -f( -v)? rysh-channels-mm-local-old' "$S/ctr-argv" && [ "$(left leftover)" = 0 ] \
   && ok "leftover: our labelled container removed, by label filter" || bad "leftover: not removed ($(left leftover) left)"
+vols_gone leftover && ok "leftover: volumes removed too (rm -v)" || bad "leftover: rm without -v"
 
 # 4. an account step fails: rc 3, go never runs, container removed.
 S=$T/case-setupfail; mkdir -p "$S"; touch "$S/image-present"
@@ -191,12 +201,16 @@ run_case setupfail FAKE_MM_FAIL=/bots
 [ "$(rc setupfail)" = 3 ] && ok "setup fails: rc 3" || bad "setup fails: rc $(rc setupfail)"
 [ -e "$S/go-argv" ] && bad "setup fails: go ran" || ok "setup fails: go not run"
 [ "$(left setupfail)" = 0 ] && ok "setup fails: container removed" || bad "setup fails: container left"
+vols_gone setupfail && ok "setup fails: volumes removed (rm -v)" || bad "setup fails: rm without -v"
+no_stop setupfail && ok "setup fails: no stop before rm" || bad "setup fails: stop before rm"
 no_token_leak setupfail && ok "setup fails: no token leaked" || bad "setup fails: a token leaked"
 
 # 5. go fails: its rc is passed on, container removed.
 S=$T/case-gofail; mkdir -p "$S"; touch "$S/image-present"
 run_case gofail FAKE_GO_MODE=fail
 [ "$(rc gofail)" = 1 ] && [ "$(left gofail)" = 0 ] && ok "go fails: rc 1, container removed" || bad "go fails: rc $(rc gofail), $(left gofail) left"
+vols_gone gofail && ok "go fails: volumes removed (rm -v)" || bad "go fails: rm without -v"
+no_stop gofail && ok "go fails: no stop before rm" || bad "go fails: stop before rm"
 
 # 6. container runtime down (colima not started): rc 4 = SKIP, nothing run, never started by us.
 S=$T/case-down; mkdir -p "$S"; touch "$S/runtime-down"
@@ -211,6 +225,8 @@ env -i PATH="/usr/bin:/bin:/usr/sbin:/sbin" HOME="$T" TMPDIR="$S" MM_LOCAL_TEST=
 RP=$!
 for _ in $(seq 1 100); do [ -e "$S/go-started" ] && break; sleep 0.2; done
 kill -TERM "$RP"; wait "$RP"; trc=$?
+vols_gone term && ok "TERM: volumes removed (rm -v)" || bad "TERM: rm without -v"
+no_stop term && ok "TERM: no stop before rm" || bad "TERM: stop before rm"
 [ -e "$S/go-started" ] && [ "$trc" -ge 128 ] && [ "$(left term)" = 0 ] && ok "TERM: container removed, rc $trc" || bad "TERM: rc $trc, $(left term) left, started=$([ -e "$S/go-started" ] && echo y || echo n)"
 
 # 8. test hooks on a real run: refused before any container call.

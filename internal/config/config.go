@@ -1451,6 +1451,20 @@ func loadFrom(explicitPath string, w io.Writer) (Config, error) {
 		}
 		*f.v = val
 	}
+	// The environment's own key overrides apply only where the file does not
+	// choose the server the key goes to (upstreamEnvKeyAllowed, apiEnvKeyAllowed).
+	if env("RYSH_UPSTREAM_API_KEY") != "" {
+		switch {
+		case !upstreamEnvKeyAllowed(cfg):
+			fmt.Fprintf(w, progname.Rewrite("rysh: warning: %s names its own upstream server; RYSH_UPSTREAM_API_KEY is not used for it\n"), file)
+		case cfg.Upstream.APIKey != "":
+			// Presence only: neither key is compared or shown.
+			fmt.Fprintf(w, progname.Rewrite("rysh: warning: RYSH_UPSTREAM_API_KEY is set in the environment and is used instead of the upstream key %s holds; unset it to use the stored key\n"), file)
+		}
+	}
+	if env("RYSH_API_KEY") != "" && !apiEnvKeyAllowed(cfg) {
+		fmt.Fprintf(w, progname.Rewrite("rysh: warning: %s names its own provider.api_url; RYSH_API_KEY is not used for it\n"), file)
+	}
 	cfg = applyEnvOverrides(cfg)
 	// Fold the automation model-seat defaults into every kind (recipe >
 	// automation.<kind> > automation.loop > built-ins), so the internal loop
@@ -2239,7 +2253,7 @@ func applyEnvOverrides(cfg Config) Config {
 	if v := env("RYSH_MODEL"); v != "" {
 		cfg.DefaultModel = v
 	}
-	if v := env("RYSH_API_KEY"); v != "" {
+	if v := env("RYSH_API_KEY"); v != "" && apiEnvKeyAllowed(cfg) {
 		cfg.APIKey = v
 	} else if _, apiURL := effectiveProvider(cfg); cfg.APIKey == "" && providerKeyFamilyOf(cfg.ProviderName).envAllowed(apiURL) {
 		// Provider-conventional fallback, keyed by the provider selected above
@@ -2380,7 +2394,7 @@ func applyEnvOverrides(cfg Config) Config {
 	if v := env("RYSH_UPSTREAM_URL"); v != "" {
 		cfg.Upstream.URL = v
 	}
-	if v := env("RYSH_UPSTREAM_API_KEY"); v != "" {
+	if v := env("RYSH_UPSTREAM_API_KEY"); v != "" && upstreamEnvKeyAllowed(cfg) {
 		cfg.Upstream.APIKey = v
 	}
 	if v := env("RYSH_UPSTREAM_WORKSPACE"); v != "" {

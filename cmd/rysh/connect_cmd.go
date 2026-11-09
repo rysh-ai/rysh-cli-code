@@ -5,7 +5,7 @@ package main
 // rysh connect — bind this machine to an AI-native company (design 037,
 // "Company Connect").
 //
-//	rysh connect <server> <code> [--json] [--device <label>] [--dir <path>] [--no-open]
+//	rysh connect <server> <code> | --file <path> [--json] [--device <label>] [--vehicle desktop|terminal] [--dir <path>] [--no-open]
 //
 // The dashboard issues a one-time connect code for a company. This command
 // claims it: the server answers once with a READ-ONLY workspace key scoped to
@@ -31,6 +31,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -41,7 +42,7 @@ import (
 const (
 	connectDirEnv         = "RYSH_COMPANIES_DIR"
 	connectDefaultDirName = "Rysh"
-	connectVehicle        = "terminal"
+	connectVehicle        = "terminal" // the default; the desktop app passes --vehicle desktop
 )
 
 var connectSlugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
@@ -90,18 +91,48 @@ func runConnect(cfg config.Config, logger *slog.Logger, args []string) error {
 	args, noOpen := extractBoolFlag(args, "--no-open")
 	args, device := extractStringFlag(args, "--device")
 	args, dirFlag := extractStringFlag(args, "--dir")
-	if len(args) < 2 {
-		return errors.New(progname.Rewrite("usage: rysh connect <server> <code> [--json] [--device <label>] [--dir <path>] [--no-open]\n" +
-			"  the code comes from the company page on the dashboard (\"Open in Rysh\")"))
+	before := len(args)
+	args, vehicle := extractStringFlag(args, "--vehicle")
+	switch {
+	case len(args) == before && slices.Contains(args, "--vehicle"):
+		return errors.New("--vehicle needs a value: desktop or terminal")
+	case len(args) == before:
+		vehicle = connectVehicle
+	case vehicle != "desktop" && vehicle != "terminal":
+		return fmt.Errorf("--vehicle must be desktop or terminal, not %q", vehicle)
 	}
-	server, code := strings.TrimSpace(args[0]), strings.TrimSpace(args[1])
+	before = len(args)
+	args, connectFilePath := extractStringFlag(args, "--file")
+	var server, code string
+	switch {
+	case len(args) == before && slices.Contains(args, "--file"):
+		return errors.New("--file needs the path of a .ryshconnect file")
+	case len(args) < before && len(args) > 0:
+		return errors.New("--file replaces <server> <code>; pass one or the other")
+	case len(args) < before:
+		var err error
+		if server, code, err = readConnectFile(connectFilePath, time.Now()); err != nil {
+			return err
+		}
+	case len(args) < 2:
+		return errors.New(progname.Rewrite("usage: rysh connect <server> <code> | --file <path> [--json] [--device <label>] [--vehicle desktop|terminal] [--dir <path>] [--no-open]\n" +
+			"  the code (or the connect file) comes from the company page on the dashboard (\"Open in Rysh\")"))
+	default:
+		server, code = strings.TrimSpace(args[0]), strings.TrimSpace(args[1])
+	}
 	if device == "" {
 		device = defaultConnectDevice()
 	}
 
-	claim, err := claimCompany(server, code, connectVehicle, device)
+	claim, err := claimCompany(server, code, vehicle, device)
 	if err != nil {
 		return err
+	}
+	if connectFilePath != "" {
+		// The code in it is spent; a failed claim above keeps the file.
+		if err := os.Remove(connectFilePath); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not remove %s (the code in it is used up): %v\n", connectFilePath, errors.Unwrap(err))
+		}
 	}
 	dir, err := companyWorkspaceDir(dirFlag, claim.Company.Slug)
 	if err != nil {

@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 
 	"github.com/rysh-ai/rysh-cli-code/internal/domain"
@@ -372,6 +373,7 @@ type paneEvent struct {
 	kind    paneEventKind
 	orch    string
 	phase   string // evStatus
+	reqID   string // evStatus: the prompt's RequestID, on a run's planning status
 	typ     string // evOutput
 	content string // evOutput text, evApproval description
 }
@@ -421,7 +423,7 @@ func (w *paneWorker) subscribe() error {
 	handlers := map[string]func(interface{}){
 		msg.T("pane", w.pane, "llm_prompt_execution", "status"): func(d interface{}) {
 			if st, ok := d.(*msg.MsgAgenticStatus); ok {
-				w.push(paneEvent{kind: evStatus, orch: st.OrchestratorID, phase: st.Phase})
+				w.push(paneEvent{kind: evStatus, orch: st.OrchestratorID, phase: st.Phase, reqID: st.RequestID})
 			}
 		},
 		msg.T("pane", w.pane, "llm_prompt_execution", "output"): func(d interface{}) {
@@ -596,7 +598,10 @@ func (s *server) runTurn(w *paneWorker, t *turn) {
 			drained = true
 		}
 	}
-	if err := s.pub.Send(msg.T("pane", t.pane, "inbox"), &msg.MsgPaneExecPrompt{Prompt: t.text, Literal: true}); err != nil {
+	// A delivery: it waits behind any run in flight instead of cancelling it,
+	// and its RequestID tells this turn's run from one queued ahead (QA-36).
+	reqID := uuid.NewString()
+	if err := s.pub.Send(msg.T("pane", t.pane, "inbox"), &msg.MsgPaneExecPrompt{Prompt: t.text, Literal: true, Queue: true, RequestID: reqID}); err != nil {
 		s.finish(t, StatusError, "", "could not deliver the prompt: "+err.Error())
 		return
 	}
@@ -699,9 +704,13 @@ func (s *server) runTurn(w *paneWorker, t *turn) {
 		case ev := <-w.events:
 			if orch == "" {
 				// The run is ours from its "planning" status, which the
-				// LLM actor emits when it starts the prompt. Events of the
-				// run that raced ahead of it are replayed once it is known.
-				if ev.kind != evStatus || ev.phase != "planning" {
+				// LLM actor emits when it starts the prompt and which names
+				// the prompt's RequestID; a run queued ahead of ours (a
+				// courier delivery) names another. An older daemon names
+				// none, and then the first planning is taken, as before.
+				// Events of the run that raced ahead of it are replayed once
+				// it is known.
+				if ev.kind != evStatus || ev.phase != "planning" || (ev.reqID != "" && ev.reqID != reqID) {
 					if len(pending) < 4096 {
 						pending = append(pending, ev)
 					}

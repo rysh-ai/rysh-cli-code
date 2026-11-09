@@ -49,7 +49,7 @@ func (p *PaneActor) executeShell(command string) {
 		command = expanded
 	}
 
-	p.mode = "shell"
+	p.setInputMode("shell")
 	p.status = "running shell"
 	p.lastCommand = command
 
@@ -277,11 +277,20 @@ func (p *PaneActor) executePrompt(prompt string, contentBlocks []provider.Conten
 // handleExecPrompt is the pane inbox's MsgPaneExecPrompt: a Literal prompt
 // skips every prefix check (design 093 H3).
 func (p *PaneActor) handleExecPrompt(m *msg.MsgPaneExecPrompt) {
-	if m.Literal {
-		p.executeAgentPrompt(m.Prompt, nil)
+	if !m.Literal && strings.HasPrefix(m.Prompt, "##>") {
+		p.executePrompt(m.Prompt, nil) // a pipeline event, not a prompt
 		return
 	}
-	p.executePrompt(m.Prompt, nil)
+	p.executeAgentPromptAs(m.Prompt, nil, agentDelivery{queue: m.Queue, requestID: m.RequestID})
+}
+
+// agentDelivery is how a prompt reaches the agent: a delivery (Queue) waits
+// behind a run in flight instead of cancelling it, and its RequestID comes
+// back on the run's planning status (QA-36). Typed input is the zero value:
+// last-prompt-wins.
+type agentDelivery struct {
+	queue     bool
+	requestID string
 }
 
 // executeAgentPrompt runs prompt as an agent turn, reading nothing in it as a
@@ -290,6 +299,11 @@ func (p *PaneActor) handleExecPrompt(m *msg.MsgPaneExecPrompt) {
 // so a family member's message that happens to start with "##>" is still a
 // prompt. The policy gate below applies to both.
 func (p *PaneActor) executeAgentPrompt(prompt string, contentBlocks []provider.ContentBlock) {
+	p.executeAgentPromptAs(prompt, contentBlocks, agentDelivery{})
+}
+
+// executeAgentPromptAs is executeAgentPrompt for a delivery (see agentDelivery).
+func (p *PaneActor) executeAgentPromptAs(prompt string, contentBlocks []provider.ContentBlock, d agentDelivery) {
 	// Fail-closed (design 013): this is the fan-in for every pane prompt —
 	// local input, cron, `rysh send --mode prompt`, and remote `exec_prompt`
 	// arriving over a control-mode share, which never passes through
@@ -298,7 +312,7 @@ func (p *PaneActor) executeAgentPrompt(prompt string, contentBlocks []provider.C
 		_ = p.pub.SendPaneRyshOutput(p.id, policy.BlockedMessage(reason))
 		return
 	}
-	p.mode = "prompt"
+	p.setInputMode("prompt")
 	p.status = "querying provider"
 	p.lastCommand = prompt
 	// Publish AI history entry via NATS (dual-publish to .history.ai + .history).
@@ -329,11 +343,11 @@ func (p *PaneActor) executeAgentPrompt(prompt string, contentBlocks []provider.C
 		// message to the ai/merged/private buffers, exactly as before.
 		_ = p.pub.SendPaneAIOutput(p.id, promptEcho)
 	}
-	_ = p.pub.Send(p.llmPromptExecInbox, &msg.MsgAgenticPrompt{Prompt: prompt, ContentBlocks: contentBlocks})
+	_ = p.pub.Send(p.llmPromptExecInbox, &msg.MsgAgenticPrompt{Prompt: prompt, ContentBlocks: contentBlocks, Queue: d.queue, RequestID: d.requestID})
 }
 
 func (p *PaneActor) executeRysh(command string) {
-	p.mode = "rysh"
+	p.setInputMode("rysh")
 	p.lastCommand = command
 	// Publish rysh history entry via NATS (single-publish to .history.rysh only).
 	_ = p.pub.SendPaneRyshHistory(p.id, command)
@@ -385,7 +399,7 @@ func (p *PaneActor) handleNativeMode(action string) {
 func (p *PaneActor) executeChat(message, senderName string) {
 	// Chat mode is pure text — no shell, no AI. Publish to NATS chat topic
 	// so it's shared and the PaneActor's own handler appends to chatOutput.
-	p.mode = "chat"
+	p.setInputMode("chat")
 	p.lastCommand = message
 
 	// Prefix the message with the sender's display name.

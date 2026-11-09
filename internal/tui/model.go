@@ -157,6 +157,9 @@ type Model struct {
 	// NATS-based workspace communication.
 	workspaceInbox string // "{session}.ws.inbox"
 	pub            *msgpkg.NATSPublisher
+	// lastPaneResizeKey is the pane sizes last sent (sendPaneSizes), so a
+	// snapshot that leaves the layout as it was does not re-send them.
+	lastPaneResizeKey string
 
 	inputs   map[string]textinput.Model
 	snapshot domain.WorkspaceSnapshot

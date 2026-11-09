@@ -103,7 +103,9 @@ func main() {
 	if os.Getenv("RYSH_SANDBOX_E2E_SOCK_SHAPE") == "dir" {
 		inner = "/sbxdir/b.sock"
 	}
-	cmd := exec.Command(docker, "run", "--rm", "--pull", "never", "--network", "none",
+	// Named like the other E2E containers (e2eID), so a runner removes only its own.
+	name := "rysh-sbx-" + e2eID(t, "g1x"+strings.ToLower(filepath.Base(base)[len(".g1x-"):]))
+	cmd := exec.Command(docker, "run", "--rm", "--name", name, "--pull", "never", "--network", "none",
 		"--user", strconv.Itoa(os.Getuid())+":"+strconv.Itoa(os.Getgid()),
 		"--cap-drop", "ALL", "--security-opt", "no-new-privileges",
 		"--mount", sockMount(base, sock, inner),

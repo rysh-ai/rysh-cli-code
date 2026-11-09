@@ -86,6 +86,12 @@ const (
 	AnsaErrAudit = "audit_unavailable"
 	// AnsaErrBadMinutes — `ansa hung --minutes` is outside 1..1440.
 	AnsaErrBadMinutes = "bad_minutes"
+	// AnsaErrExpired — the message waited behind earlier deliveries to the
+	// same pane for longer than its sender waits for an answer
+	// (ansaRouteDeadline), so it was dropped undelivered. Delivering it anyway
+	// would land a message the sender was already told had failed — and an
+	// agent that retries would then be heard twice.
+	AnsaErrExpired = "expired"
 )
 
 // MsgAnsaRoute is a routing request: deliver Text to the pane named by To.

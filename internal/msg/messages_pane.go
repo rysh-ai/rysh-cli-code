@@ -37,6 +37,13 @@ type MsgPaneExecPrompt struct {
 	// text and must never be interpreted (design 093 H3). Older daemons ignore
 	// the field.
 	Literal bool `json:"literal,omitempty"`
+	// Queue and RequestID pass to the agent's MsgAgenticPrompt: a Queue
+	// prompt waits behind a run in flight instead of cancelling it, and the
+	// run's planning status carries RequestID, so the sender can claim its
+	// own run (QA-36). Deliveries set them: the courier, `rysh family serve`.
+	// Older daemons ignore both.
+	Queue     bool   `json:"queue,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
 }
 
 // MsgPaneExecRysh records a rysh system command in the pane's rysh history.
@@ -233,6 +240,13 @@ type MsgPaneResize struct {
 	// subscriber asking the source to render at ITS resolution, which is a
 	// choice the source honours rather than a constraint to intersect.
 	Override bool `json:"override,omitempty"`
+	// Passive marks a viewport that should not constrain the pane while anyone
+	// else is looking at it — the phone UI reached over a web tunnel. A phone
+	// measures a pane at ~45 columns; as an ordinary claim it would clamp the
+	// PTY that a desktop window or terminal UI is showing at 200, the moment
+	// the phone connects. A passive claim counts only when every claim on the
+	// pane is passive; otherwise the phone pans the larger grid instead.
+	Passive bool `json:"passive,omitempty"`
 }
 
 // MsgPaneReleaseSize withdraws a viewport's size claim: the pane drops it and
@@ -349,6 +363,9 @@ type MsgTabTerminated struct {
 type MsgStartPaneListener struct {
 	TargetPaneID string `json:"target_pane_id"`
 	TargetAlias  string `json:"target_alias"` // for display purposes
+	// AllowShell: --allow-sh; shell events in the listened output may run
+	// their fixed command in the listening pane (off by default).
+	AllowShell bool `json:"allow_shell,omitempty"`
 }
 
 // MsgStopPaneListener tells a PaneActor to stop listening.

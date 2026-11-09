@@ -351,9 +351,19 @@ func (w *WorkspaceActor) handlePaneCommand(ctx actor.Context, out *strings.Build
 		w.handlePaneSyncCommand(out, paneID, args[1:])
 
 	case "listen":
+		allowShell := false
+		rest := args[:0:0]
+		for _, a := range args {
+			if a == "--allow-sh" {
+				allowShell = true
+				continue
+			}
+			rest = append(rest, a)
+		}
+		args = rest
 		if len(args) < 2 {
-			ryshWriter(out).UsageLine("##pane listen <pane-id | pane-alias>")
-			w.failRyshUsage("usage: %s", "##pane listen <pane-id | pane-alias>")
+			ryshWriter(out).UsageLine("##pane listen <pane-id | pane-alias> [--allow-sh]")
+			w.failRyshUsage("usage: %s", "##pane listen <pane-id | pane-alias> [--allow-sh]")
 			break
 		}
 		target := args[1]
@@ -378,6 +388,7 @@ func (w *WorkspaceActor) handlePaneCommand(ctx actor.Context, out *strings.Build
 		_ = w.pub.Send(msg.T("pane", paneID, "inbox"), &msg.MsgStartPaneListener{
 			TargetPaneID: targetID,
 			TargetAlias:  target,
+			AllowShell:   allowShell,
 		})
 
 	case "unlisten":
@@ -479,7 +490,7 @@ func (w *WorkspaceActor) handlePaneCommand(ctx actor.Context, out *strings.Build
 			"##pane list [--tab <tab-id>]",
 			"##pane name <name>",
 			"##pane sync [on|off] [--pane <ref> | --all | --tab <tab>] | list",
-			"##pane listen <id|alias>",
+			"##pane listen <id|alias> [--allow-sh]",
 			"##pane unlisten",
 			"##pane provider [name [model]]",
 			"##pane model [<provider>/<name>|list|default]",

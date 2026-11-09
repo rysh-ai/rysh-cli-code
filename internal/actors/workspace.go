@@ -8,6 +8,7 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/bus"
 	"github.com/rysh-ai/rysh-cli-code/internal/progname"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -50,6 +51,10 @@ type tabInfo struct {
 // All fields are unguarded -- the proto.actor mailbox guarantees sequential Receive().
 type WorkspaceActor struct {
 	peerRuntime *coord.Runtime
+	// ansaDisp runs ANSA routes off this actor's goroutine (ansa_dispatch.go).
+	// Created on first use by ansaDispatch.
+	ansaDisp     *ansaDispatcher
+	ansaDispOnce sync.Once
 	// ryshFail is the failure recorded by the ## command currently in flight,
 	// or nil. Set by failRysh, drained by handleRyshCommand — see the failure
 	// section of workspace_out.go for why it lives here and why that is safe.
@@ -1508,9 +1513,11 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 		// Likewise its own CLI message rather than a ##ansa through
 		// MsgCLIRyshCommand: a control channel used by dozens of agents must
 		// not focus a pane or echo into one as a side effect of routing.
+		//
+		// Answered from a worker, not here: a route takes ~2 s and this actor
+		// is the whole session's coordinator (ansa_dispatch.go).
 		case *msg.MsgCLIAnsaSend:
-			resp := w.handleCLIAnsaSend(inner)
-			_ = m.Reply(resp)
+			w.dispatchCLIAnsaSend(m, inner)
 
 		// `rysh ansa keys`: named keys to one pane, same silent door.
 		case *msg.MsgCLIAnsaKeys:
@@ -1524,8 +1531,7 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 		// is the board claude is this actor's job, not the view's, so the
 		// refuse-on-two-panes-called-board rule lives in exactly one place.
 		case *msg.MsgBoardAgentPrompt:
-			resp := w.handleBoardAgentPrompt(inner)
-			_ = m.Reply(resp)
+			w.dispatchBoardAgentPrompt(m, inner)
 		}
 	}
 }

@@ -292,6 +292,36 @@ func TestCraftedConfigCannotSendAnotherSecretUpstream(t *testing.T) {
 	}
 }
 
+// R3: with RYSH_UPSTREAM_API_KEY in the environment, a config that names its
+// own server never receives that key (the file's key, or none, is used).
+func TestEnvUpstreamKeyNeverGoesToAFileChosenServer(t *testing.T) {
+	t.Setenv("RYSH_SESSION", "")
+	t.Setenv("RYSH_DIR", "")
+	t.Setenv("RYSH_UPSTREAM_URL", "")
+	t.Setenv("RYSH_UPSTREAM_API_KEY", "fake-env-upstream-r3")
+	var auths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auths = append(auths, r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	p := filepath.Join(t.TempDir(), "evil.rysh.config.yaml")
+	body := "upstream:\n  enabled: true\n  url: " + srv.URL + "\n  api_key: rysh_file_key\n  workspace: 11111111-1111-1111-1111-111111111111\n" +
+		"company:\n  id: 22222222-2222-2222-2222-222222222222\n  slug: firat\n  server: " + srv.URL + "\n"
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = runCompanyCLI(config.Config{}, []string{"status", "--json", "--config", p})
+	if len(auths) == 0 {
+		t.Fatal("no request reached the server: this proves nothing")
+	}
+	for _, a := range auths {
+		if strings.Contains(a, "fake-env-upstream-r3") {
+			t.Fatal("the environment's upstream key went to a server the config file chose")
+		}
+	}
+}
+
 // desktop's CD3 rehearsal: a link opened over https must never be downgraded
 // or redirected by the claim. The server_url the claim names is accepted only
 // when it is https on the same host (and port) as the link; an http link (a

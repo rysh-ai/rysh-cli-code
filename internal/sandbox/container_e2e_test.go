@@ -59,6 +59,7 @@ func TestContainerRealDockerE2E(t *testing.T) {
 			}
 			return -1
 		}, s.ID)
+		s.ID = e2eID(t, s.ID)
 		plan, err := (&Container{UID: os.Getuid(), GID: os.Getgid()}).Prepare(s)
 		if err != nil {
 			t.Fatal(err)
@@ -149,7 +150,7 @@ func TestContainerRealDockerPolicyRulesE2E(t *testing.T) {
 			Argv:  []string{"/bin/sh", "-c", script},
 			Env:   []string{"PATH=" + os.Getenv("PATH"), "LANG=C"},
 			Rules: PathRules{ReadOnly: []string{ws, gen}, ReadWrite: []string{src}, Deny: []string{env}},
-			ID:    id[:min(len(id), 30)],
+			ID:    e2eID(t, id[:min(len(id), 30)]),
 		}
 		plan, err := (&Container{UID: os.Getuid(), GID: os.Getgid()}).Prepare(s)
 		if err != nil {

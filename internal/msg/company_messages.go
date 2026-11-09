@@ -2,7 +2,10 @@
 
 package msg
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Company Connect (design 037) — the data the daemon's CompanyActor gathers
 // about the AI-native company this session is bound to, and the three local
@@ -143,6 +146,25 @@ type CompanySnapshot struct {
 	Activity  []CompanyActivity `json:"activity"`
 	Link      CompanyLink       `json:"link"`
 	FetchedAt time.Time         `json:"fetched_at"`
+	// Permissions are this device's own named write permissions (CD5),
+	// as the key's GET .../connect/permissions reports them: nil = not read
+	// (an older server, or the read failed), [] = read only.
+	Permissions         *[]string            `json:"permissions,omitempty"`
+	PermissionsExpireAt map[string]time.Time `json:"permissions_expire_at,omitempty"`
+	// Books is the read-only Books data the key may read (S2.4, the desktop
+	// app's Books tab): nil = not read (an older server without the routes).
+	Books *CompanyBooks `json:"books,omitempty"`
+}
+
+// CompanyBooks passes the server's Books JSON through unchanged (amounts are
+// integer pence), as the company MCP tools do. Enabled is false while the
+// company's bookkeeping assistant is off; deadlines (Companies House) are read
+// either way, the summary and the first ledger page only while it is on.
+type CompanyBooks struct {
+	Enabled   bool            `json:"enabled"`
+	Deadlines json.RawMessage `json:"deadlines,omitempty"`
+	Summary   json.RawMessage `json:"summary,omitempty"`
+	Ledger    json.RawMessage `json:"ledger,omitempty"`
 }
 
 // MsgCompanySnapshot is pushed on company.snapshot whenever the follower has

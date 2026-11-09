@@ -111,6 +111,17 @@ AllowUsers %s
 	s.HostKeyPub = hostLine(t, port, filepath.Join(dir, "host_key.pub"))
 	s.TrustRealHostKey(t)
 
+	// On a failed test, say what the far side did: sshd's log and whether the
+	// remote command ever started. The job's temp dir is gone after the run
+	// (the dev-host runner), so this is the only record. Registered before the
+	// sshd stop below, so it runs after it and sees the whole log.
+	t.Cleanup(func() {
+		if t.Failed() {
+			// The login name is masked: test logs end up in evidence files.
+			t.Logf("sshtest: %s\nsshd log:\n%s", s.wrapperRan(), strings.ReplaceAll(s.Log(), u.Username, "<user>"))
+		}
+	})
+
 	cmd := exec.Command(sshd, "-D", "-e", "-f", filepath.Join(dir, "sshd_config"))
 	logf, err := os.Create(filepath.Join(dir, "sshd.log"))
 	if err != nil {
@@ -172,10 +183,22 @@ func (s *Server) ForgetHostKey(t *testing.T) {
 // reaches the remote-serve process. Absolute path, own name, never on PATH.
 func (s *Server) CleanEnvWrapper(t *testing.T, bin string) string {
 	p := filepath.Join(s.Dir, "remote-rysh-clean-env.sh")
-	script := fmt.Sprintf("#!/bin/sh\nexec /usr/bin/env -i HOME=%q PATH=/usr/bin:/bin:/usr/sbin:/sbin TMPDIR=%q %q \"$@\"\n",
-		os.Getenv("HOME"), os.TempDir(), bin)
+	script := fmt.Sprintf("#!/bin/sh\necho \"$$\" >> %q\nexec /usr/bin/env -i HOME=%q PATH=/usr/bin:/bin:/usr/sbin:/sbin TMPDIR=%q %q \"$@\"\n",
+		s.ranFile(), os.Getenv("HOME"), os.TempDir(), bin)
 	must(t, os.WriteFile(p, []byte(script), 0o700))
 	return p
+}
+
+func (s *Server) ranFile() string { return filepath.Join(s.Dir, "remote-rysh-started") }
+
+// wrapperRan says whether ssh ever started the remote command: a login that
+// succeeds but never runs it points at the account's login shell, not rysh.
+func (s *Server) wrapperRan() string {
+	b, err := os.ReadFile(s.ranFile())
+	if err != nil {
+		return "the remote command never started (no clean-env wrapper run)"
+	}
+	return fmt.Sprintf("the clean-env wrapper started %d time(s)", strings.Count(string(b), "\n"))
 }
 
 // Log returns sshd's log.

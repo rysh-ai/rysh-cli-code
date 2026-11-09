@@ -1010,6 +1010,9 @@ func (p *PaneActor) replayShareState() {
 // paneSizeClaim is one viewport's measurement of a pane.
 type paneSizeClaim struct {
 	rows, cols int
+	// passive claims only count when no active claim is held (see
+	// msg.MsgPaneResize.Passive and effectivePaneSize).
+	passive bool
 }
 
 // tuiClaimPrefix marks a size claim owned by a terminal UI process on this
@@ -1026,8 +1029,9 @@ const tuiClaimPrefix = "tui:"
 const anonymousSizeClaim = "anonymous"
 
 // claimPaneSize records a viewport's size for this pane and re-sizes the PTY to
-// the smallest claim currently held.
-func (p *PaneActor) claimPaneSize(clientID string, rows, cols int) {
+// the smallest claim currently held. A passive claim (the phone UI) is recorded
+// but only constrains the pane when no active viewport is showing it.
+func (p *PaneActor) claimPaneSize(clientID string, rows, cols int, passive bool) {
 	if rows <= 0 || cols <= 0 {
 		return
 	}
@@ -1037,7 +1041,7 @@ func (p *PaneActor) claimPaneSize(clientID string, rows, cols int) {
 	if p.sizeClaims == nil {
 		p.sizeClaims = make(map[string]paneSizeClaim, 2)
 	}
-	p.sizeClaims[clientID] = paneSizeClaim{rows: rows, cols: cols}
+	p.sizeClaims[clientID] = paneSizeClaim{rows: rows, cols: cols, passive: passive}
 	p.applyEffectivePaneSize()
 }
 
@@ -1066,13 +1070,26 @@ func (p *PaneActor) releasePaneSize(clientID string) {
 // A terminal UI nobody is typing into is not counted while another one is in
 // use (see idleViewportClaims): a window left open on another screen would
 // otherwise hold the pane to its size for as long as it stays attached.
+//
+// Passive claims are ignored whenever an active claim exists. A phone joining
+// over the web tunnel is the case: as an ordinary claim its ~45 columns shrank
+// the pane on the desktop the moment it connected. The phone UI pans a grid
+// larger than its screen instead, and its claim takes over only when it is the
+// sole kind of viewport left on the pane.
 func (p *PaneActor) effectivePaneSize() (rows, cols int, ok bool) {
 	p.pruneDeadSizeClaims()
 	idle := p.idleViewportClaims()
 	p.sizeIdle = idle
 
+	anyActive := false
 	for id, c := range p.sizeClaims {
-		if idle[id] {
+		if !c.passive && !idle[id] {
+			anyActive = true
+			break
+		}
+	}
+	for id, c := range p.sizeClaims {
+		if idle[id] || (anyActive && c.passive) {
 			continue
 		}
 		if rows == 0 || c.rows < rows {

@@ -62,6 +62,14 @@ type PaneGroupActor struct {
 	// Ephemeral approval panes (keyed by pane ID).
 	approvalPaneActors map[string]*ApprovalPaneActor
 
+	// lastAnswered is each pane's most recent snapshot that the pane itself
+	// supplied, stripped of its content (see staleSnapshotFrom). It is what
+	// collectSnapshot serves, marked Stale, when a pane misses the deadline —
+	// instead of a zero-valued placeholder whose RawMode=false told every
+	// client the pane's claude had exited. Touched only on the actor goroutine;
+	// lazily allocated, pruned to live panes on every collect.
+	lastAnswered map[string]domain.PaneSnapshot
+
 	// Initial pane info -- set at creation, consumed on *actor.Started.
 	// initialPaneType marks the initial pane as a special variant ("replay"
 	// panes never start a shell); "" = normal pane.
@@ -647,12 +655,16 @@ func (g *PaneGroupActor) collectSnapshot(layoutOnly, noHistories bool, historyPa
 			&msg.MsgGetPaneSnapshot{LayoutOnly: layoutOnly, NoHistories: noHistories, HistoryPaneID: historyPane},
 			time.Second,
 		)
+		// The placeholders below are Stale: the pane said nothing, so nothing in
+		// them is a reading. substituteStale replaces them with the pane's last
+		// answer when there is one.
 		if err != nil {
 			results[i] = domain.PaneSnapshot{
 				ID:     id,
 				Title:  title,
 				Status: "unreachable",
 				Output: fmt.Sprintf("snapshot error: %v", err),
+				Stale:  true,
 			}
 			return
 		}
@@ -663,6 +675,7 @@ func (g *PaneGroupActor) collectSnapshot(layoutOnly, noHistories bool, historyPa
 				Title:  title,
 				Status: "unreachable",
 				Output: "unexpected reply type",
+				Stale:  true,
 			}
 			return
 		}
@@ -695,6 +708,7 @@ func (g *PaneGroupActor) collectSnapshot(layoutOnly, noHistories bool, historyPa
 	if parallel {
 		wg.Wait()
 	}
+	results = g.substituteStale(results, have, answered)
 	for i := range g.paneRefs {
 		if have[i] {
 			// Reconcile the group's copy of `hidden` from what the pane itself
@@ -708,6 +722,72 @@ func (g *PaneGroupActor) collectSnapshot(layoutOnly, noHistories bool, historyPa
 	}
 
 	return snap
+}
+
+// substituteStale records every answered pane snapshot and serves the last
+// recorded one, marked Stale, for each pane that did not answer. Runs on the
+// actor goroutine after the fetch goroutines have finished.
+//
+// The zero-valued placeholder it replaces was the 70-pane "my claude keeps
+// turning into a shell" bug: a pane whose mailbox was busy for one second was
+// reported RawMode=false, every client took that as "the program exited" and
+// dropped the live view, and the next on-time answer put it back.
+func (g *PaneGroupActor) substituteStale(results []domain.PaneSnapshot, have, answered []bool) []domain.PaneSnapshot {
+	if g.lastAnswered == nil {
+		g.lastAnswered = make(map[string]domain.PaneSnapshot)
+	}
+	live := make(map[string]struct{}, len(g.paneRefs))
+	for i, ref := range g.paneRefs {
+		live[ref.id] = struct{}{}
+		if !have[i] {
+			continue
+		}
+		if answered[i] {
+			g.lastAnswered[ref.id] = staleSnapshotFrom(results[i])
+			continue
+		}
+		if last, ok := g.lastAnswered[ref.id]; ok {
+			results[i] = last
+		}
+	}
+	for id := range g.lastAnswered {
+		if _, ok := live[id]; !ok {
+			delete(g.lastAnswered, id)
+		}
+	}
+	return results
+}
+
+// staleSnapshotFrom is the copy of an answered snapshot kept for serving when
+// the pane next misses the deadline: every state field (RawMode, FullScreen,
+// NativeMode, Program, Meta, modes, flags) as the pane last reported it, Stale
+// set, and the content dropped. Content is dropped because it is the bulk of a
+// snapshot — holding a second copy of 70 panes' buffers is what the daemon
+// memory work removed — and because a client that needs content fetches it
+// from the pane directly; the layout clients rehydrate it from their own
+// buffers. A stale frame must not overwrite live content with an old one.
+func staleSnapshotFrom(s domain.PaneSnapshot) domain.PaneSnapshot {
+	s.Stale = true
+	s.Output = ""
+	s.ShellOutput = ""
+	s.AIOutput = ""
+	s.RyshOutput = ""
+	s.ChatOutput = ""
+	s.ExternalOutput = ""
+	s.ModeOutputs = nil
+	s.Conversations = nil
+	s.MergedConv = nil
+	s.ConvHistories = nil
+	s.MergedConvHistory = nil
+	s.MergedHistory = nil
+	s.ShellHistory = nil
+	s.PromptHistory = nil
+	s.RyshHistory = nil
+	s.ChatHistory = nil
+	s.ExternalHistory = nil
+	s.VTScreen = nil
+	s.RemoteVTScreen = nil
+	return s
 }
 
 // ---------------------------------------------------------------------------
