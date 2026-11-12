@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/asynkron/protoactor-go/actor"
 	sharedmsg "github.com/rysh-ai/rysh-cli-shared/msg"
 	"github.com/rysh-ai/rysh-cli-shared/secretnat"
 
@@ -26,6 +27,51 @@ import (
 // startProxy launches the governance proxy (design 001) if not already running.
 // The real provider key (config.APIKey) is injected proxy-side; SecretNAT is the
 // session-wide manager shared with rysh's own agents (one token namespace).
+// startGovernance brings up what the governance proxy needs and the proxy
+// itself, before restore/bootstrap spawns any pane (security-lead ledger 220):
+// a pane's shell takes the proxy's base URL only when it spawns.
+func (w *WorkspaceActor) startGovernance(ctx actor.Context) {
+	// Policy-as-code (design 013): load .rysh/policy.yaml (merged with the org
+	// policy file when one is configured — strictest wins) before the usage
+	// ledger so budget ceilings seed it race-free, and before the proxy, whose
+	// proxy_required and strict settings come from it.
+	//
+	// Fail-closed: an unparseable rule set must NOT be read as "no rules" —
+	// nor may a configured org policy file that is missing. Governed execution
+	// (LLM prompts, agent/humanoid prompts) is refused until the files load —
+	// see policyBlocked. Shell and ## commands stay available so the operator
+	// can fix the file and run ##policy reload.
+	w.policy = w.loadPolicy()
+
+	// Org-wide control plane (design 023). Inert unless BOTH upstream.enabled
+	// and the explicit upstream.governance opt-in are set — reporting spend to
+	// a server is a data-egress decision, and the OSS client must stay fully
+	// functional standalone. The proxy's lease gate is this ledger.
+	w.startLedgerClient()
+
+	// Proxy audit plane (design 001 §4.5): durable trail of governed traffic.
+	// Spawned unconditionally (independent of whether the proxy is currently
+	// on) so the JetStream stream captures every audit record and ##proxy
+	// audit survives a restart; before the proxy, so it misses none.
+	w.proxyAuditPID = ctx.Spawn(actor.PropsFromProducer(func() actor.Actor {
+		return NewProxyAuditActor(w.sessionName, w.pub, w.nc)
+	}))
+
+	// Governance proxy (design 001): start the loopback proxy when enabled in
+	// config OR required by policy (design 013).
+	if w.cfg.Proxy.Enabled || w.policy.ProxyRequired {
+		w.startProxy()
+	}
+}
+
+// paneShellBlockedByProxy is why a pane must not start its shell now: a
+// required proxy is down (proxy.RequiredDown), or "" when it may start.
+func paneShellBlockedByProxy() string { return proxy.RequiredDown() }
+
+// proxyListenAddr is where startProxy listens; "" is the loopback default (a
+// test seam for a proxy that cannot start).
+var proxyListenAddr = ""
+
 func (w *WorkspaceActor) startProxy() {
 	if w.proxyServer != nil {
 		return
@@ -69,10 +115,21 @@ func (w *WorkspaceActor) startProxy() {
 	if w.cfg.RyshDir != "" {
 		srv.SetAuditDir(filepath.Join(w.cfg.RyshDir, "proxy-audit", w.sessionName))
 	}
-	if _, err := srv.Start(""); err != nil {
+	// Started before the panes (startGovernance), but the registered-secret
+	// tier is seeded after the restore: hold every request until it is.
+	if !w.knownSecretsSeeded {
+		srv.HoldUntilSecretsSeeded()
+	}
+	if _, err := srv.Start(proxyListenAddr); err != nil {
 		slog.Error("governance proxy: start failed", "err", err)
+		// Fail-closed where governance is required (policy proxy_required, or
+		// strict): no pane shell starts ungoverned; each says why instead.
+		if (w.policy != nil && w.policy.ProxyRequired) || w.proxyStrict() {
+			proxy.SetRequiredDown("the governance proxy is required (" + w.proxyRequiredBy() + ") but did not start: " + err.Error())
+		}
 		return
 	}
+	proxy.SetRequiredDown("")
 	w.proxyServer = srv
 	// Record the governed endpoint in the session registry (design 001) so
 	// ##session info and registry-inspecting tools see it without attaching.
@@ -138,6 +195,16 @@ func (w *WorkspaceActor) stopLedgerClient() {
 // proxyStrict reports whether an ungoverned CLI should be stopped rather than
 // warned about. Either source can switch it on; neither can switch the other
 // off, which is the same strictest-wins rule policy uses everywhere else.
+// proxyRequiredBy names what requires the proxy, for the refusal a pane shows.
+func (w *WorkspaceActor) proxyRequiredBy() string {
+	switch {
+	case w.policy != nil && w.policy.ProxyRequired:
+		return "policy proxy_required"
+	default:
+		return "proxy strict mode"
+	}
+}
+
 func (w *WorkspaceActor) proxyStrict() bool {
 	if w.cfg.Proxy.Strict {
 		return true

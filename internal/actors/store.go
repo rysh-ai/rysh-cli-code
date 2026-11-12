@@ -17,7 +17,9 @@ package actors
 // known-tier sync run after every mutation. Everything else is shared here.
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -391,6 +393,15 @@ func (i secretInfo) sourcesLabel() string {
 // stored with the default persistence shows as "session, persist". Environment
 // variables are global and not enumerated, but still resolve via Get.
 func (s *namedStore) List(scope string) []secretInfo {
+	out, _ := s.ListReport(scope)
+	return out
+}
+
+// ListReport is List plus every source it could not read for scope (the
+// session KV, a persisted directory), described by name, never a value. A
+// directory that does not exist is not a problem; one that cannot be read is.
+func (s *namedStore) ListReport(scope string) ([]secretInfo, []string) {
+	var unreadable []string
 	seen := map[string][]secretSource{}
 	add := func(name string, src secretSource) {
 		for _, existing := range seen[name] {
@@ -408,6 +419,8 @@ func (s *namedStore) List(scope string) []secretInfo {
 					add(strings.TrimPrefix(k, prefix), secretSourceSession)
 				}
 			}
+		} else if !errors.Is(err, nats.ErrNoKeysFound) {
+			unreadable = append(unreadable, "the session store: "+err.Error())
 		}
 	}
 	// Guarded like the two tiers around it. This block dereferenced s.kind
@@ -419,6 +432,9 @@ func (s *namedStore) List(scope string) []secretInfo {
 		for _, root := range s.kind.readDirs() {
 			entries, err := os.ReadDir(filepath.Join(root, scope))
 			if err != nil {
+				if !errors.Is(err, fs.ErrNotExist) {
+					unreadable = append(unreadable, homeRelative(filepath.Join(root, scope))+": "+errorsUnwrapText(err))
+				}
 				continue
 			}
 			for _, e := range entries {
@@ -443,7 +459,29 @@ func (s *namedStore) List(scope string) []secretInfo {
 	for i, name := range names {
 		out[i] = secretInfo{Name: name, Sources: seen[name]}
 	}
-	return out
+	return out, unreadable
+}
+
+// homeRelative writes a path under the home directory as $HOME/..., so a log
+// line copied into evidence carries no user name.
+func homeRelative(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	if rest, ok := strings.CutPrefix(p, home+string(filepath.Separator)); ok {
+		return "$HOME/" + filepath.ToSlash(rest)
+	}
+	return p
+}
+
+// errorsUnwrapText is a path error's cause alone ("permission denied"), since
+// the caller already names the path.
+func errorsUnwrapText(err error) string {
+	if u := errors.Unwrap(err); u != nil {
+		return u.Error()
+	}
+	return err.Error()
 }
 
 // ---------------------------------------------------------------------------

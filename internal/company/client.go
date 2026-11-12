@@ -199,6 +199,29 @@ func (c *Client) Summary(ctx context.Context, companyID string, months int) (jso
 	return raw, nil
 }
 
+// MovingIn reads the moving-in checklist (0.2.17 B3): {verified, checklist:
+// [{key, done}]}, keys year_end, last_accounts, vat_quarters,
+// opening_balances, bank_csv. Read-only; not_enabled while the bookkeeping
+// assistant is off.
+func (c *Client) MovingIn(ctx context.Context, companyID string) (json.RawMessage, error) {
+	var raw json.RawMessage
+	if err := c.getNamed(ctx, "/api/ai-native-companies/"+url.PathEscape(companyID)+"/accountant/moving-in", "the Books moving-in checklist", &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// OpeningBalances reads the opening balances (0.2.17 B3): {as_of, lines:
+// [{account, debit_pence, credit_pence}], debit_pence, credit_pence,
+// accounts: [{key, label, side}]}; as_of "" and no lines when none are set.
+func (c *Client) OpeningBalances(ctx context.Context, companyID string) (json.RawMessage, error) {
+	var raw json.RawMessage
+	if err := c.getNamed(ctx, "/api/ai-native-companies/"+url.PathEscape(companyID)+"/accountant/opening-balances", "the Books opening balances", &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
 // progressEvent is the provisioning envelope the company GET replays; it is
 // folded into the activity list so the view shows a build in flight.
 type progressEvent struct {

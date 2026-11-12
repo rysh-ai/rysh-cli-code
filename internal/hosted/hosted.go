@@ -54,17 +54,20 @@ var (
 
 // Run is the server's run record (rysh-server hostedrunner.Run).
 type Run struct {
-	ID          string    `json:"id"`
-	WorkspaceID string    `json:"workspace_id"`
-	Name        string    `json:"name"`
-	State       string    `json:"state"`
-	Source      string    `json:"source,omitempty"`
-	Host        string    `json:"host,omitempty"`
-	Port        int       `json:"port,omitempty"`
-	HostKey     string    `json:"host_key,omitempty"`
-	Reason      string    `json:"reason,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	ExpiresAt   time.Time `json:"expires_at"`
+	ID          string `json:"id"`
+	WorkspaceID string `json:"workspace_id"`
+	Name        string `json:"name"`
+	State       string `json:"state"`
+	Source      string `json:"source,omitempty"`
+	Host        string `json:"host,omitempty"`
+	Port        int    `json:"port,omitempty"`
+	HostKey     string `json:"host_key,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	Size        string `json:"size,omitempty"` // small|default|large|xlarge; empty = the classic run
+	// ForkOf is the run this one was forked from (##hosted fork).
+	ForkOf    string    `json:"fork_of,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 // Conn is the server connection, normally read from the `upstream:` block of
@@ -109,6 +112,8 @@ type StartOptions struct {
 	LLMProvider string // anthropic | gemini | openai
 	LLMModel    string
 	LLMKey      string // sent in the request body only
+	// FromSnapshot starts the run from a named snapshot (##hosted up --from).
+	FromSnapshot string
 }
 
 // Client talks to the hosted-runs routes.
@@ -235,6 +240,9 @@ func (c *Client) runPath(id string) (string, error) {
 // Start asks the server for a new run that accepts publicKey.
 func (c *Client) Start(ctx context.Context, o StartOptions, publicKey string) (Run, error) {
 	body := map[string]any{"ssh_public_key": publicKey, "name": o.Name, "prompt": o.Prompt}
+	if o.FromSnapshot != "" {
+		body["from_snapshot"] = o.FromSnapshot
+	}
 	if o.LLMProvider != "" || o.LLMModel != "" || o.LLMKey != "" {
 		body["llm_provider"] = o.LLMProvider
 		body["llm_model"] = o.LLMModel
@@ -350,7 +358,17 @@ func checkRun(r Run) error {
 
 // Save writes the private key, the pinned host key, an ssh_config for
 // `##remote add --ssh-config`, and a run.json without any secret.
-func (s Store) Save(r Run, kp KeyPair) (Paths, error) {
+func (s Store) Save(r Run, kp KeyPair) (Paths, error) { return s.SaveAs(r, kp, SSHUser) }
+
+// sshUserRe is a login name ssh can never read as an option.
+var sshUserRe = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+
+// SaveAs is Save with the sandbox's login user (rysh Sandboxes VMs log in as
+// "user"; the container runner as rysh).
+func (s Store) SaveAs(r Run, kp KeyPair, user string) (Paths, error) {
+	if !sshUserRe.MatchString(user) {
+		return Paths{}, fmt.Errorf("%q is not a login name", user)
+	}
 	if err := checkRun(r); err != nil {
 		return Paths{}, err
 	}
@@ -370,7 +388,7 @@ func (s Store) Save(r Run, kp KeyPair) (Paths, error) {
 	fields := strings.Fields(r.HostKey)
 	known := fmt.Sprintf("[%s]:%d %s %s\n", r.Host, r.Port, fields[0], fields[1])
 	cfg := fmt.Sprintf("Host %s\n    HostName %s\n    Port %d\n    User %s\n    IdentityFile %s\n    IdentitiesOnly yes\n    UserKnownHostsFile %s\n    StrictHostKeyChecking yes\n",
-		Alias(r.ID), r.Host, r.Port, SSHUser, p.Key, p.KnownHosts)
+		Alias(r.ID), r.Host, r.Port, user, p.Key, p.KnownHosts)
 	meta, _ := json.MarshalIndent(r, "", "  ")
 	for _, f := range []struct {
 		path string
@@ -435,4 +453,29 @@ func (s Store) Remove(id string) error {
 		return err
 	}
 	return os.RemoveAll(p.Dir)
+}
+
+// Fork asks the server for n forks of run id, each accepting publicKey. The
+// forks start from the run's current home; the model key is sent fresh (a
+// fork never inherits the parent's) and in the body only.
+func (c *Client) Fork(ctx context.Context, id string, n int, o StartOptions, publicKey string) ([]Run, error) {
+	p, err := c.runPath(id)
+	if err != nil {
+		return nil, err
+	}
+	body := map[string]any{"count": n, "ssh_public_key": publicKey}
+	if o.LLMProvider != "" || o.LLMModel != "" || o.LLMKey != "" {
+		body["llm_provider"] = o.LLMProvider
+		body["llm_model"] = o.LLMModel
+		body["llm_api_key"] = o.LLMKey
+	}
+	var out struct {
+		Runs []Run `json:"runs"`
+	}
+	err = c.do(ctx, http.MethodPost, p+"/fork", body, http.Header{"Idempotency-Key": {idemKey()}}, &out, o.LLMKey)
+	var ae *APIError
+	if errors.As(err, &ae) && ae.Status == http.StatusNotFound {
+		return nil, &APIError{ae.Status, "fork is not enabled on this server, or that run does not exist or was not started by you"}
+	}
+	return out.Runs, err
 }

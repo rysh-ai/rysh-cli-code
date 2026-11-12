@@ -213,8 +213,7 @@ release:
   header: |
     ## Rysh {{ .Tag }}
 
-    Build from source, or `go install github.com/rysh-ai/rysh-cli-code/cmd/rysh@{{ .Tag }}`.
-    See [rysh-cli-parent](https://github.com/rysh-ai/rysh-cli-parent#readme) to get started.
+    Build from source; see [rysh-cli-parent](https://github.com/rysh-ai/rysh-cli-parent#readme) to get started.
   footer: |
     **Full Changelog**: https://github.com/rysh-ai/rysh-cli-code/compare/{{ .PreviousTag }}...{{ .Tag }}
 

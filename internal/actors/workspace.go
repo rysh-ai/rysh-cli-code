@@ -311,6 +311,9 @@ type WorkspaceActor struct {
 	// Governance proxy (design 001) — loopback proxy for wrapped-CLI provider
 	// traffic. Owned directly (HTTP server on its own goroutines); nil when off.
 	proxyServer *proxy.Server
+	// knownSecretsSeeded is set once Started has seeded SecretNAT's known
+	// tier; a proxy started before that holds requests until it is.
+	knownSecretsSeeded bool
 
 	// ledger is the org-wide control-plane client (design 023): usage batches,
 	// leases and central policy. nil unless upstream.governance is on, and every
@@ -550,6 +553,17 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 			w.attachWS()
 		}
 
+		// Governance before any pane exists (security-lead ledger 220): a pane
+		// takes the proxy's base URL into its shell environment only when its
+		// shell spawns, so the proxy must be up before restore/bootstrap spawn
+		// the session's first panes. startGovernance loads exactly what the
+		// proxy needs (the policy, the ledger, the audit plane); the policy
+		// gate and the hooks stay below, after the restore, because they read
+		// tab-scoped secrets.
+		if w.spawnRegistries {
+			w.startGovernance(ctx)
+		}
+
 		bootstrapped := false
 		if !w.restoreFromKV(ctx) {
 			w.bootstrap(ctx)
@@ -565,6 +579,12 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 		// secrets translate to stable ${NAME} tokens from the first prompt.
 		// Runs after restore/bootstrap so tab scopes are enumerable.
 		w.pushKnownSecrets()
+		// The governance proxy (started before the panes) held every request
+		// until this tier was seeded; release it now (security-lead ledger 220).
+		w.knownSecretsSeeded = true
+		if w.proxyServer != nil {
+			w.proxyServer.SecretsSeeded()
+		}
 
 		// Pane-group worktree ownership (design 008): restore which group owns
 		// which rysh-managed worktree, so a group that survives this restart
@@ -699,17 +719,8 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 				w.humanoidRegistryPID = ctx.Spawn(humanoidRegProps)
 			}
 
-			// Policy-as-code (design 013): load .rysh/policy.yaml (merged with
-			// the org policy file when one is configured — strictest wins)
-			// before the usage ledger so budget ceilings seed it race-free.
-			//
-			// Fail-closed: an unparseable rule set must NOT be read as "no
-			// rules" — nor may a configured org policy file that is missing.
-			// Governed execution (LLM prompts, agent/humanoid prompts) is
-			// refused until the files load — see policyBlocked. Shell and
-			// ## commands stay available so the operator can fix the file and
-			// run ##policy reload.
-			w.policy = w.loadPolicy()
+			// The policy itself was loaded by startGovernance, before the
+			// panes; its gate reads tab-scoped secrets, so it is synced here.
 			w.syncPolicyGate()
 			// Hooks after the policy: loadHooks re-installs the approval
 			// policy with the pre-tool hooks composed in.
@@ -725,12 +736,6 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 				}
 				usage.SetOverrides(ov)
 			}
-			// Org-wide control plane (design 023). Inert unless BOTH
-			// upstream.enabled and the explicit upstream.governance opt-in are
-			// set — reporting spend to a server is a data-egress decision, and
-			// the OSS client must stay fully functional standalone.
-			w.startLedgerClient()
-
 			usageProps := actor.PropsFromProducer(func() actor.Actor {
 				ua := NewUsageActor(w.sessionName, w.pub, w.nc)
 				if w.ledger != nil {
@@ -752,21 +757,6 @@ func (w *WorkspaceActor) Receive(ctx actor.Context) {
 				return ua
 			})
 			w.usagePID = ctx.Spawn(usageProps)
-
-			// Proxy audit plane (design 001 §4.5): durable trail of governed
-			// traffic. Spawned unconditionally (independent of whether the proxy
-			// is currently on) so the JetStream stream captures every audit
-			// record and ##proxy audit survives a restart.
-			proxyAuditProps := actor.PropsFromProducer(func() actor.Actor {
-				return NewProxyAuditActor(w.sessionName, w.pub, w.nc)
-			})
-			w.proxyAuditPID = ctx.Spawn(proxyAuditProps)
-
-			// Governance proxy (design 001): start the loopback proxy when
-			// enabled in config OR required by policy (design 013).
-			if w.cfg.Proxy.Enabled || w.policy.ProxyRequired {
-				w.startProxy()
-			}
 
 			// Session replay capture (design 006): record merged pane output
 			// for asciicast export when enabled.

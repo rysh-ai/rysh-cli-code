@@ -19,6 +19,7 @@ package actors
 
 import (
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -106,11 +107,24 @@ func (w *WorkspaceActor) enumerableSecrets() []secretnat.KnownSecret {
 	var known []secretnat.KnownSecret
 	seen := map[string]bool{}
 	for _, scope := range scopes {
-		for _, info := range w.secrets.List(scope) {
+		infos, unreadable := w.secrets.ListReport(scope)
+		// A source or secret that cannot be read is NOT redacted; say so by
+		// name, never a value (security-lead, ledger 220 follow-up).
+		for _, src := range unreadable {
+			slog.Warn("secretnat: a secret source could not be read; the secrets in it are not redacted until it can",
+				"scope", scope, "source", src)
+		}
+		for _, info := range infos {
 			if seen[info.Name] {
 				continue // most-specific scope wins, matching skill resolution
 			}
-			if v, _, ok := w.secrets.Get(scope, info.Name); ok && v != "" {
+			v, _, ok := w.secrets.Get(scope, info.Name)
+			if !ok {
+				slog.Warn("secretnat: a registered secret could not be read; it is not redacted until it can",
+					"scope", scope, "name", info.Name)
+				continue
+			}
+			if v != "" {
 				known = append(known, secretnat.KnownSecret{Name: info.Name, Value: v})
 				seen[info.Name] = true
 			}

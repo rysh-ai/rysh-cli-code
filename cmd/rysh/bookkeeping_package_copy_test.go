@@ -62,6 +62,9 @@ func TestBookkeepingSkillKeepsItsLimits(t *testing.T) {
 		"GOV.UK", "tell the owner what they should claim",
 		// E-136
 		"I can be wrong",
+		// U-27 Q6 R2 (VAT figures, B5): explain a box, never advise
+		"Never tell the owner which VAT treatment, rate, scheme or figure to use",
+		"Books never files a VAT return",
 	} {
 		if !strings.Contains(skill, want) {
 			t.Errorf("SKILL.md lacks %q", want)

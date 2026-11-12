@@ -352,6 +352,8 @@ func init() {
 				"  ##hosted list                 your hosted runs\n",
 				"  ##hosted attach [run-id]      show a running hosted run's tabs here\n",
 				"  ##hosted stop [run-id]        end a run and delete its key from this machine\n",
+				"  ##hosted fork [run-id] [-n N] [--llm …]  start N runs from a running run's current state (only where the server enables it)\n",
+				"  ##hosted snapshot [run-id] --name N  keep a run's files under a name; ##hosted snapshots lists, ##hosted up --from <id> starts from one\n",
 				"  ##hosted status               is the connection and are the model keys in place\n",
 			},
 			statusAware: true,

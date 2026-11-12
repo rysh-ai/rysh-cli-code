@@ -191,3 +191,54 @@ func TestCompanyLedgerLabelsImportedNotesAsUntrusted(t *testing.T) {
 		t.Fatal("totals lost in the rewrite")
 	}
 }
+
+// 0.2.17 B3: company_books_start tells the assistant what moving the books in
+// still needs (the checklist, verified) and the opening balances, in one
+// read-only answer; it takes no arguments and never fetches the snapshot.
+type fakeStartBooks struct {
+	fakeBooks
+	movingIn, opening int
+}
+
+func (f *fakeStartBooks) MovingIn(context.Context) (json.RawMessage, error) {
+	f.movingIn++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return json.RawMessage(`{"verified":true,"checklist":[{"key":"year_end","done":true},{"key":"opening_balances","done":false}]}`), nil
+}
+
+func (f *fakeStartBooks) OpeningBalances(context.Context) (json.RawMessage, error) {
+	f.opening++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return json.RawMessage(`{"as_of":"","lines":[],"debit_pence":0,"credit_pence":0,"accounts":[{"key":"bank","label":"Bank","side":"debit"}]}`), nil
+}
+
+func TestCompanyBooksStart(t *testing.T) {
+	books := &fakeStartBooks{}
+	tools, snaps := booksTools(t, books)
+	text, isErr := tools.call(context.Background(), "company_books_start", nil)
+	if isErr || !strings.Contains(text, `"moving_in"`) || !strings.Contains(text, `"opening_balances"`) ||
+		!strings.Contains(text, `"key": "opening_balances"`) || !strings.Contains(text, `"as_of": ""`) {
+		t.Fatalf("books start: isErr=%v %s", isErr, text)
+	}
+	if books.movingIn != 1 || books.opening != 1 {
+		t.Fatalf("reads moving-in %d, opening %d; want 1 each", books.movingIn, books.opening)
+	}
+	if _, isErr := tools.call(context.Background(), "company_books_start", json.RawMessage(`{"x":1}`)); !isErr {
+		t.Error("an argument was accepted")
+	}
+	if *snaps != 0 {
+		t.Fatal("company_books_start fetched the snapshot")
+	}
+	tools, _ = booksTools(t, &fakeStartBooks{fakeBooks: fakeBooks{err: company.ErrBooksNotEnabled}})
+	if text, isErr := tools.call(context.Background(), "company_books_start", nil); !isErr || !strings.Contains(text, "Bookkeeping assistant") {
+		t.Fatalf("not_enabled: %v %s", isErr, text)
+	}
+	tools, _ = booksTools(t, &fakeBooks{})
+	if _, isErr := tools.call(context.Background(), "company_books_start", nil); !isErr {
+		t.Fatal("a session without the moving-in reads must say so")
+	}
+}

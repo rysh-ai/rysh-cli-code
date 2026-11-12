@@ -187,3 +187,11 @@ func (b clientBooks) Ledger(ctx context.Context, q url.Values) (json.RawMessage,
 func (b clientBooks) Summary(ctx context.Context, months int) (json.RawMessage, error) {
 	return b.client.Summary(ctx, b.companyID, months)
 }
+
+func (b clientBooks) MovingIn(ctx context.Context) (json.RawMessage, error) {
+	return b.client.MovingIn(ctx, b.companyID)
+}
+
+func (b clientBooks) OpeningBalances(ctx context.Context) (json.RawMessage, error) {
+	return b.client.OpeningBalances(ctx, b.companyID)
+}

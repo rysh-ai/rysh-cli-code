@@ -20,6 +20,7 @@ type fakeHostedAPI struct {
 	pubs     []string
 	stopped  []string
 	startErr error
+	runs     []hosted.Run
 }
 
 func (f *fakeHostedAPI) Start(_ context.Context, o hosted.StartOptions, pub string) (hosted.Run, error) {
@@ -30,7 +31,7 @@ func (f *fakeHostedAPI) Start(_ context.Context, o hosted.StartOptions, pub stri
 	f.pubs = append(f.pubs, pub)
 	return hosted.Run{ID: "423b54f6fd36fa94", State: "running", Host: "dev.rysh.ai", Port: 32770, HostKey: hostedTestHostKey, Name: o.Name}, nil
 }
-func (f *fakeHostedAPI) List(context.Context) ([]hosted.Run, error) { return nil, nil }
+func (f *fakeHostedAPI) List(context.Context) ([]hosted.Run, error) { return f.runs, nil }
 func (f *fakeHostedAPI) Get(_ context.Context, id string) (hosted.Run, error) {
 	return hosted.Run{ID: id, State: "running"}, nil
 }

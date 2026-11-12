@@ -311,8 +311,8 @@ github.com/rodaine/protogofakeit v0.1.1 h1:ZKouljuRM3A+TArppfBqnH8tGZHOwM/pjvtXe
 github.com/rodaine/protogofakeit v0.1.1/go.mod h1:pXn/AstBYMaSfc1/RqH3N82pBuxtWgejz1AlYpY1mI0=
 github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0tI/otEQ=
 github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
-github.com/rysh-ai/rysh-cli-shared v0.2.16 h1:q6yiNvXnzBx0nS81XjAsRKbAbpC0eEHZjhk2zM2fAy4=
-github.com/rysh-ai/rysh-cli-shared v0.2.16/go.mod h1:AI6ewH+nWFFZ97UQVmkYiL5nMKA+MlQgJo5LuT9VnjI=
+github.com/rysh-ai/rysh-cli-shared v0.2.17 h1:omqAilaY96RM/j+Czeoo64PiAWzNStJPay7IWJBuDL0=
+github.com/rysh-ai/rysh-cli-shared v0.2.17/go.mod h1:AI6ewH+nWFFZ97UQVmkYiL5nMKA+MlQgJo5LuT9VnjI=
 github.com/shoenig/test v1.7.0 h1:eWcHtTXa6QLnBvm0jgEabMRN/uJ4DMV3M8xUGgRkZmk=
 github.com/shoenig/test v1.7.0/go.mod h1:UxJ6u/x2v/TNs/LoLxBNJRV9DiwBBKYxXSyczsBHFoI=
 github.com/sirupsen/logrus v1.9.3 h1:dueUQJ1C2q9oE3F7wvmSGAaVtTmUizReu6fjN8uqzbQ=

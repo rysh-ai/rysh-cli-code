@@ -12,6 +12,7 @@ package actors
 //	##hosted list | status
 //	##hosted attach [run-id]
 //	##hosted stop [run-id]
+//	##hosted fork [run-id] [-n N] [--llm ...] [--no-attach]   (workspace_hosted_fork.go)
 //
 // Secrets: the workspace key and the model key are used from memory only. They
 // never appear in output, in a file under the run directory, or in an argv. The
@@ -31,7 +32,10 @@ import (
 	"github.com/rysh-ai/rysh-cli-code/internal/hosted"
 )
 
-const hostedUsage = "##hosted [up] [--name N] [--llm anthropic|gemini|openai[/model]] [--prompt TEXT] [--no-attach]"
+const hostedUsage = "##hosted [up] [--name N] [--llm anthropic|gemini|openai[/model]] [--prompt TEXT] [--from SNAPSHOT-ID] [--no-attach]"
+
+// hostedForms are the ##hosted subcommands besides `up`, for the usage text.
+var hostedForms = []string{"##hosted list", "##hosted board", "##hosted attach [run-id]", "##hosted stop [run-id]", "##hosted status", hostedForkUsage, hostedSnapshotUsage}
 
 // hostedKeyNames maps a model provider to the ##secret name that holds its key.
 var hostedKeyNames = map[string]string{
@@ -46,9 +50,14 @@ type hostedAPI interface {
 	List(ctx context.Context) ([]hosted.Run, error)
 	Get(ctx context.Context, id string) (hosted.Run, error)
 	Stop(ctx context.Context, id string) (hosted.Run, error)
+	Fork(ctx context.Context, id string, n int, o hosted.StartOptions, publicKey string) ([]hosted.Run, error)
+	SaveSnapshot(ctx context.Context, runID, name string) (hosted.Snapshot, error)
+	ListSnapshots(ctx context.Context) ([]hosted.Snapshot, error)
+	DeleteSnapshot(ctx context.Context, id string) error
 }
 
 type hostedUpOpts struct {
+	From     string // a named snapshot to start from (##hosted up --from)
 	Name     string
 	Provider string
 	Model    string
@@ -71,7 +80,7 @@ func parseHostedUp(args []string) (hostedUpOpts, error) {
 			o.NoAttach = true
 			args = args[1:]
 			continue
-		case "--name", "--llm", "--prompt":
+		case "--name", "--llm", "--prompt", "--from":
 		default:
 			return o, fmt.Errorf("unknown flag %s; usage: %s", args[0], hostedUsage)
 		}
@@ -87,6 +96,8 @@ func parseHostedUp(args []string) (hostedUpOpts, error) {
 			o.Name = v
 		case "--prompt":
 			o.Prompt = v
+		case "--from":
+			o.From = v
 		case "--llm":
 			prov, model, _ := strings.Cut(v, "/")
 			if _, ok := hostedKeyNames[prov]; !ok {
@@ -112,7 +123,7 @@ func hostedConn(cfg config.Config) (hosted.Conn, error) {
 // keyFor resolves a provider's model key from the secret store; it is called
 // only when a provider was chosen.
 func hostedUp(ctx context.Context, api hostedAPI, st hosted.Store, o hostedUpOpts, keyFor func(family string) string) (hostedUpResult, error) {
-	so := hosted.StartOptions{Name: o.Name, Prompt: o.Prompt}
+	so := hosted.StartOptions{Name: o.Name, Prompt: o.Prompt, FromSnapshot: o.From}
 	if o.Provider != "" {
 		name := hostedKeyNames[o.Provider]
 		if name == "" {
@@ -231,6 +242,9 @@ func (w *WorkspaceActor) handleHostedCommand(out *strings.Builder, args []string
 		o.Row("id      %s", res.Run.ID)
 		o.Row("where   %s:%d (host key pinned in %s)", res.Run.Host, res.Run.Port, res.Paths.KnownHosts)
 		o.Row("ends    %s (##hosted stop %s)", res.Run.ExpiresAt.Format(time.RFC3339), res.Run.ID)
+		if opts.From != "" {
+			o.Row("from    snapshot %s", opts.From)
+		}
 		if opts.Provider == "" {
 			o.Row("model   none: a shell-only run (add --llm anthropic|gemini|openai to bring your own model key)")
 		} else {
@@ -241,6 +255,10 @@ func (w *WorkspaceActor) handleHostedCommand(out *strings.Builder, args []string
 			return nil
 		}
 		return w.remoteAdd(out, res.RemoteAddArgs)
+	case "fork":
+		return w.hostedForkCommand(ctx, out, args)
+	case "snapshot", "snapshots":
+		return w.hostedSnapshotCommand(ctx, out, sub, args)
 	case "attach":
 		api, st, err := w.hostedTools()
 		if err != nil {
@@ -281,8 +299,19 @@ func (w *WorkspaceActor) handleHostedCommand(out *strings.Builder, args []string
 		if err != nil {
 			return err
 		}
+		// A fork's group goes down on the fleet board with its last fork.
+		forkOf := ""
+		runs, _ := api.List(ctx)
+		for _, r := range runs {
+			if r.ID == id {
+				forkOf = r.ForkOf
+			}
+		}
 		if err := hostedStop(ctx, api, st, id); err != nil {
 			return err
+		}
+		if forkOf != "" && liveForksOf(runs, forkOf, id) == 0 {
+			_ = w.setForkGroup(forkOf, false)
 		}
 		if _, ok := w.remoteHosts[hosted.Alias(id)]; ok {
 			_ = w.remoteRemove(out, hosted.Alias(id))
@@ -317,10 +346,33 @@ func (w *WorkspaceActor) handleHostedCommand(out *strings.Builder, args []string
 				where = fmt.Sprintf("%s:%d", r.Host, r.Port)
 			}
 			note := r.Name
+			if r.ForkOf != "" {
+				note += " (fork of " + r.ForkOf + ")"
+			}
 			if r.State == "running" && !saved[r.ID] {
 				note += " (key not on this machine)"
 			}
 			o.Row("%-18s %-9s %-26s %-9v %s", r.ID, r.State, where, att, note)
+		}
+		return nil
+	case "board":
+		api, _, err := w.hostedTools()
+		if err != nil {
+			return err
+		}
+		attached := map[string]bool{}
+		for alias := range w.remoteHosts {
+			if id, ok := strings.CutPrefix(alias, hosted.Alias("")); ok {
+				attached[id] = true
+			}
+		}
+		text, err := hostedBoard(ctx, api, attached, time.Now())
+		if err != nil {
+			return err
+		}
+		o.Header("hosted board")
+		for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+			o.Row("%s", line)
 		}
 		return nil
 	case "status":
@@ -342,8 +394,17 @@ func (w *WorkspaceActor) handleHostedCommand(out *strings.Builder, args []string
 		}
 		return nil
 	}
-	o.Usage(hostedUsage, "##hosted list", "##hosted attach [run-id]", "##hosted stop [run-id]", "##hosted status")
+	o.Usage(append([]string{hostedUsage}, hostedForms...)...)
 	return fmt.Errorf("unknown ##hosted subcommand %q", sub)
+}
+
+// hostedBoard renders the workspace's runs as one board group (C4).
+func hostedBoard(ctx context.Context, api hostedAPI, attached map[string]bool, now time.Time) (string, error) {
+	runs, err := api.List(ctx)
+	if err != nil {
+		return "", err
+	}
+	return hosted.RenderBoard(runs, now, attached), nil
 }
 
 func modelSuffix(m string) string {

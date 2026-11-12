@@ -674,6 +674,10 @@ func streamsSummary(api *ir.API) []string {
 		return []string{fmt.Sprintf("%d subscription %s exposed as streaming sessions over graphql-ws (graphql_subscribe / stream_session): %s",
 			n, plural(n, "field", "fields"), joinCapped(names, 10))}
 	}
+	if api.SourceType == "openapi" {
+		return []string{fmt.Sprintf("%d server-sent event %s generated as %s: %s",
+			n, plural(n, "stream", "streams"), plural(n, "a streaming SDK method", "streaming SDK methods"), joinCapped(names, 10))}
+	}
 	return []string{fmt.Sprintf("%d server-streaming %s exposed as streaming sessions (stream_start / stream_session): %s",
 		n, plural(n, "method", "methods"), joinCapped(names, 10))}
 }
@@ -752,7 +756,16 @@ func ingestSpec(source string, spec []byte) (*ir.API, error) {
 	case forge.SourceGRPC:
 		return ingest.GRPC(spec)
 	default:
-		return ingest.OpenAPI(spec)
+		api, err := ingest.OpenAPI(spec)
+		if err != nil {
+			return nil, err
+		}
+		// Server-sent event operations become streams: the SDKs give them a
+		// streaming method, not a JSON call that never returns.
+		if err := forge.RouteEventStreams(api, spec); err != nil {
+			return nil, err
+		}
+		return api, nil
 	}
 }
 

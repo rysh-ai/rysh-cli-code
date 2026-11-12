@@ -29,6 +29,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -45,33 +46,81 @@ import (
 // agent's, none of it is daemon boot.
 const promptDefaultTimeout = 15 * time.Minute
 
-func runPromptCmd(cfg config.Config, args []string) error {
-	// args[0] == "prompt".
+// promptOptions is one parsed `rysh prompt`.
+type promptOptions struct {
+	Session, PaneID string
+	Timeout         time.Duration
+	JSON, Quiet     bool
+	// Literal: no prefix of the text ("##>") is read as a directive
+	// (MsgPaneExecPrompt.Literal). Needs --pane-id: it rides the pane message.
+	Literal bool
+	Text    string
+}
+
+const promptUsage = "usage: rysh prompt [--session <name>] [--pane-id <id>] [--timeout <dur>] [--json] [--quiet] [--literal] (--stdin | -- '<prompt>')"
+
+// parsePromptArgs parses `rysh prompt`. With --stdin the text is stdin,
+// exactly (the hosted runner sends API text this way, never in an argv).
+func parsePromptArgs(args []string, stdin io.Reader) (promptOptions, error) {
+	o := promptOptions{Timeout: promptDefaultTimeout}
 	rest := args[1:]
-
-	rest, sessName := extractStringFlag(rest, "--session")
-	rest, paneID := extractStringFlag(rest, "--pane-id")
-	rest, timeoutStr := extractStringFlag(rest, "--timeout")
-	rest, asJSON := extractBoolFlag(rest, "--json")
-	rest, quiet := extractBoolFlag(rest, "--quiet")
-
+	var timeoutStr string
+	var fromStdin bool
+	rest, o.Session = extractStringFlag(rest, "--session")
+	rest, o.PaneID = extractStringFlag(rest, "--pane-id")
+	rest, timeoutStr = extractStringFlag(rest, "--timeout")
+	rest, o.JSON = extractBoolFlag(rest, "--json")
+	rest, o.Quiet = extractBoolFlag(rest, "--quiet")
+	rest, o.Literal = extractBoolFlag(rest, "--literal")
+	rest, fromStdin = extractBoolFlag(rest, "--stdin")
 	if i := indexOf(rest, "--"); i >= 0 {
 		rest = rest[i+1:]
 	}
-	text := strings.TrimSpace(strings.Join(rest, " "))
-	if text == "" {
-		return errors.New(progname.Rewrite(
-			"usage: rysh prompt [--session <name>] [--pane-id <id>] [--timeout <dur>] [--json] [--quiet] -- '<prompt>'"))
+	if fromStdin {
+		if len(rest) > 0 {
+			return o, errors.New(progname.Rewrite("--stdin and prompt text are mutually exclusive\n" + promptUsage))
+		}
+		b, err := io.ReadAll(io.LimitReader(stdin, promptMaxStdin+1))
+		if err != nil {
+			return o, fmt.Errorf("read stdin: %w", err)
+		}
+		if len(b) > promptMaxStdin {
+			return o, fmt.Errorf("the prompt on stdin is longer than %d bytes", promptMaxStdin)
+		}
+		o.Text = string(b)
+	} else {
+		o.Text = strings.TrimSpace(strings.Join(rest, " "))
 	}
-
-	timeout := promptDefaultTimeout
+	if strings.TrimSpace(o.Text) == "" {
+		return o, errors.New(progname.Rewrite(promptUsage))
+	}
+	if o.Literal && o.PaneID == "" {
+		return o, errors.New(progname.Rewrite("--literal needs --pane-id\n" + promptUsage))
+	}
 	if timeoutStr != "" {
 		d, err := time.ParseDuration(timeoutStr)
 		if err != nil {
-			return fmt.Errorf("invalid --timeout %q: %w", timeoutStr, err)
+			return o, fmt.Errorf("invalid --timeout %q: %w", timeoutStr, err)
 		}
-		timeout = d
+		o.Timeout = d
 	}
+	return o, nil
+}
+
+// promptMaxStdin caps a prompt read from stdin.
+const promptMaxStdin = 1 << 20
+
+// promptMessage is the pane message for one prompt.
+func promptMessage(text string, literal bool) *msg.MsgPaneExecPrompt {
+	return &msg.MsgPaneExecPrompt{Prompt: text, Literal: literal}
+}
+
+func runPromptCmd(cfg config.Config, args []string) error {
+	o, err := parsePromptArgs(args, os.Stdin)
+	if err != nil {
+		return err
+	}
+	sessName, paneID, text, timeout, asJSON, quiet := o.Session, o.PaneID, o.Text, o.Timeout, o.JSON, o.Quiet
 
 	if sessName == "" {
 		sessName = cfg.SessionName
@@ -81,7 +130,7 @@ func runPromptCmd(cfg config.Config, args []string) error {
 		return err
 	}
 
-	outcome, output := awaitPromptTurn(store, sessName, paneID, text, timeout, quiet)
+	outcome, output := awaitPromptTurn(store, sessName, paneID, text, timeout, quiet, o.Literal)
 
 	if asJSON {
 		fmt.Println(promptResultJSON(outcome, sessName, output))
@@ -100,7 +149,7 @@ func runPromptCmd(cfg config.Config, args []string) error {
 // The ordering is not incidental: a fast turn can reach "done" before a
 // subscription registered afterwards would see anything, and the command would
 // hang until its timeout on work that had already finished.
-func awaitPromptTurn(store *session.Store, sessName, paneID, text string, timeout time.Duration, quiet bool) (runOutcome, string) {
+func awaitPromptTurn(store *session.Store, sessName, paneID, text string, timeout time.Duration, quiet, literal bool) (runOutcome, string) {
 	c, err := cli.Connect(store, sessName)
 	if err != nil {
 		return runOutcome{Status: "error", ExitCode: runExitError, Detail: err.Error()}, ""
@@ -167,7 +216,7 @@ func awaitPromptTurn(store *session.Store, sessName, paneID, text string, timeou
 		return runOutcome{Status: "error", ExitCode: runExitError, Detail: "flush subscriptions: " + err.Error()}, ""
 	}
 
-	if err := submitPrompt(c, paneID, text); err != nil {
+	if err := submitPrompt(c, paneID, text, literal); err != nil {
 		return runOutcome{Status: "error", ExitCode: runExitError, Detail: err.Error()}, ""
 	}
 
@@ -179,9 +228,9 @@ func awaitPromptTurn(store *session.Store, sessName, paneID, text string, timeou
 // forwards to the active pane) when none is named. This mirrors PaneSendInput —
 // the PaneActor only understands the typed exec messages, so a MsgSubmitInput
 // sent straight to a pane inbox would be dropped.
-func submitPrompt(c *cli.Client, paneID, text string) error {
+func submitPrompt(c *cli.Client, paneID, text string, literal bool) error {
 	if paneID != "" {
-		if err := c.SendToSubject(msg.T("pane", paneID, "inbox"), &msg.MsgPaneExecPrompt{Prompt: text}); err != nil {
+		if err := c.SendToSubject(msg.T("pane", paneID, "inbox"), promptMessage(text, literal)); err != nil {
 			return fmt.Errorf("submit prompt to pane %s: %w", paneID, err)
 		}
 		return nil

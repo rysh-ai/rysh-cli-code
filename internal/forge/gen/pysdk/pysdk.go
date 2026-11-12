@@ -100,6 +100,10 @@ func pyClient(api *ir.API) string {
 
 	// Typed @dataclass models for every named component schema.
 	writePyModels(&b, api)
+	streams := sseStreams(api)
+	if len(streams) > 0 {
+		b.WriteString(pyServerSentEvent)
+	}
 
 	b.WriteString("class Client:\n")
 	b.WriteString("    \"\"\"HTTP client for the API.\"\"\"\n\n")
@@ -118,9 +122,21 @@ func pyClient(api *ir.API) string {
 
 	writePyAuth(&b, api)
 	writePyRequest(&b)
+	if len(streams) > 0 {
+		b.WriteString(pyStreamHelper)
+	}
+	for _, op := range api.SortedOperations() {
+		if binaryRequest(api, op) || binaryResponse(api, op) {
+			b.WriteString(pyBinaryHelper)
+			break
+		}
+	}
 
 	for _, op := range api.SortedOperations() {
 		writePyMethod(&b, api, op)
+	}
+	for _, op := range streams {
+		writePyStream(&b, api, op)
 	}
 
 	// Pagination generator methods (one per paginated operation).
@@ -378,21 +394,20 @@ func writePyRequest(b *strings.Builder) {
 	b.WriteString("        return json.loads(raw) if raw else None\n\n")
 }
 
-func writePyMethod(b *strings.Builder, api *ir.API, op ir.Operation) {
-	name := pyMethodName(op.ID)
+// pyArg is one argument of a generated method.
+type pyArg struct {
+	py       string
+	orig     string
+	pytype   string
+	required bool
+	kind     string // path|query|header|body
+}
 
+// pyArgs is op's arguments, required first (stable within their groups):
+// path, query and header parameters, then the body fields.
+func pyArgs(op ir.Operation, bodyFields []pyBodyField) []pyArg {
 	pathParams, queryParams, headerParams := splitParams(op)
-	bodyFields := pyBodyFields(api, op)
-
-	// Signature: required params first, then optional ones with defaults.
-	type arg struct {
-		py       string
-		orig     string
-		pytype   string
-		required bool
-		kind     string // path|query|header|body
-	}
-	var args []arg
+	var args []pyArg
 	seen := map[string]bool{}
 	add := func(orig, pytype string, required bool, kind string) {
 		py := pyParamName(orig)
@@ -400,7 +415,7 @@ func writePyMethod(b *strings.Builder, api *ir.API, op ir.Operation) {
 			py = py + "_" + kind
 		}
 		seen[py] = true
-		args = append(args, arg{py: py, orig: orig, pytype: pytype, required: required, kind: kind})
+		args = append(args, pyArg{py: py, orig: orig, pytype: pytype, required: required, kind: kind})
 	}
 	for _, p := range pathParams {
 		add(p.Name, pyType(p.Schema), true, "path")
@@ -414,9 +429,7 @@ func writePyMethod(b *strings.Builder, api *ir.API, op ir.Operation) {
 	for _, f := range bodyFields {
 		add(f.name, pyType(f.schema), false, "body")
 	}
-
-	// Order: required first (stable within their groups).
-	var required, optional []arg
+	var required, optional []pyArg
 	for _, a := range args {
 		if a.required {
 			required = append(required, a)
@@ -424,9 +437,11 @@ func writePyMethod(b *strings.Builder, api *ir.API, op ir.Operation) {
 			optional = append(optional, a)
 		}
 	}
-	ordered := append(append([]arg{}, required...), optional...)
+	return append(append([]pyArg{}, required...), optional...)
+}
 
-	fmt.Fprintf(b, "    def %s(\n        self,\n", name)
+// writePySignatureArgs writes the argument lines of a def.
+func writePySignatureArgs(b *strings.Builder, ordered []pyArg) {
 	for _, a := range ordered {
 		if a.required {
 			fmt.Fprintf(b, "        %s: %s,\n", a.py, a.pytype)
@@ -434,6 +449,53 @@ func writePyMethod(b *strings.Builder, api *ir.API, op ir.Operation) {
 			fmt.Fprintf(b, "        %s: Optional[%s] = None,\n", a.py, a.pytype)
 		}
 	}
+}
+
+// writePyPathQueryHeaders writes the path, query and headers locals.
+func writePyPathQueryHeaders(b *strings.Builder, op ir.Operation, ordered []pyArg) {
+	fmt.Fprintf(b, "        _path = %s\n", pyStr(op.Path))
+	for _, a := range ordered {
+		if a.kind != "path" {
+			continue
+		}
+		fmt.Fprintf(b, "        _path = _path.replace(%s, urllib.parse.quote(str(%s)))\n",
+			pyStr("{"+a.orig+"}"), a.py)
+	}
+	b.WriteString("        _query: Dict[str, Any] = {}\n")
+	for _, a := range ordered {
+		if a.kind != "query" {
+			continue
+		}
+		fmt.Fprintf(b, "        if %s is not None:\n            _query[%s] = %s\n", a.py, pyStr(a.orig), a.py)
+	}
+	b.WriteString("        _headers: Dict[str, str] = {}\n")
+	for _, a := range ordered {
+		if a.kind != "header" {
+			continue
+		}
+		fmt.Fprintf(b, "        if %s is not None:\n            _headers[%s] = str(%s)\n", a.py, pyStr(a.orig), a.py)
+	}
+}
+
+func writePyMethod(b *strings.Builder, api *ir.API, op ir.Operation) {
+	name := pyMethodName(op.ID)
+	binReq, binResp := binaryRequest(api, op), binaryResponse(api, op)
+	bodyFields := pyBodyFields(api, op)
+	if binReq {
+		bodyFields = nil // the raw body is its own required argument
+	}
+	ordered := pyArgs(op, bodyFields)
+	if binReq {
+		n := 0
+		for n < len(ordered) && ordered[n].required {
+			n++
+		}
+		raw := pyArg{py: "body", orig: "body", pytype: "Union[bytes, str]", required: true, kind: "rawbody"}
+		ordered = append(ordered[:n], append([]pyArg{raw}, ordered[n:]...)...)
+	}
+
+	fmt.Fprintf(b, "    def %s(\n        self,\n", name)
+	writePySignatureArgs(b, ordered)
 	b.WriteString("    ) -> Any:\n")
 
 	if summary := oneLine(firstNonEmpty(op.Summary, op.Description)); summary != "" {
@@ -442,33 +504,7 @@ func writePyMethod(b *strings.Builder, api *ir.API, op ir.Operation) {
 		fmt.Fprintf(b, "        \"\"\"%s %s\"\"\"\n", op.Method, op.Path)
 	}
 
-	// Path.
-	fmt.Fprintf(b, "        path = %s\n", pyStr(op.Path))
-	for _, a := range ordered {
-		if a.kind != "path" {
-			continue
-		}
-		fmt.Fprintf(b, "        path = path.replace(%s, urllib.parse.quote(str(%s)))\n",
-			pyStr("{"+a.orig+"}"), a.py)
-	}
-
-	// Query.
-	b.WriteString("        query: Dict[str, Any] = {}\n")
-	for _, a := range ordered {
-		if a.kind != "query" {
-			continue
-		}
-		fmt.Fprintf(b, "        if %s is not None:\n            query[%s] = %s\n", a.py, pyStr(a.orig), a.py)
-	}
-
-	// Headers.
-	b.WriteString("        headers: Dict[str, str] = {}\n")
-	for _, a := range ordered {
-		if a.kind != "header" {
-			continue
-		}
-		fmt.Fprintf(b, "        if %s is not None:\n            headers[%s] = str(%s)\n", a.py, pyStr(a.orig), a.py)
-	}
+	writePyPathQueryHeaders(b, op, ordered)
 
 	// Body.
 	hasBody := false
@@ -478,7 +514,17 @@ func writePyMethod(b *strings.Builder, api *ir.API, op ir.Operation) {
 			break
 		}
 	}
-	if op.Mutating && hasBody {
+	if binReq || binResp {
+		bodyArg := "None"
+		if binReq {
+			bodyArg = "body"
+		}
+		resp := "False"
+		if binResp {
+			resp = "True"
+		}
+		fmt.Fprintf(b, "        return self._request_binary(%s, _path, _query, _headers, %s, %s)\n\n", pyStr(op.Method), bodyArg, resp)
+	} else if op.Mutating && hasBody {
 		// Use a leading-underscore local so it can never shadow a body field
 		// argument literally named "body" (the wrapped-scalar case).
 		b.WriteString("        _body: Dict[str, Any] = {}\n")
@@ -488,13 +534,165 @@ func writePyMethod(b *strings.Builder, api *ir.API, op ir.Operation) {
 			}
 			fmt.Fprintf(b, "        if %s is not None:\n            _body[%s] = %s\n", a.py, pyStr(a.orig), a.py)
 		}
-		fmt.Fprintf(b, "        return self._request(%s, path, query, headers, _body)\n\n", pyStr(op.Method))
+		fmt.Fprintf(b, "        return self._request(%s, _path, _query, _headers, _body)\n\n", pyStr(op.Method))
 	} else if op.Mutating {
-		fmt.Fprintf(b, "        return self._request(%s, path, query, headers, {})\n\n", pyStr(op.Method))
+		fmt.Fprintf(b, "        return self._request(%s, _path, _query, _headers, {})\n\n", pyStr(op.Method))
 	} else {
-		fmt.Fprintf(b, "        return self._request(%s, path, query, headers)\n\n", pyStr(op.Method))
+		fmt.Fprintf(b, "        return self._request(%s, _path, _query, _headers)\n\n", pyStr(op.Method))
 	}
 }
+
+// sseStreams is the OpenAPI server-sent event operations of api (Forge
+// routes them to api.Streams), sorted by id. gRPC and GraphQL streams are
+// not HTTP event streams and get no method here.
+func sseStreams(api *ir.API) []ir.Operation {
+	if api.SourceType != "openapi" || len(api.Streams) == 0 {
+		return nil
+	}
+	out := append([]ir.Operation(nil), api.Streams...)
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// writePyStream renders one event stream as a generator of ServerSentEvent.
+// timeout is the socket read timeout in seconds (None: wait forever);
+// closing the generator closes the connection.
+func writePyStream(b *strings.Builder, api *ir.API, op ir.Operation) {
+	ordered := pyArgs(op, nil)
+	timeout := "timeout"
+	for _, a := range ordered {
+		if a.py == timeout {
+			timeout = "stream_timeout"
+		}
+	}
+	fmt.Fprintf(b, "    def %s(\n        self,\n", pyMethodName(op.ID))
+	writePySignatureArgs(b, ordered)
+	fmt.Fprintf(b, "        %s: Optional[float] = None,\n", timeout)
+	b.WriteString("    ) -> Iterator[ServerSentEvent]:\n")
+	summary := oneLine(firstNonEmpty(op.Summary, op.Description))
+	if summary == "" {
+		summary = "Event stream"
+	}
+	fmt.Fprintf(b, "        \"\"\"%s (server-sent events)\n\n        %s %s\n        \"\"\"\n", pyDocLine(summary), op.Method, op.Path)
+	writePyPathQueryHeaders(b, op, ordered)
+	fmt.Fprintf(b, "        return self._stream(%s, _path, _query, _headers, %s)\n\n", pyStr(op.Method), timeout)
+}
+
+// isBinarySchema: an octet-stream body (OpenAPI type string, format binary).
+func isBinarySchema(s *ir.Schema) bool {
+	return s != nil && s.Type == "string" && s.Format == "binary"
+}
+
+func binaryRequest(api *ir.API, op ir.Operation) bool {
+	return op.RequestBody != nil && isBinarySchema(api.Resolve(op.RequestBody))
+}
+
+func binaryResponse(api *ir.API, op ir.Operation) bool {
+	for code, s := range op.Responses {
+		if strings.HasPrefix(code, "2") && isBinarySchema(api.Resolve(s)) {
+			return true
+		}
+	}
+	return false
+}
+
+// pyBinaryHelper sends a raw body and/or returns raw bytes (emitted only when
+// an operation needs it).
+const pyBinaryHelper = `    def _request_binary(
+        self,
+        method: str,
+        path: str,
+        query: Dict[str, Any],
+        headers: Dict[str, str],
+        body: Optional[Union[bytes, str]],
+        binary_response: bool,
+    ) -> Any:
+        self._apply_auth(headers, query)
+        url = self.base_url + path
+        filtered = {k: v for k, v in query.items() if v is not None}
+        if filtered:
+            url += "?" + urllib.parse.urlencode({k: str(v) for k, v in filtered.items()})
+        data = None
+        if body is not None:
+            data = body.encode() if isinstance(body, str) else body
+            headers["Content-Type"] = "application/octet-stream"
+        headers["Accept"] = "application/octet-stream" if binary_response else "application/json"
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req) as resp:
+                raw = resp.read()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode(errors="replace")
+            raise RuntimeError(f"{method} {path} -> HTTP {exc.code}: {detail}") from exc
+        if binary_response:
+            return raw
+        text = raw.decode()
+        return json.loads(text) if text else None
+
+`
+
+// pyServerSentEvent is the event type (emitted only with streams).
+const pyServerSentEvent = `@dataclass
+class ServerSentEvent:
+    """One server-sent event: its name ("message" when unnamed), its data
+    (parsed JSON, or the raw text when it is not JSON) and its id."""
+
+    event: str
+    data: Any
+    id: Optional[str] = None
+
+
+`
+
+// pyStreamHelper reads a text/event-stream response line by line (emitted
+// only with streams). Comment lines (heartbeats) and retry fields are skipped.
+const pyStreamHelper = `    def _stream(
+        self,
+        method: str,
+        path: str,
+        query: Dict[str, Any],
+        headers: Dict[str, str],
+        timeout: Optional[float] = None,
+    ) -> Iterator[ServerSentEvent]:
+        self._apply_auth(headers, query)
+        url = self.base_url + path
+        filtered = {k: v for k, v in query.items() if v is not None}
+        if filtered:
+            url += "?" + urllib.parse.urlencode({k: str(v) for k, v in filtered.items()})
+        headers["Accept"] = "text/event-stream"
+        req = urllib.request.Request(url, headers=headers, method=method)
+        try:
+            resp = urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode(errors="replace")
+            raise RuntimeError(f"{method} {path} -> HTTP {exc.code}: {detail}") from exc
+        with resp:
+            event, data, ev_id = "", [], None
+            for raw in resp:
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                if line == "":
+                    if event or data:
+                        text = "\n".join(data)
+                        try:
+                            parsed: Any = json.loads(text)
+                        except ValueError:
+                            parsed = text
+                        yield ServerSentEvent(event or "message", parsed, ev_id)
+                    event, data, ev_id = "", [], None
+                    continue
+                if line.startswith(":"):
+                    continue
+                field, _, value = line.partition(":")
+                if value.startswith(" "):
+                    value = value[1:]
+                if field == "event":
+                    event = value
+                elif field == "data":
+                    data.append(value)
+                elif field == "id":
+                    ev_id = value
+
+`
 
 // pyBodyField is one synthetic request-body field.
 type pyBodyField struct {

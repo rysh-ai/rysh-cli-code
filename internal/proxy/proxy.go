@@ -87,11 +87,14 @@ func (a AuditLine) String() string {
 // (data plane). The mutex guards only the small audit ring buffer — a documented
 // exception to the no-mutex rule, at the HTTP/actor boundary.
 type Server struct {
-	pub          *msg.NATSPublisher
-	snat         *secretnat.Manager // may be nil (no redaction)
-	keys         map[string]string  // dialect → real upstream key; missing ⇒ pass through incoming
-	upstreams    map[string]string
-	auditContent bool
+	pub  *msg.NATSPublisher
+	snat *secretnat.Manager // may be nil (no redaction)
+	// secretsPending holds every request (503) until the workspace has seeded
+	// SecretNAT's known tier (HoldUntilSecretsSeeded / SecretsSeeded).
+	secretsPending atomic.Bool
+	keys           map[string]string // dialect → real upstream key; missing ⇒ pass through incoming
+	upstreams      map[string]string
+	auditContent   bool
 	// auditDir, when auditContent is on, is the directory redacted request
 	// bodies are written to (design 001 §4.5). Empty ⇒ never write bodies even
 	// if auditContent is set, so the feature is inert without an explicit sink.
@@ -165,6 +168,15 @@ func New(pub *msg.NATSPublisher, snat *secretnat.Manager, keys map[string]string
 // Start binds a loopback listener (ephemeral port unless addr specifies one),
 // serves in the background, and publishes the endpoint for pane env injection.
 // Returns the base URL (http://127.0.0.1:PORT).
+// HoldUntilSecretsSeeded makes the proxy refuse every request (503) until
+// SecretsSeeded: the workspace starts the proxy before its panes, but seeds
+// SecretNAT's known tier only after the restore (security-lead ledger 220).
+// Without SecretNAT there is nothing to wait for and nothing is held.
+func (s *Server) HoldUntilSecretsSeeded() { s.secretsPending.Store(true) }
+
+// SecretsSeeded releases HoldUntilSecretsSeeded.
+func (s *Server) SecretsSeeded() { s.secretsPending.Store(false) }
+
 func (s *Server) Start(addr string) (string, error) { return s.start(addr, true) }
 
 // StartPrivate is Start without the process-global publication: the server runs
@@ -403,6 +415,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// inherits another pane's tenant pin (paneid.go).
 	if !s.panes.allows(paneID) {
 		s.writeUnknownPane(w, d, paneID)
+		return
+	}
+
+	// Registered secrets not seeded yet (security-lead ledger 220): the known
+	// tier redacts a registered value whatever its shape, and it is filled
+	// after the session restores its tabs. Until then nothing is forwarded.
+	if s.snat != nil && s.secretsPending.Load() {
+		writeDialectError(w, d, http.StatusServiceUnavailable,
+			"rysh governance proxy: rysh is still loading this session's registered secrets; retry in a moment.")
 		return
 	}
 

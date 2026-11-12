@@ -408,6 +408,20 @@ func run(cfg config.Config, logger *slog.Logger, args []string, configPath strin
 		// exec_cmd.go (design 021 §3.3).
 		return runExecCmd(cfg, args)
 
+	case "sandbox":
+		// rysh sandbox …: rysh Sandboxes from a shell (rr-order-154 C10). exec
+		// exits with the remote command's code. See sandbox_cmd.go.
+		code, serr := runSandboxCmd(cfg, args)
+		if serr != nil {
+			fmt.Fprintf(os.Stderr, progname.Rewrite("rysh: %v\n"), serr)
+		}
+		os.Exit(code)
+		return nil
+	case "steer":
+		// rysh steer --pane-id <id> -- <text>: a message into a running turn
+		// without stopping it (rr-order-154 C6). See steer_cmd.go.
+		return runSteerCmd(cfg, args)
+
 	case "ansa":
 		// rysh ansa send <@name|pane-id> -- <text> — route through the session
 		// router WITHOUT focusing a pane or echoing into one. Deliberately not

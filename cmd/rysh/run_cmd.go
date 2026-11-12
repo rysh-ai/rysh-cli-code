@@ -111,6 +111,11 @@ type runOptions struct {
 	RecordDir string    // --record: save the provider transcript to this dir
 	ReplayDir string    // --replay: serve provider turns from this recorded dir
 	ShareDir  string    // --share: write the shareable run record folder here
+	// --hosted (boat gap #5): run on a rysh.ai hosted runner instead of a
+	// throwaway local daemon (run_hosted.go). Model and Size apply only there.
+	Hosted bool
+	Model  string // --model: a model name from ##llm for --provider
+	Size   string // --size: the runner size; the server offers "default" only today
 }
 
 // runBudget is a spend ceiling: exactly one of Tokens / MicroUSD is set.
@@ -192,7 +197,15 @@ const runUsage = `usage: rysh run [flags] "<prompt>" | <skill.md>
                      record.json, the redacted transcript and an offline
                      index.html viewer (fails the run if it cannot be written)
   --json             print a machine-readable result line to stdout
-  --keep             keep the throwaway session (and worktree) after the run`
+  --keep             keep the throwaway session (and worktree) after the run
+  --hosted           run on a rysh.ai hosted runner (upstream: in
+                     rysh.config.yaml) with --provider anthropic|gemini|openai
+                     and that provider's key from the environment
+                     (ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY);
+                     the run is stopped at exit unless --keep
+  --model <m>        with --hosted: the model (a name from ##llm)
+  --size <s>         with --hosted: the runner size (only "default" today)
+  --                 everything after it is the prompt`
 
 // parseRunArgs parses `rysh run` flags. Pure (no file I/O) so the flag
 // surface is testable without a session; skill-file resolution happens in
@@ -210,6 +223,23 @@ func parseRunArgs(args []string) (runOptions, error) {
 	}
 	for i := 0; i < len(args); i++ {
 		switch a := args[i]; a {
+		case "--":
+			positional = append(positional, args[i+1:]...)
+			i = len(args)
+		case "--hosted":
+			opts.Hosted = true
+		case "--model":
+			v, err := strFlag(a, &i)
+			if err != nil {
+				return opts, err
+			}
+			opts.Model = v
+		case "--size":
+			v, err := strFlag(a, &i)
+			if err != nil {
+				return opts, err
+			}
+			opts.Size = v
 		case "--timeout":
 			v, err := strFlag(a, &i)
 			if err != nil {
@@ -291,6 +321,9 @@ func parseRunArgs(args []string) (runOptions, error) {
 	}
 	if len(positional) == 0 && opts.TaskArg == "" {
 		return opts, errors.New(progname.Rewrite(runUsage))
+	}
+	if err := checkHostedRunFlags(opts); err != nil {
+		return opts, err
 	}
 	if opts.RecordDir != "" && opts.ReplayDir != "" {
 		return opts, errors.New("--record and --replay are mutually exclusive (a replay serves recorded turns; there is nothing new to record)")
@@ -458,6 +491,9 @@ func runRunCmd(cfg config.Config, configPath string, args []string) (int, error)
 	}
 	if opts.SkillPath != "" {
 		fmt.Fprintf(os.Stderr, "[run] skill %s loaded from %s\n", opts.SkillName, opts.SkillPath)
+	}
+	if opts.Hosted {
+		return runHostedRun(cfg, opts)
 	}
 
 	// --provider: export the override and re-derive the config so the

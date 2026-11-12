@@ -227,6 +227,18 @@ func (p *PaneActor) startShell() {
 		return
 	}
 
+	// A governance proxy that is REQUIRED (policy proxy_required, or strict)
+	// but did not start: the shell is not started at all rather than running
+	// outside the proxy (security-lead ledger 220). Say why, and how out.
+	if reason := paneShellBlockedByProxy(); reason != "" {
+		errText := "cannot open a shell: " + reason +
+			"\nFix the cause and restart the session (rysh restart <session>).\n"
+		p.appendOutput(errText)
+		p.appendPrivateBuffer(errText)
+		p.status = "error"
+		return
+	}
+
 	// Initial terminal size (default 80x24, will be updated by TUI resize).
 	p.ptyRows = 24
 	p.ptyCols = 80

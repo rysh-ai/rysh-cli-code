@@ -156,3 +156,49 @@ func TestClientSummary(t *testing.T) {
 		t.Fatalf("request %s months=%s", gotPath, gotMonths)
 	}
 }
+
+// 0.2.17 B3 (accountant's moving-in contract, root macmini
+// out/accountant-moving-in-design.md): the moving-in checklist and the
+// opening balances are two more read routes for the same key, not_enabled
+// while the bookkeeping assistant is off.
+func TestClientMovingInAndOpeningBalances(t *testing.T) {
+	const id = "22222222-2222-2222-2222-222222222222"
+	on := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer rysh_key" || r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if !on {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"not enabled","code":"not_enabled"}`))
+			return
+		}
+		switch r.URL.Path {
+		case "/api/ai-native-companies/" + id + "/accountant/moving-in":
+			_, _ = w.Write([]byte(`{"verified":true,"checklist":[{"key":"year_end","done":true},{"key":"bank_csv","done":false}]}`))
+		case "/api/ai-native-companies/" + id + "/accountant/opening-balances":
+			_, _ = w.Write([]byte(`{"as_of":"2026-04-01","lines":[{"account":"bank","debit_pence":5000,"credit_pence":0}],"debit_pence":5000,"credit_pence":5000,"accounts":[{"key":"bank","label":"Bank","side":"debit"}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"not found"}`))
+		}
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, "rysh_key")
+	mi, err := c.MovingIn(context.Background(), id)
+	if err != nil || !strings.Contains(string(mi), `"bank_csv"`) {
+		t.Fatalf("moving-in: %v %s", err, mi)
+	}
+	ob, err := c.OpeningBalances(context.Background(), id)
+	if err != nil || !strings.Contains(string(ob), `"as_of":"2026-04-01"`) {
+		t.Fatalf("opening balances: %v %s", err, ob)
+	}
+	on = false
+	if _, err := c.MovingIn(context.Background(), id); !errors.Is(err, ErrBooksNotEnabled) {
+		t.Fatalf("moving-in while off: %v, want ErrBooksNotEnabled", err)
+	}
+	if _, err := c.OpeningBalances(context.Background(), id); !errors.Is(err, ErrBooksNotEnabled) {
+		t.Fatalf("opening balances while off: %v, want ErrBooksNotEnabled", err)
+	}
+}

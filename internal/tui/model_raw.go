@@ -592,11 +592,6 @@ func (m *Model) syncRawMode() tea.Cmd {
 		// would own stdin and the follow-up `m` after Ctrl+L could be swallowed
 		// during relay teardown — which is why maximize worked but minimize
 		// failed.
-		singleNonStacked := false
-		if tab := m.activeTab(); tab != nil {
-			flat := tab.FlatPanes()
-			singleNonStacked = len(flat) == 1 && flat[0].StackTotal <= 1
-		}
 
 		// Native (##native) panes never escalate to the full-terminal relay:
 		// the relay owns stdin byte-for-byte, which would bypass the double-Esc
@@ -613,24 +608,8 @@ func (m *Model) syncRawMode() tea.Cmd {
 		// to stdout over the TUI, and the daemon never published relay.exit for
 		// them (rawReadLoop's narrow interactive flag never rose), leaving the
 		// terminal corrupted. Plain commands stay on in-pane VT rendering.
-		if pane.FullScreen && !pane.RemoteInteractive && singleNonStacked && !pane.NativeMode {
-			m.relayPaneID = pane.ID
-			m.fullscreenPaneID = pane.ID
-			paneID := pane.ID
-			nc := m.bus.Conn()
-			pub := m.pub
-			r := NewPTYRelay(nc, pub, paneID)
-			return tea.Exec(r, func(err error) tea.Msg {
-				isEscape := err != nil && err.Error() == ErrRelayEscape.Error()
-				isLayout := err != nil && err.Error() == ErrRelayLayout.Error()
-				isModeSwitch := err != nil && err.Error() == ErrRelayModeSwitch.Error()
-				return relayExitMsg{
-					paneID:     paneID,
-					ctrlO:      isEscape,
-					layout:     isLayout,
-					modeSwitch: isModeSwitch,
-				}
-			})
+		if m.relayEligible(pane) {
+			return m.startRelay(pane.ID)
 		}
 		// Stacked or multi-pane layout: stay in modeRaw for keystroke
 		// forwarding via NATS. The VT screen is rendered within pane bounds
@@ -638,6 +617,12 @@ func (m *Model) syncRawMode() tea.Cmd {
 		// Re-send pane resizes so the PTY gets the raw-mode dimensions
 		// (overhead drops from 4 rows to 1, giving the program more space).
 		m.sendPaneResizes()
+	} else if m.paneShowsLiveApp(pane) && m.mode == modeRaw && m.relayPaneID == "" && m.relayEligible(pane) {
+		// The full-screen signal arrived after the pane went in-pane raw: vim
+		// raises RawMode (a foreground child) a moment before its alt screen,
+		// so the first snapshot rendered it inside the frame. Move it to the
+		// relay now, as if the signal had come first (video story 043).
+		return m.startRelay(pane.ID)
 	} else if !m.paneShowsLiveApp(pane) && m.mode == modeRaw {
 		// The live-app view no longer applies — either the interactive program
 		// exited (RawMode cleared) or the user switched the pane to a non-shell
@@ -648,4 +633,35 @@ func (m *Model) syncRawMode() tea.Cmd {
 		m.sendPaneResizes()
 	}
 	return nil
+}
+
+// relayEligible reports whether pane may take over the whole terminal (the
+// PTYRelay): a genuine full-screen app (alt screen or hidden cursor) in the
+// sole non-stacked pane, not remote, not ##native. See syncRawMode for why
+// each condition holds.
+func (m *Model) relayEligible(pane *domain.PaneSnapshot) bool {
+	singleNonStacked := false
+	if tab := m.activeTab(); tab != nil {
+		flat := tab.FlatPanes()
+		singleNonStacked = len(flat) == 1 && flat[0].StackTotal <= 1
+	}
+	return pane.FullScreen && !pane.RemoteInteractive && singleNonStacked && !pane.NativeMode
+}
+
+// startRelay hands the terminal to paneID's program through the PTYRelay.
+func (m *Model) startRelay(paneID string) tea.Cmd {
+	m.relayPaneID = paneID
+	m.fullscreenPaneID = paneID
+	r := NewPTYRelay(m.bus.Conn(), m.pub, paneID)
+	return tea.Exec(r, func(err error) tea.Msg {
+		isEscape := err != nil && err.Error() == ErrRelayEscape.Error()
+		isLayout := err != nil && err.Error() == ErrRelayLayout.Error()
+		isModeSwitch := err != nil && err.Error() == ErrRelayModeSwitch.Error()
+		return relayExitMsg{
+			paneID:     paneID,
+			ctrlO:      isEscape,
+			layout:     isLayout,
+			modeSwitch: isModeSwitch,
+		}
+	})
 }

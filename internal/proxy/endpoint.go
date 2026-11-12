@@ -42,3 +42,19 @@ func Endpoint() string {
 	}
 	return ""
 }
+
+var requiredDown atomic.Value // string
+
+// SetRequiredDown records why a REQUIRED proxy (policy proxy_required, or
+// strict) is not running, or "" once it runs (security-lead ledger 220). A
+// pane refuses to start its shell while it is set: a required proxy that is
+// down must not leave panes running outside it.
+func SetRequiredDown(reason string) { requiredDown.Store(reason) }
+
+// RequiredDown returns the reason a required proxy is down, or "".
+func RequiredDown() string {
+	if v, ok := requiredDown.Load().(string); ok {
+		return v
+	}
+	return ""
+}

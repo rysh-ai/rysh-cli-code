@@ -81,3 +81,30 @@ func TestNativeFullScreenNeverEscalates(t *testing.T) {
 		t.Errorf("relayPaneID must stay empty for a native pane, got %q", m.relayPaneID)
 	}
 }
+
+// TestLateFullScreenSignalEscalatesToRelay (video story 043, 2026-11-08): vim
+// raises the pane's RawMode (a foreground child) a moment before its
+// alt-screen signal, so the first snapshot puts the TUI in in-pane raw mode
+// with the frame drawn. When the full-screen signal arrives in a later
+// snapshot, the sole non-stacked pane must move to the relay then, not only
+// after the user leaves raw mode (Ctrl+O, q), so the first view matches the
+// design either way.
+func TestLateFullScreenSignalEscalatesToRelay(t *testing.T) {
+	m := escModel(t, domain.PaneSnapshot{ID: "p1", RawMode: true})
+	if cmd := m.syncRawMode(); cmd != nil || m.mode != modeRaw {
+		t.Fatalf("setup: a plain foreground child stays in-pane (cmd %v, mode %v)", cmd != nil, m.mode)
+	}
+	m.snapshot.Tabs[0].Lanes[0].PaneGroups[0].Panes[0].FullScreen = true
+	cmd := m.syncRawMode()
+	if cmd == nil || m.relayPaneID != "p1" {
+		t.Fatalf("a full-screen signal arriving in raw mode must start the relay (cmd %v, relayPaneID %q)", cmd != nil, m.relayPaneID)
+	}
+
+	// A ##native pane still never escalates, early or late.
+	n := escModel(t, domain.PaneSnapshot{ID: "p1", RawMode: true, NativeMode: true})
+	_ = n.syncRawMode()
+	n.snapshot.Tabs[0].Lanes[0].PaneGroups[0].Panes[0].FullScreen = true
+	if cmd := n.syncRawMode(); cmd != nil || n.relayPaneID != "" {
+		t.Fatal("a ##native pane must never start the relay")
+	}
+}

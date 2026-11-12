@@ -107,6 +107,13 @@ func tsClient(api *ir.API) string {
 	for _, op := range api.SortedOperations() {
 		writeTSMethod(&ifaces, &methods, api, op)
 	}
+	streams := sseStreams(api)
+	for _, op := range streams {
+		writeTSStream(&ifaces, &methods, api, op)
+	}
+	if len(streams) > 0 {
+		b.WriteString(tsServerSentEvent)
+	}
 	for _, op := range api.SortedOperations() {
 		if op.Pagination != nil {
 			writeTSPaginator(&methods, api, op)
@@ -131,6 +138,15 @@ func tsClient(api *ir.API) string {
 
 	writeTSAuth(&b, api)
 	writeTSRequest(&b)
+	if len(streams) > 0 {
+		b.WriteString(tsStreamHelper)
+	}
+	for _, op := range api.SortedOperations() {
+		if binaryRequest(api, op) || binaryResponse(api, op) {
+			b.WriteString(tsBinaryHelper)
+			break
+		}
+	}
 
 	b.WriteString(methods.String())
 
@@ -228,11 +244,48 @@ func writeTSRequest(b *strings.Builder) {
 func writeTSMethod(iface, b *strings.Builder, api *ir.API, op ir.Operation) {
 	name := tsMethodName(op.ID)
 	paramsType := tsTypeName(op.ID) + "Params"
-
-	pathParams, queryParams, headerParams := splitParams(op)
+	binReq, binResp := binaryRequest(api, op), binaryResponse(api, op)
 	bodyFields := tsBodyFields(api, op)
+	if binReq {
+		bodyFields = nil // the raw body is its own required field
+	}
+	writeTSParamsInterface(iface, api, op, paramsType, bodyFields, binReq)
 
-	// Params interface (module scope).
+	// Method.
+	if summary := oneLine(firstNonEmpty(op.Summary, op.Description)); summary != "" {
+		fmt.Fprintf(b, "  /** %s (%s %s) */\n", summary, op.Method, op.Path)
+	} else {
+		fmt.Fprintf(b, "  /** %s %s */\n", op.Method, op.Path)
+	}
+	fmt.Fprintf(b, "  async %s(params: %s = {} as %s): Promise<any> {\n", name, paramsType, paramsType)
+	writeTSPathQueryHeaders(b, op)
+
+	// Body.
+	if binReq || binResp {
+		bodyArg := "undefined"
+		if binReq {
+			bodyArg = `params["body"]`
+		}
+		fmt.Fprintf(b, "    return this.requestBinary(%s, path, query, headers, %s, %v);\n", jsonString(op.Method), bodyArg, binResp)
+	} else if op.Mutating && len(bodyFields) > 0 {
+		b.WriteString("    const body: Record<string, unknown> = {};\n")
+		for _, f := range bodyFields {
+			fmt.Fprintf(b, "    if (params[%s] !== undefined) body[%s] = params[%s];\n",
+				jsonString(f.name), jsonString(f.name), jsonString(f.name))
+		}
+		fmt.Fprintf(b, "    return this.request(%s, path, query, headers, body);\n", jsonString(op.Method))
+	} else if op.Mutating {
+		fmt.Fprintf(b, "    return this.request(%s, path, query, headers, {});\n", jsonString(op.Method))
+	} else {
+		fmt.Fprintf(b, "    return this.request(%s, path, query, headers);\n", jsonString(op.Method))
+	}
+	b.WriteString("  }\n\n")
+}
+
+// writeTSParamsInterface writes the module-scope params interface of op:
+// path, query and header parameters, then the request body fields.
+func writeTSParamsInterface(iface *strings.Builder, api *ir.API, op ir.Operation, paramsType string, bodyFields []tsBodyField, rawBody bool) {
+	pathParams, queryParams, headerParams := splitParams(op)
 	fmt.Fprintf(iface, "export interface %s {\n", paramsType)
 	seen := map[string]bool{}
 	emitProp := func(name string, schema *ir.Schema, required bool, desc string) {
@@ -258,52 +311,192 @@ func writeTSMethod(iface, b *strings.Builder, api *ir.API, op ir.Operation) {
 	for _, f := range bodyFields {
 		emitProp(f.name, f.schema, false, f.desc)
 	}
-	iface.WriteString("}\n\n")
-
-	// Method.
-	if summary := oneLine(firstNonEmpty(op.Summary, op.Description)); summary != "" {
-		fmt.Fprintf(b, "  /** %s (%s %s) */\n", summary, op.Method, op.Path)
-	} else {
-		fmt.Fprintf(b, "  /** %s %s */\n", op.Method, op.Path)
+	if rawBody {
+		iface.WriteString("  /** The raw request body (application/octet-stream). */\n")
+		iface.WriteString("  body: Uint8Array | string;\n")
 	}
-	fmt.Fprintf(b, "  async %s(params: %s = {} as %s): Promise<any> {\n", name, paramsType, paramsType)
+	iface.WriteString("}\n\n")
+}
 
-	// Path.
+// writeTSPathQueryHeaders writes the path, query and headers locals of a
+// method body.
+func writeTSPathQueryHeaders(b *strings.Builder, op ir.Operation) {
+	pathParams, queryParams, headerParams := splitParams(op)
 	fmt.Fprintf(b, "    let path = %s;\n", jsonString(op.Path))
 	for _, p := range pathParams {
 		fmt.Fprintf(b, "    path = path.replace(%s, encodeURIComponent(String(params[%s])));\n",
 			jsonString("{"+p.Name+"}"), jsonString(p.Name))
 	}
-
-	// Query.
 	b.WriteString("    const query = new URLSearchParams();\n")
 	for _, p := range queryParams {
 		fmt.Fprintf(b, "    if (params[%s] !== undefined) query.set(%s, String(params[%s]));\n",
 			jsonString(p.Name), jsonString(p.Name), jsonString(p.Name))
 	}
-
-	// Headers.
 	b.WriteString("    const headers: Record<string, string> = {};\n")
 	for _, p := range headerParams {
 		fmt.Fprintf(b, "    if (params[%s] !== undefined) headers[%s] = String(params[%s]);\n",
 			jsonString(p.Name), jsonString(p.Name), jsonString(p.Name))
 	}
+}
 
-	// Body.
-	if op.Mutating && len(bodyFields) > 0 {
-		b.WriteString("    const body: Record<string, unknown> = {};\n")
-		for _, f := range bodyFields {
-			fmt.Fprintf(b, "    if (params[%s] !== undefined) body[%s] = params[%s];\n",
-				jsonString(f.name), jsonString(f.name), jsonString(f.name))
-		}
-		fmt.Fprintf(b, "    return this.request(%s, path, query, headers, body);\n", jsonString(op.Method))
-	} else if op.Mutating {
-		fmt.Fprintf(b, "    return this.request(%s, path, query, headers, {});\n", jsonString(op.Method))
-	} else {
-		fmt.Fprintf(b, "    return this.request(%s, path, query, headers);\n", jsonString(op.Method))
+// sseStreams is the OpenAPI server-sent event operations of api (Forge
+// routes them to api.Streams), sorted by id. gRPC and GraphQL streams are
+// not HTTP event streams and get no method here.
+func sseStreams(api *ir.API) []ir.Operation {
+	if api.SourceType != "openapi" || len(api.Streams) == 0 {
+		return nil
 	}
+	out := append([]ir.Operation(nil), api.Streams...)
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// writeTSStream renders one event stream as an async generator of
+// ServerSentEvent. Pass { signal } to stop it; breaking out of the loop
+// also closes the connection.
+func writeTSStream(iface, b *strings.Builder, api *ir.API, op ir.Operation) {
+	name := tsMethodName(op.ID)
+	paramsType := tsTypeName(op.ID) + "Params"
+	writeTSParamsInterface(iface, api, op, paramsType, nil, false)
+	summary := oneLine(firstNonEmpty(op.Summary, op.Description))
+	if summary == "" {
+		summary = "Event stream"
+	}
+	fmt.Fprintf(b, "  /** %s (%s %s, server-sent events) */\n", summary, op.Method, op.Path)
+	fmt.Fprintf(b, "  async *%s(params: %s = {} as %s, opts: { signal?: AbortSignal } = {}): AsyncGenerator<ServerSentEvent> {\n", name, paramsType, paramsType)
+	writeTSPathQueryHeaders(b, op)
+	fmt.Fprintf(b, "    yield* this.stream(%s, path, query, headers, opts.signal);\n", jsonString(op.Method))
 	b.WriteString("  }\n\n")
 }
+
+// isBinarySchema: an octet-stream body (OpenAPI type string, format binary).
+func isBinarySchema(s *ir.Schema) bool {
+	return s != nil && s.Type == "string" && s.Format == "binary"
+}
+
+// binaryRequest: op's request body is raw bytes.
+func binaryRequest(api *ir.API, op ir.Operation) bool {
+	return op.RequestBody != nil && isBinarySchema(api.Resolve(op.RequestBody))
+}
+
+// binaryResponse: op's success response is raw bytes.
+func binaryResponse(api *ir.API, op ir.Operation) bool {
+	for code, s := range op.Responses {
+		if strings.HasPrefix(code, "2") && isBinarySchema(api.Resolve(s)) {
+			return true
+		}
+	}
+	return false
+}
+
+// tsBinaryHelper sends a raw body and/or returns raw bytes (emitted only when
+// an operation needs it).
+const tsBinaryHelper = `  private async requestBinary(
+    method: string,
+    path: string,
+    query: URLSearchParams,
+    headers: Record<string, string>,
+    body: Uint8Array | string | undefined,
+    binaryResponse: boolean,
+  ): Promise<any> {
+    this.applyAuth(headers, query);
+    const qs = query.toString();
+    const url = this.baseUrl + path + (qs ? ` + "`?${qs}`" + ` : "");
+    headers["Accept"] = binaryResponse ? "application/octet-stream" : "application/json";
+    const init: RequestInit = { method, headers };
+    if (body !== undefined) {
+      headers["Content-Type"] = "application/octet-stream";
+      init.body = typeof body === "string" ? new TextEncoder().encode(body) : body;
+    }
+    const resp = await this.fetchImpl(url, init);
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(` + "`${method} ${path} -> HTTP ${resp.status}: ${text}`" + `);
+    }
+    if (binaryResponse) return new Uint8Array(await resp.arrayBuffer());
+    const text = await resp.text();
+    return text ? JSON.parse(text) : null;
+  }
+
+`
+
+// tsServerSentEvent is the module-scope event type (emitted only with streams).
+const tsServerSentEvent = `/** One server-sent event: its name ("message" when unnamed), its data
+ * (parsed JSON, or the raw text when it is not JSON) and its id. */
+export interface ServerSentEvent {
+  event: string;
+  data: any;
+  id?: string;
+}
+
+`
+
+// tsStreamHelper reads a text/event-stream response (emitted only with
+// streams). Comment lines (heartbeats) and retry fields are skipped.
+const tsStreamHelper = `  private async *stream(
+    method: string,
+    path: string,
+    query: URLSearchParams,
+    headers: Record<string, string>,
+    signal?: AbortSignal,
+  ): AsyncGenerator<ServerSentEvent> {
+    this.applyAuth(headers, query);
+    const qs = query.toString();
+    const url = this.baseUrl + path + (qs ? ` + "`?${qs}`" + ` : "");
+    headers["Accept"] = "text/event-stream";
+    const resp = await this.fetchImpl(url, { method, headers, signal });
+    if (!resp.ok || !resp.body) {
+      const text = await resp.text();
+      throw new Error(` + "`${method} ${path} -> HTTP ${resp.status}: ${text}`" + `);
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let event = "";
+    let data: string[] = [];
+    let id: string | undefined;
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        buf += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          let line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          if (line.endsWith("\r")) line = line.slice(0, -1);
+          if (line === "") {
+            if (event !== "" || data.length > 0) {
+              const raw = data.join("\n");
+              let parsed: any = raw;
+              try {
+                parsed = JSON.parse(raw);
+              } catch {
+                // not JSON: keep the text
+              }
+              yield { event: event || "message", data: parsed, id };
+            }
+            event = "";
+            data = [];
+            id = undefined;
+            continue;
+          }
+          if (line.startsWith(":")) continue;
+          const i = line.indexOf(":");
+          const field = i < 0 ? line : line.slice(0, i);
+          let v = i < 0 ? "" : line.slice(i + 1);
+          if (v.startsWith(" ")) v = v.slice(1);
+          if (field === "event") event = v;
+          else if (field === "data") data.push(v);
+          else if (field === "id") id = v;
+        }
+      }
+    } finally {
+      reader.cancel().catch(() => {});
+    }
+  }
+
+`
 
 // writeTSModels emits an exported interface (object schemas) or type alias
 // (everything else) for each named component schema, in sorted order. $ref

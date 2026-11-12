@@ -117,6 +117,11 @@ var companyToolSpecs = []companyToolSpec{
 		Description: "Monthly totals of the owner's bookkeeping ledger for the last N calendar months (UTC), oldest first: in_pence, out_pence and net_pence per month (every month listed, empty ones as 0) and totals by category. Read-only. Optional months (1-24, default 12).",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"months":{"type":"integer","minimum":1,"maximum":24,"description":"how many calendar months, ending with this one (default 12)"}},"additionalProperties":false}`),
 	},
+	{
+		Name:        "company_books_start",
+		Description: "What moving the company's books into rysh still needs: moving_in (verified, and the checklist year_end, last_accounts, vat_quarters, opening_balances, bank_csv, each done or not) and opening_balances (as_of, lines per account with debit_pence and credit_pence, the totals, and the chart of accounts). Read-only; the owner enters and changes these on rysh.ai, after verifying the company.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
+	},
 }
 
 // companyBooks reads the accountant routes for the bound company (AC4).
@@ -191,6 +196,12 @@ func ledgerQuery(args json.RawMessage) (url.Values, error) {
 	return q, nil
 }
 
+// companyBooksStart is the optional moving-in read (0.2.17 B3).
+type companyBooksStart interface {
+	MovingIn(ctx context.Context) (json.RawMessage, error)
+	OpeningBalances(ctx context.Context) (json.RawMessage, error)
+}
+
 // companyBooksSummary is the optional monthly-summary read (AC7).
 type companyBooksSummary interface {
 	Summary(ctx context.Context, months int) (json.RawMessage, error)
@@ -247,6 +258,34 @@ func labelImportedNotes(raw json.RawMessage) (json.RawMessage, error) {
 	return json.Marshal(page)
 }
 
+// booksStart joins the two moving-in reads into one answer.
+func booksStart(ctx context.Context, sb companyBooksStart) (json.RawMessage, error) {
+	mi, err := sb.MovingIn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ob, err := sb.OpeningBalances(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(map[string]json.RawMessage{"moving_in": mi, "opening_balances": ob})
+}
+
+// noArguments refuses any argument for a tool that takes none.
+func noArguments(args json.RawMessage) error {
+	if len(bytes.TrimSpace(args)) == 0 {
+		return nil
+	}
+	var in map[string]json.RawMessage
+	if err := json.Unmarshal(args, &in); err != nil {
+		return err
+	}
+	for k := range in {
+		return fmt.Errorf("unknown argument %q", k)
+	}
+	return nil
+}
+
 // callBooks runs company_deadlines / company_ledger / company_ledger_summary. They read the server on
 // every call (no snapshot) and pass its JSON through.
 func (t *companyTools) callBooks(ctx context.Context, name string, args json.RawMessage) (string, bool) {
@@ -257,6 +296,15 @@ func (t *companyTools) callBooks(ctx context.Context, name string, args json.Raw
 	var err error
 	if name == "company_deadlines" {
 		raw, err = t.books.Deadlines(ctx)
+	} else if name == "company_books_start" {
+		sb, ok := t.books.(companyBooksStart)
+		if !ok {
+			return "the moving-in reads are not available in this session", true
+		}
+		if aerr := noArguments(args); aerr != nil {
+			return "invalid arguments: " + aerr.Error(), true
+		}
+		raw, err = booksStart(ctx, sb)
 	} else if name == "company_ledger_summary" {
 		sb, ok := t.books.(companyBooksSummary)
 		if !ok {
@@ -294,7 +342,7 @@ func (t *companyTools) callBooks(ctx context.Context, name string, args json.Raw
 // call runs one tool. The text is JSON; isErr marks a failure the model should
 // read as such (the server unreachable, the key revoked, an unknown tool).
 func (t *companyTools) call(ctx context.Context, name string, args json.RawMessage) (text string, isErr bool) {
-	if name == "company_deadlines" || name == "company_ledger" || name == "company_ledger_summary" {
+	if name == "company_deadlines" || name == "company_ledger" || name == "company_ledger_summary" || name == "company_books_start" {
 		return t.callBooks(ctx, name, args)
 	}
 	var in struct {

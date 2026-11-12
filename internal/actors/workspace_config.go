@@ -205,7 +205,7 @@ func (w *WorkspaceActor) registerCompanyTools(paneID, cfgFile string) string {
 		_ = w.agSetup.MCP.RemoveServer(add[1])
 		w.handleMCPSubcommand(&sink, paneID, add)
 	}
-	return "company_status, company_orders, company_enquiries, company_activity, company_services, company_deadlines, company_ledger, company_ledger_summary (MCP server \"company\"); " +
+	return "company_status, company_orders, company_enquiries, company_activity, company_services, company_deadlines, company_ledger, company_ledger_summary, company_books_start (MCP server \"company\"); " +
 		"company_enquiry_update, company_order_status (MCP server \"" + companyWriteMCPServerName + "\", every call approved; each needs the owner's tick), connecting…"
 }
 

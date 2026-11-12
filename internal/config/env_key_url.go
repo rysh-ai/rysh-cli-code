@@ -46,3 +46,16 @@ func apiEnvKeyAllowed(cfg Config) bool {
 	provider, apiURL := effectiveProvider(cfg)
 	return providerKeyFamilyOf(provider).envAllowed(apiURL)
 }
+
+// EnvSecretMayGoTo reports whether a secret read from the ENVIRONMENT (a
+// model key for `rysh run --hosted`, rr-order-150) may be sent to serverURL:
+// only a first-party upstream, or the server RYSH_UPSTREAM_URL names. A
+// server chosen by a config file (a cloned repo's rysh.config.yaml) never
+// gets it: the R3 / ledger-167 rule.
+func EnvSecretMayGoTo(serverURL string) bool {
+	if isFirstPartyUpstream(serverURL) {
+		return true
+	}
+	envURL := env("RYSH_UPSTREAM_URL")
+	return envURL != "" && sameURL(serverURL, envURL)
+}

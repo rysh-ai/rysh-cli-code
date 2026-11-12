@@ -1,0 +1,8 @@
+name: "@rysh/use-rysh"
+version: "0.1.0"
+type: agent
+description: "Teaches a coding agent to drive rysh: sandboxed agent panes, the fleet board, and leaving approvals to a person"
+entry: SKILL.md
+min_rysh: "0.2.15"
+declares_tools:
+  - bash
